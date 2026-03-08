@@ -1,711 +1,1213 @@
-# linehash Rust Implementation Plan
+# scope - Detailed Plan
 
-## Goal
+## 1. Overview
 
-Build a small, dependable Rust CLI that lets an agent read a text file with short per-line hashes and then edit, insert, or delete lines by hash anchor instead of reproducing exact old text.
+### Product statement
 
-The first release should optimize for:
+`scope` is a local static-analysis engine and CLI for coding agents and developers. It indexes a repository once, persists a dependency graph locally, and answers file, symbol, and change-impact questions in milliseconds.
 
-- **safety**: reject stale or ambiguous edits instead of guessing
-- **predictability**: simple, explicit CLI behavior
-- **low integration friction**: easy for Claude Code to adopt
-- **small surface area**: no parser, no AST, no daemon, no persistent service
+### Core promise
 
----
+Before editing a file or function, a user or agent can ask:
 
-## V1 scope
+- What does this file import?
+- Who imports this file?
+- What symbols does this file expose?
+- Which symbols are public vs internal?
+- Who calls this function?
+- If I rename, delete, or change this, what else is likely affected?
 
-### Must ship
+### Positioning
 
-- `linehash read <file>`
-- `linehash index <file>`
-- `linehash edit <file> <anchor> <new_content>`
-- `linehash edit <file> <start>..<end> <new_content>`
-- `linehash insert <file> <anchor> <new_content>`
-- `linehash delete <file> <anchor>`
-- pretty output and `--json`
-- atomic writes
-- clear ambiguity and stale-read errors
-- tests for core resolution and file rewrite behavior
+`scope` does **not** try to predict exact runtime behavior. It provides a **static blast-radius analysis** with structured results, clear limitations, and confidence levels.
 
-### Explicitly out of scope for v1
+### Why this matters
 
-- `diff`
-- `undo`
-- multi-line block insert/replacement
-- persistent read snapshots
-- move-tolerant anchor recovery
-- non-UTF-8 support
-- editor plugins
+Without an index, coding agents answer dependency questions by opening file after file, following import chains manually, and spending context budget before any real work begins. `scope` replaces those repeated file reads with near-zero-token structured graph queries.
 
 ---
 
-## Recommended spec decisions
+## 2. Goals
 
-These decisions should be frozen before much code is written.
+### Primary goals
 
-### 1) Hash the raw line bytes, excluding only the newline terminator
+1. Build a local index of repository dependencies and symbols.
+2. Answer dependency and impact queries instantly from SQLite.
+3. Produce structured JSON designed for LLM/tool consumption.
+4. Work fully offline with no LLM or API calls.
+5. Be fast enough to run as a normal part of an edit loop.
 
-**Recommendation:** hash the exact line content as stored in the file, excluding `\n` or `\r\n`.
+### Success criteria
 
-Example:
+`scope` is successful when:
 
-- file bytes: `"  return decoded\n"`
-- hashed content: `"  return decoded"`
+- A developer can answer common dependency questions without opening multiple files.
+- A coding agent can ask `scope` for impact data instead of reading 5–20 files.
+- Query latency feels instant in normal use.
+- Results are trustworthy because they include reason trails and confidence labels.
 
-Do **not** trim leading or trailing whitespace in v1.
+### Non-goals for v1
 
-**Why:** trimming weakens stale-read detection for whitespace-only edits, which is especially risky in indentation-sensitive formats like Python and YAML.
-
-### 2) Preserve file formatting exactly where possible
-
-For each file read:
-
-- detect newline style: LF or CRLF
-- detect whether the file ends with a trailing newline
-- preserve both when writing back
-
-If the file mixes newline styles, treat that as an error in v1 unless you intentionally choose a normalization rule.
-
-**Recommendation:** fail on mixed newline styles in v1 with a helpful message.
-
-### 3) UTF-8 only in v1
-
-Read the file as UTF-8 text.
-
-- valid UTF-8: supported
-- invalid UTF-8: return a clear error
-
-This keeps the implementation small and predictable. If you later need arbitrary bytes, redesign around `bstr` or byte slices.
-
-### 4) Canonical anchor display is `line:hash`
-
-Display anchors in pretty output as:
-
-```text
-2:f1|   const decoded = jwt.verify(token, SECRET)
-```
-
-Accepted input forms:
-
-- `f1` → unqualified short hash
-- `2:f1` → line-qualified short hash
-- `2:f1..4:9c` → inclusive range
-
-### 5) Safety-first anchor resolution in v1
-
-#### Unqualified anchor: `f1`
-
-- 0 matches → `hash not found`
-- 1 match → resolve to that line
-- 2+ matches → `ambiguous hash`, show candidate lines
-
-#### Qualified anchor: `2:f1`
-
-- if line 2 currently has hash `f1` → resolve
-- if line 2 does not have hash `f1`, return a **stale anchor** error
-- if `f1` also exists elsewhere, include that in the error message, but do not silently retarget
-
-This is intentionally conservative. It rejects moved lines instead of guessing.
-
-### 6) Single logical line content only in v1
-
-`edit` and `insert` should reject `new_content` containing `\n` or `\r`.
-
-That means:
-
-- single-line replacement is supported
-- range replacement with exactly one line is supported
-- multi-line insert/replacement is deferred
-
-### 7) Read-whole-file approach is acceptable
-
-For v1, read the entire file into memory, transform it, and write it back atomically.
-
-That is fine for normal source files and keeps the code simple.
+- Exact runtime breakage prediction.
+- Deep type-system semantic analysis across every language feature.
+- Perfect resolution of reflection, dynamic imports, macros, or generated code.
+- External package internals.
+- Cross-repo analysis.
+- IDE-grade refactoring or code edits.
 
 ---
 
-## CLI contract
+## 3. Users and jobs-to-be-done
 
-### Pretty output
+### Primary users
+
+- Coding agents such as Claude Code.
+- Developers working in medium and large monorepos.
+- Teams that need quick impact analysis before edits.
+
+### Jobs to be done
+
+1. **Pre-edit understanding**
+   - “What is this file connected to?”
+   - “Is this symbol public?”
+
+2. **Change planning**
+   - “If I rename this function, what needs to change?”
+   - “If I delete this file, what depends on it?”
+
+3. **Refactor safety**
+   - “What is the static blast radius of this signature change?”
+   - “Which callers are most likely affected?”
+
+4. **Agent efficiency**
+   - Replace many file reads with one graph query.
+
+---
+
+## 4. Product boundaries and assumptions
+
+### Key assumption
+
+The highest-value output is not “the exact truth of runtime behavior”; it is “the best static graph-based answer with confidence and evidence.”
+
+### Product principle
+
+Every query should prefer:
+
+- explicit graph evidence,
+- transparent limitations,
+- machine-readable output,
+- stable CLI behavior.
+
+### Accuracy model
+
+`scope` should surface certainty for every edge and impacted node.
+
+Supported certainty levels:
+
+- `exact` - directly known from syntax or deterministic resolution.
+- `resolved` - strongly resolved within repo context.
+- `heuristic` - inferred but not fully guaranteed.
+- `dynamic` - known blind spot or unresolved dynamic behavior.
+
+---
+
+## 5. Supported concepts
+
+### Entities
+
+- **File**: a source file inside the repository.
+- **Symbol**: a function, method, class, type, module, or exported constant.
+- **Import edge**: file A depends on file B.
+- **Call edge**: symbol A calls symbol B.
+- **Export**: symbol is part of the file/module public surface.
+- **Visibility**: local/module/package/public/unknown.
+- **Impact set**: nodes likely affected by a change.
+
+### Query targets
+
+v1 query targets should support:
+
+- file path
+- qualified symbol name
+
+Examples:
 
 ```bash
-linehash read src/auth.js
-1:a3| function verifyToken(token) {
-2:f1|   const decoded = jwt.verify(token, SECRET)
-3:0e|   if (!decoded.exp) throw new TokenError('missing expiry')
-4:9c|   return decoded
-5:b2| }
+scope deps src/parser/mod.rs
+scope calls crate::resolver::resolve_symbol
+scope impact crate::resolver::resolve_symbol --change-type signature
 ```
 
-### JSON output
+---
 
-Recommended schema:
+## 6. MVP definition
+
+### Must-have in MVP
+
+1. Repository walk respecting `.gitignore`.
+2. SQLite-backed persistent index.
+3. File-to-file dependency graph.
+4. Reverse dependency queries.
+5. Top-level symbol extraction.
+6. Visibility/public surface classification.
+7. Direct in-repo call graph for resolvable calls.
+8. Impact analysis based on file or symbol and change type.
+9. JSON output for agents and readable output for humans.
+10. Incremental re-indexing for changed files.
+
+### Should-have for MVP
+
+- transitive dependency traversal
+- reason trails in impact output
+- content hashing to skip unchanged files
+- fixture-based tests
+- benchmark command
+
+### Nice-to-have after MVP
+
+- watch mode
+- MCP server wrapper
+- graph export to DOT/Graphviz
+- IDE integration
+- framework-specific analyzers
+- language-server style daemon
+
+---
+
+## 7. Language strategy
+
+### Recommendation
+
+Start with **one language family only**.
+
+Preferred rollout strategy:
+
+1. Rust first if the initial product and users are Rust-heavy.
+2. TypeScript/JavaScript second.
+3. Additional languages only after the core model stabilizes.
+
+### Why
+
+A broad “any language” claim will create quality problems early. The core engine should be language-agnostic, but language-specific extraction must be adapter-based and introduced gradually.
+
+### Adapter principle
+
+Each language adapter normalizes syntax into a shared intermediate model.
+
+Normalized fields must include:
+
+- imports
+- exports
+- symbol definitions
+- symbol kind
+- visibility
+- call sites
+- source spans
+- certainty
+
+---
+
+## 8. User experience and CLI contract
+
+### CLI principles
+
+- predictable commands
+- stable JSON
+- concise human-readable output
+- explicit flags for transitive depth and change type
+
+### Proposed commands
+
+```bash
+scope index
+scope index --watch
+scope deps <file>
+scope deps <file> --reverse
+scope deps <file> --transitive
+scope symbols <file>
+scope calls <symbol>
+scope callers <symbol>
+scope impact <target> --change-type <type>
+scope explain <target>
+scope doctor
+scope benchmark
+```
+
+### Important flags
+
+```bash
+--json
+--depth <n>
+--transitive
+--change-type <body|signature|rename|delete|visibility|side-effect>
+--language <rust|ts|js>
+--repo-root <path>
+--db <path>
+```
+
+### Human-readable output examples
+
+```bash
+$ scope deps src/resolver.rs --reverse
+Imported by:
+- src/cli.rs
+- src/index/mod.rs
+- src/impact.rs
+```
+
+```bash
+$ scope impact crate::resolver::resolve_symbol --change-type signature
+Affected (high confidence):
+- crate::impact::compute_impact   reason: calls target directly
+- crate::cli::run_query           reason: calls impacted function
+
+Affected (uncertain):
+- crate::mcp::handle_request      reason: dynamic dispatch path includes target module
+```
+
+---
+
+## 9. JSON contract
+
+### Design principles
+
+- compact enough for LLM/tool consumption
+- stable across versions
+- includes explanation fields
+- includes certainty and traversal distance
+
+### Example: `deps --json`
 
 ```json
 {
-  "file": "src/auth.js",
-  "newline": "lf",
-  "trailing_newline": true,
-  "lines": [
-    { "n": 1, "hash": "a3", "content": "function verifyToken(token) {" },
-    { "n": 2, "hash": "f1", "content": "  const decoded = jwt.verify(token, SECRET)" }
+  "target": "src/resolver.rs",
+  "target_kind": "file",
+  "dependencies": [
+    {
+      "kind": "file",
+      "path": "src/parser.rs",
+      "edge_kind": "import",
+      "certainty": "exact"
+    }
   ]
 }
 ```
 
-### Recommended error messages
+### Example: `symbols --json`
 
-```text
-Error: hash 'xx' not found in src/auth.js
-Hint: run `linehash read src/auth.js` to get current hashes
+```json
+{
+  "file": "src/resolver.rs",
+  "symbols": [
+    {
+      "qualname": "crate::resolver::resolve_symbol",
+      "name": "resolve_symbol",
+      "kind": "function",
+      "visibility": "public",
+      "exported": true,
+      "span": {
+        "start": 120,
+        "end": 240
+      }
+    }
+  ]
+}
 ```
 
-```text
-Error: hash 'f1' matches 3 lines (lines 2, 14, 67)
-Use line-qualified hash: 2:f1, 14:f1, or 67:f1
+### Example: `impact --json`
+
+```json
+{
+  "target": "crate::resolver::resolve_symbol",
+  "target_kind": "function",
+  "change_type": "signature",
+  "affected": [
+    {
+      "kind": "function",
+      "name": "crate::impact::compute_impact",
+      "file": "src/impact.rs",
+      "reason": "calls crate::resolver::resolve_symbol",
+      "distance": 1,
+      "certainty": "resolved"
+    },
+    {
+      "kind": "function",
+      "name": "crate::cli::run_query",
+      "file": "src/cli.rs",
+      "reason": "calls impacted function transitively",
+      "distance": 2,
+      "certainty": "resolved"
+    }
+  ],
+  "summary": {
+    "high_confidence": 2,
+    "uncertain": 0
+  }
+}
 ```
 
-```text
-Error: line 2 content changed since last read (expected hash f1, got 3a)
-Hint: re-read the file with `linehash read src/auth.js`
+### Versioning
+
+All JSON responses should include a schema version in v1.
+
+Example:
+
+```json
+{
+  "schema_version": 1
+}
 ```
 
 ---
 
-## Rust crate choices
+## 10. Change-impact model
 
-### Runtime dependencies
+### Why change type matters
 
-- `clap` with `derive` → CLI parsing
-- `xxhash-rust` → xxh32 hashing
-- `serde` with `derive` → JSON serialization
-- `serde_json` → `--json` output
-- `thiserror` → domain errors
-- `tempfile` → atomic file rewrite in same directory
-- `anyhow` → thin top-level error handling in `main`
+Impact is only meaningful if the tool knows **what kind of change** is being made. A function body change has a different blast radius from a rename or signature change.
 
-### Dev dependencies
+### Supported change types
 
-- `assert_cmd` → CLI integration tests
-- `predicates` → output assertions
-- `insta` → snapshot tests for `read` and `index`
-- `tempfile` → temporary fixtures in tests
+#### `body`
 
-### Bootstrap commands
+Meaning: implementation changes but public shape stays the same.
 
-```bash
-cargo new linehash --bin
-cd linehash
-cargo add clap --features derive
-cargo add xxhash-rust --features xxh32
-cargo add serde --features derive
-cargo add serde_json
-cargo add thiserror
-cargo add tempfile
-cargo add anyhow
-cargo add --dev assert_cmd predicates insta tempfile
-```
+Likely impact:
+
+- direct callers are semantically relevant
+- importers may not need changes
+- tests covering behavior may be relevant
+
+#### `signature`
+
+Meaning: parameter list, generics, return type, or callable contract changes.
+
+Likely impact:
+
+- all direct callers
+- transitive wrappers
+- exported API consumers
+
+#### `rename`
+
+Meaning: symbol/file/module name changes.
+
+Likely impact:
+
+- all references
+- import sites
+- re-exports
+- callers
+
+#### `delete`
+
+Meaning: target removed entirely.
+
+Likely impact:
+
+- all references fail
+- reverse dependencies fail
+- transitive dependents may need redesign
+
+#### `visibility`
+
+Meaning: target becomes more or less accessible.
+
+Likely impact:
+
+- external package/module consumers
+- re-export graph
+
+#### `side-effect`
+
+Meaning: file-level execution or initialization behavior changes.
+
+Likely impact:
+
+- importers of the file
+- transitive importers if initialization order matters
+
+### Impact algorithm rules
+
+1. Resolve the target node.
+2. Select graph traversals based on `change_type`.
+3. Walk file edges, symbol edges, or both.
+4. Record every impacted node with:
+   - reason
+   - path or symbol name
+   - distance
+   - certainty
+5. Group results into high-confidence and uncertain output.
 
 ---
 
-## Suggested project layout
+## 11. System architecture
 
-Keep the codebase small and testable.
+### High-level architecture
+
+`scope` should be built as a layered Rust project:
+
+1. **Core library**
+   - indexing
+   - parsing
+   - extraction
+   - resolution
+   - query engine
+   - SQLite storage
+
+2. **CLI**
+   - command parsing
+   - human-readable output
+   - JSON formatting
+
+3. **Optional MCP/agent wrapper**
+   - exposes the same query engine to coding agents
+
+### Recommended modules
+
+- `scanner` - file discovery and ignore handling
+- `adapters` - per-language tree-sitter wrappers
+- `extractor` - imports, symbols, exports, calls
+- `resolver` - symbol and import resolution
+- `store` - SQLite schema and persistence
+- `graph` - traversal and impact logic
+- `query` - user-facing query handlers
+- `output` - human and JSON renderers
+- `config` - repo root, language, db path, settings
+- `bench` - benchmarking utilities
+- `mcp` - future integration layer
+
+### Repository structure
 
 ```text
-src/
-  main.rs
-  cli.rs
-  error.rs
-  hash.rs
-  anchor.rs
-  document.rs
-  output.rs
-  writeback.rs
-  commands/
-    mod.rs
-    read.rs
-    index.rs
-    edit.rs
-    insert.rs
-    delete.rs
-tests/
-  read_cli.rs
-  index_cli.rs
-  edit_cli.rs
-  insert_cli.rs
-  delete_cli.rs
+scope/
+  Cargo.toml
+  crates/
+    scope-core/
+    scope-cli/
+    scope-mcp/
   fixtures/
+    rust_small/
+    rust_medium/
+    ts_small/
+  docs/
+    plan.md
 ```
 
-### Layout notes
+### Why separate crates
 
-- keep CLI parsing separate from business logic
-- keep file parsing and rewrite logic separate from command dispatch
-- make `document`, `anchor`, and `writeback` unit-testable without invoking the CLI
+- `scope-core` can be embedded later in other tools.
+- `scope-cli` stays thin and focused.
+- `scope-mcp` can evolve independently without polluting the core.
 
 ---
 
-## Core data model
+## 12. Technology choices
 
-```rust
-pub struct LineRecord {
-    pub number: usize,
-    pub content: String,
-    pub short_hash: String,
-    pub full_hash: u32,
-}
+### Language
 
-pub enum NewlineStyle {
-    Lf,
-    Crlf,
-}
+Rust
 
-pub struct Document {
-    pub path: std::path::PathBuf,
-    pub newline: NewlineStyle,
-    pub trailing_newline: bool,
-    pub lines: Vec<LineRecord>,
-}
+### Recommended crates
 
-pub enum Anchor {
-    Hash { short: String },
-    LineHash { line: usize, short: String },
-}
+- `clap` for CLI
+- `ignore` and `walkdir` for repo traversal
+- `tree-sitter` and language grammars for parsing
+- `rusqlite` for persistence
+- `serde` and `serde_json` for output
+- `rayon` for parallel indexing
+- `blake3` for content hashing
+- `notify` for watch mode later
+- `thiserror` and `anyhow` for errors
+- `tracing` and `tracing-subscriber` for logs
 
-pub struct RangeAnchor {
-    pub start: Anchor,
-    pub end: Anchor,
-}
+### Why SQLite
 
-pub struct ResolvedLine {
-    pub index: usize,
-    pub line_no: usize,
-    pub short_hash: String,
-}
-```
-
-### Internal guidance
-
-- keep `full_hash` internal even if you only display 2 chars
-- `short_hash` should always be lowercase hex
-- `index` is zero-based for internal mutations
-- `line_no` is one-based for UX and messages
+- local and embeddable
+- fast enough for graph lookups
+- easy to inspect during development
+- durable across sessions
+- good fit for indexing metadata and edges
 
 ---
 
-## File loading and hashing
+## 13. Extraction model
 
-### Load algorithm
+### What the extractor should capture
 
-1. Read file bytes
-2. Decode as UTF-8
-3. Detect newline style:
-   - only `\n` → LF
-   - only `\r\n` → CRLF
-   - mixed → error in v1
-4. Split into logical lines without newline terminators
-5. Detect trailing newline
-6. Compute `xxh32` over each line's raw content
-7. Store full hash and 2-char short hash
+For each file:
 
-### Hash function
+- file path
+- language
+- imports/re-exports
+- top-level symbols
+- symbol visibility
+- exported symbols
+- direct calls inside symbol bodies
+- line/byte spans
+- parse errors or unsupported constructs
 
-Recommended implementation shape:
+### Symbol kinds for v1
 
-```rust
-pub fn full_hash(line: &str) -> u32;
-pub fn short_hash(line: &str) -> String;
-```
+- function
+- method
+- struct/class
+- enum/type alias
+- module/namespace
+- constant/static
 
-Behavior:
+### Visibility normalization
 
-- full hash → `xxh32(line.as_bytes(), 0)`
-- short hash → first 2 lowercase hex characters of the full hash
+Use one shared enum across languages:
 
----
+- `local`
+- `module`
+- `package`
+- `public`
+- `unknown`
 
-## Anchor parsing and resolution
+### Rules for v1
 
-### Parsing
-
-Support:
-
-- `f1`
-- `2:f1`
-- `2:f1..4:9c`
-
-Validation rules:
-
-- line number must be >= 1
-- short hash must be exactly 2 hex chars in v1
-- normalize uppercase to lowercase
-- range syntax must contain exactly one `..`
-
-### Resolution data structure
-
-Build an index on read:
-
-```rust
-HashMap<String, Vec<usize>> // short_hash -> line indexes
-```
-
-This keeps lookups simple.
-
-### Resolution algorithm
-
-#### Unqualified anchor
-
-1. look up short hash in the map
-2. no matches → not found
-3. one match → resolve
-4. many matches → ambiguous
-
-#### Qualified anchor
-
-1. verify the referenced line exists
-2. compare the current line's short hash
-3. exact match → resolve
-4. mismatch → stale anchor error
-
-Do not silently fall back to another line in v1.
-
-### Range resolution
-
-1. resolve start anchor
-2. resolve end anchor
-3. ensure start index <= end index
-4. replace the inclusive slice with one new line
+- prioritize top-level definitions
+- collect nested definitions only when cheap and reliable
+- capture direct static call sites only
+- ignore unresolved dynamic dispatch unless adapter can flag it as uncertain
 
 ---
 
-## Command behavior
+## 14. Resolution model
 
-### `read`
+### Import resolution
 
-- load document
-- print each line as `N:hh| content`
-- `--json` prints structured output
+Map raw import syntax to a repository file when possible.
 
-### `index`
+Possible outcomes:
 
-- load document
-- print only `N:hh`
-- `--json` prints line numbers and hashes without content
+- exact local file match
+- module match
+- unresolved external dependency
+- unresolved dynamic import
 
-### `edit` (single line)
+### Symbol resolution
 
-Input:
+Map a call site or reference to a known in-repo symbol.
+
+Resolution strategies:
+
+1. lexical/module scope lookup
+2. explicit import mapping
+3. same-file symbol lookup
+4. language-specific namespace rules
+5. fallback to unresolved/heuristic
+
+### Important constraint
+
+v1 should only claim `resolved` when the adapter has enough evidence. It is better to miss some links than to invent false edges with high confidence.
+
+---
+
+## 15. Persistence design
+
+### Core tables
+
+```sql
+CREATE TABLE files (
+  id INTEGER PRIMARY KEY,
+  path TEXT NOT NULL UNIQUE,
+  language TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  mtime INTEGER,
+  parse_status TEXT NOT NULL
+);
+
+CREATE TABLE symbols (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  qualname TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  visibility TEXT NOT NULL,
+  exported INTEGER NOT NULL,
+  span_start INTEGER,
+  span_end INTEGER,
+  FOREIGN KEY(file_id) REFERENCES files(id)
+);
+
+CREATE TABLE imports (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  raw_text TEXT NOT NULL,
+  resolved_file_id INTEGER,
+  span_start INTEGER,
+  span_end INTEGER,
+  certainty TEXT NOT NULL,
+  FOREIGN KEY(file_id) REFERENCES files(id),
+  FOREIGN KEY(resolved_file_id) REFERENCES files(id)
+);
+
+CREATE TABLE file_edges (
+  id INTEGER PRIMARY KEY,
+  from_file_id INTEGER NOT NULL,
+  to_file_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  certainty TEXT NOT NULL,
+  FOREIGN KEY(from_file_id) REFERENCES files(id),
+  FOREIGN KEY(to_file_id) REFERENCES files(id)
+);
+
+CREATE TABLE symbol_edges (
+  id INTEGER PRIMARY KEY,
+  from_symbol_id INTEGER NOT NULL,
+  to_symbol_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  certainty TEXT NOT NULL,
+  FOREIGN KEY(from_symbol_id) REFERENCES symbols(id),
+  FOREIGN KEY(to_symbol_id) REFERENCES symbols(id)
+);
+
+CREATE TABLE index_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+```
+
+### Required indices
+
+```sql
+CREATE INDEX idx_files_path ON files(path);
+CREATE INDEX idx_symbols_qualname ON symbols(qualname);
+CREATE INDEX idx_symbols_file_id ON symbols(file_id);
+CREATE INDEX idx_file_edges_from ON file_edges(from_file_id);
+CREATE INDEX idx_file_edges_to ON file_edges(to_file_id);
+CREATE INDEX idx_symbol_edges_from ON symbol_edges(from_symbol_id);
+CREATE INDEX idx_symbol_edges_to ON symbol_edges(to_symbol_id);
+```
+
+### Storage rules
+
+- Always store normalized paths relative to repo root.
+- Always store content hash for incremental indexing.
+- Always delete and rebuild stale edges for changed files.
+
+---
+
+## 16. Indexing pipeline
+
+### Full index pipeline
+
+1. Detect repo root.
+2. Load config and DB.
+3. Walk files respecting `.gitignore` and adapter-supported extensions.
+4. Hash file content.
+5. Skip unchanged files where possible.
+6. Parse changed files with tree-sitter.
+7. Extract normalized entities and edges.
+8. Resolve imports and symbol calls.
+9. Write nodes and edges to SQLite.
+10. Store index metadata and timing metrics.
+
+### Incremental index pipeline
+
+1. Compare stored hash with current hash.
+2. For changed files:
+   - delete old symbols/imports/edges for that file
+   - re-parse and re-extract
+   - re-resolve affected edges
+3. Optionally re-evaluate reverse edges for dependent files if needed by language rules.
+
+### Watch mode later
+
+Use file notifications to trigger targeted re-indexing.
+
+---
+
+## 17. Query engine design
+
+### Query categories
+
+1. File graph
+   - dependencies
+   - reverse dependencies
+   - transitive imports
+
+2. Symbol inventory
+   - symbols in file
+   - public surface
+   - visibility checks
+
+3. Call graph
+   - callees of symbol
+   - callers of symbol
+   - transitive caller/callee chain
+
+4. Impact analysis
+   - blast radius for change type
+   - grouped by confidence
+   - explainable reasons
+
+### Explainability requirement
+
+Every result in `impact`, `callers`, and `deps --reverse` should be explainable.
+
+Minimum explanation fields:
+
+- source node
+- target node
+- edge kind
+- reason string
+- certainty
+- traversal distance
+
+---
+
+## 18. Milestones
+
+## Milestone 0 - Foundation
+
+### Goal
+
+Set up project structure, core abstractions, test fixtures, and CLI skeleton.
+
+### Deliverables
+
+- Cargo workspace
+- `scope-core` and `scope-cli`
+- config handling
+- logging setup
+- base DB migration support
+- fixture repos for tests
+- command stubs with empty JSON output
+
+### Acceptance criteria
+
+- `scope --help` works
+- `scope index`, `deps`, `symbols`, `calls`, `impact` commands exist
+- test fixtures can be loaded in integration tests
+
+### Tasks
+
+- initialize workspace
+- define shared data model types
+- define JSON response envelopes
+- implement basic error handling and tracing
+
+---
+
+## Milestone 1 - File dependency graph
+
+### Goal
+
+Answer file import and reverse-import questions reliably.
+
+### Deliverables
+
+- repo scanner respecting `.gitignore`
+- Rust adapter for file-level imports/modules
+- file nodes and file edges in SQLite
+- `scope index`
+- `scope deps <file>`
+- `scope deps <file> --reverse`
+
+### Acceptance criteria
+
+- given a fixture repo, `deps` returns the exact imported local files for supported patterns
+- `--reverse` returns all in-repo files that depend on the target file
+- JSON output is stable and tested
+
+### Tasks
+
+- build file scanner
+- create adapter trait
+- implement Rust import extraction
+- persist file graph
+- add integration tests and golden JSON
+
+---
+
+## Milestone 2 - Symbol inventory
+
+### Goal
+
+Expose public/internal surface at the file and module level.
+
+### Deliverables
+
+- top-level symbol extraction
+- visibility normalization
+- export detection
+- `scope symbols <file>`
+
+### Acceptance criteria
+
+- symbols in a test fixture match expected name, kind, visibility, and spans
+- exported/public symbols are correctly labeled for supported Rust patterns
+
+### Tasks
+
+- extract functions, structs, enums, modules, constants
+- map Rust visibility into normalized enum
+- persist symbols and spans
+- add fixture assertions
+
+---
+
+## Milestone 3 - Direct call graph
+
+### Goal
+
+Answer “who calls this?” and “what does this call?” for resolvable in-repo symbols.
+
+### Deliverables
+
+- call-site extraction
+- same-file and imported symbol resolution
+- `scope calls <symbol>`
+- `scope callers <symbol>`
+
+### Acceptance criteria
+
+- direct callers/callees in fixture repos are returned with correct certainty
+- unresolved calls are either omitted or labeled uncertain, never mislabeled as exact
+
+### Tasks
+
+- extract direct function call sites
+- resolve same-module references
+- resolve imported symbol references
+- persist symbol edges
+- add reason strings for query output
+
+---
+
+## Milestone 4 - Impact engine
+
+### Goal
+
+Provide useful blast-radius analysis by change type.
+
+### Deliverables
+
+- `scope impact <target> --change-type <type>`
+- change-type aware traversal rules
+- grouped confidence output
+- explain reasons for every impacted node
+
+### Acceptance criteria
+
+- rename/delete/signature/body queries return expected impacted nodes for fixture repos
+- output includes distance, reason, and certainty
+- transitive traversal can be limited by depth
+
+### Tasks
+
+- encode impact rules per change type
+- implement graph traversal engine
+- add result grouping and summaries
+- add high-confidence vs uncertain sections
+
+---
+
+## Milestone 5 - Incremental indexing
+
+### Goal
+
+Make re-indexing cheap enough for normal development flow.
+
+### Deliverables
+
+- content hash storage
+- changed-file detection
+- stale-edge invalidation
+- incremental `scope index`
+
+### Acceptance criteria
+
+- unchanged files are skipped
+- single-file edits only re-parse that file and refresh relevant edges
+- benchmark shows material speedup vs full re-index on medium fixture repo
+
+### Tasks
+
+- add hashing and file metadata tracking
+- add selective delete/reinsert logic
+- benchmark full vs incremental indexing
+
+---
+
+## Milestone 6 - Agent integration
+
+### Goal
+
+Make `scope` easy for Claude Code or other agents to call.
+
+### Deliverables
+
+- finalized JSON contracts
+- compact response mode
+- optional stdio/MCP wrapper
+- docs for agent usage patterns
+
+### Acceptance criteria
+
+- agent can query deps/symbols/calls/impact without reading files directly
+- schema is stable enough for tool integration
+
+### Tasks
+
+- define machine-first JSON defaults
+- build thin integration layer over `scope-core`
+- write usage documentation and examples
+
+---
+
+## 19. Testing strategy
+
+### Test categories
+
+#### Unit tests
+
+Use for:
+
+- path normalization
+- visibility mapping
+- change-type rule selection
+- simple resolution helpers
+
+#### Fixture integration tests
+
+Use small real repos to verify:
+
+- file import graph
+- symbol extraction
+- call graph
+- impact traversal
+
+#### Golden JSON tests
+
+Store expected JSON results for commands and compare output exactly.
+
+#### Performance tests
+
+Measure:
+
+- full index time
+- incremental index time
+- query latency
+- DB size
+
+### Test repo fixtures
+
+Create fixtures with:
+
+- straightforward imports
+- re-exports
+- public/private functions
+- nested modules
+- ambiguous or unresolved calls
+- one repo with deliberate dynamic limitations
+
+### Reliability rule
+
+Any unsupported construct should fail soft. The tool should still produce partial results and label uncertainty.
+
+---
+
+## 20. Performance targets
+
+### Internal targets
+
+Use these as engineering goals, not marketing claims until measured.
+
+- warm dependency query: low milliseconds
+- warm symbol query: low milliseconds
+- warm impact query on medium repo: sub-100ms target
+- incremental re-index after single-file edit: near-instant for normal repos
+
+### Benchmark dimensions
+
+Measure by:
+
+- number of files
+- lines of code
+- language mix
+- cold vs warm query
+- full vs incremental index
+
+### Benchmark command
 
 ```bash
-linehash edit <file> <anchor> <new_content>
+scope benchmark --repo-root <path> --json
 ```
 
-Algorithm:
+It should report:
 
-1. load document
-2. reject `new_content` if it contains newline characters
-3. parse anchor
-4. resolve line
-5. replace line content
-6. rewrite file atomically
-
-### `edit` (range)
-
-Input:
-
-```bash
-linehash edit <file> <start>..<end> <new_content>
-```
-
-Algorithm:
-
-1. load document
-2. reject multi-line `new_content`
-3. parse range
-4. resolve both anchors
-5. replace inclusive range with one new line
-6. rewrite file atomically
-
-### `insert`
-
-Input:
-
-```bash
-linehash insert <file> <anchor> <new_content>
-```
-
-Algorithm:
-
-1. load document
-2. reject multi-line `new_content`
-3. resolve anchor
-4. insert one line **after** the resolved line
-5. rewrite file atomically
-
-### `delete`
-
-Input:
-
-```bash
-linehash delete <file> <anchor>
-```
-
-Algorithm:
-
-1. load document
-2. resolve anchor
-3. remove the line
-4. rewrite file atomically
-
-### Empty-file behavior
-
-Recommended v1 behavior:
-
-- `read` and `index` work on empty files
-- `edit`, `insert`, and `delete` return a clear error if there is no resolvable anchor
+- scan count
+- parse time
+- resolve time
+- DB write time
+- total index time
+- query latency percentiles
 
 ---
 
-## Atomic write strategy
+## 21. Risks and mitigations
 
-### Requirements
+### Risk 1 - Overpromising “full impact”
 
-- never partially overwrite the target file
-- preserve permissions where practical
-- write temp file in the same directory as the target
-- rename into place only after successful write and flush
+**Problem:** users interpret impact as guaranteed runtime correctness.
 
-### Recommended approach
+**Mitigation:**
+- position output as static blast radius
+- include certainty labels
+- document known blind spots
 
-1. load original metadata
-2. create `NamedTempFile` in the target directory
-3. render the updated file contents using the original newline style and trailing-newline state
-4. write all bytes
-5. `flush` and `sync_all`
-6. apply original permissions where relevant
-7. `persist` over the target path
+### Risk 2 - Language complexity explosion
 
-### Rendering rules
+**Problem:** every language has unique rules and edge cases.
 
-- join logical lines with the original newline style
-- append a final newline only if the original file had one and there is at least one line remaining
-- if the resulting file is empty, write zero bytes
+**Mitigation:**
+- use adapter architecture
+- support one language family at a time
+- keep shared model narrow and stable
 
----
+### Risk 3 - False-positive call edges
 
-## Error model
+**Problem:** aggressive resolution creates misleading impact data.
 
-Use a dedicated error enum with `thiserror`.
+**Mitigation:**
+- be conservative
+- prefer missing a low-confidence edge over inventing one
+- label heuristics explicitly
 
-Suggested variants:
+### Risk 4 - Slow re-indexing in large repos
 
-```rust
-pub enum LinehashError {
-    Io(std::io::Error),
-    InvalidUtf8,
-    MixedNewlines,
-    InvalidAnchor(String),
-    InvalidRange(String),
-    HashNotFound { hash: String },
-    AmbiguousHash { hash: String, lines: Vec<usize> },
-    StaleAnchor { line: usize, expected: String, actual: String },
-    EmptyFile,
-    MultiLineContentUnsupported,
-}
-```
+**Problem:** a fast query engine is not enough if indexing is painful.
 
-### Exit behavior
+**Mitigation:**
+- content hashing
+- parallel parsing
+- incremental invalidation
+- benchmark early
 
-- usage / parse errors → normal `clap` behavior
-- business logic errors → print concise error + hint, exit non-zero
+### Risk 5 - Dynamic language blind spots
+
+**Problem:** JS/TS and other languages may contain runtime-dependent imports and dispatch.
+
+**Mitigation:**
+- mark dynamic edges as uncertain
+- keep them separate in output
+- add framework-aware adapters later
 
 ---
 
-## Test strategy
+## 22. Implementation roadmap
 
-### Unit tests
+### Phase 1 - Weeks 1-2
 
-Cover these in pure Rust tests:
+- Milestone 0 foundation
+- Milestone 1 file graph
+- fixture repos and JSON tests
 
-- short hash formatting
-- newline detection
-- trailing newline detection
-- anchor parsing
-- unqualified resolution
-- qualified resolution
-- ambiguity detection
-- stale anchor detection
-- range validation
-- content rendering with LF and CRLF
+### Phase 2 - Weeks 3-4
 
-### Integration tests
+- Milestone 2 symbol inventory
+- Milestone 3 direct call graph
+- improve resolver quality
 
-Use `assert_cmd` and temp files for:
+### Phase 3 - Weeks 5-6
 
-- `read` pretty output
-- `read --json`
-- `index` pretty output
-- edit single line
-- edit range
-- insert after line
-- delete line
-- not found error
-- ambiguous hash error
-- stale qualified anchor error
-- CRLF preservation
-- no trailing newline preservation
-- duplicate line handling
-- empty file behavior
-- invalid UTF-8 rejection
+- Milestone 4 impact engine
+- benchmark command
+- stabilize JSON schema
 
-### Snapshot tests
+### Phase 4 - Weeks 7+
 
-Use `insta` for stable CLI output from:
+- Milestone 5 incremental indexing
+- Milestone 6 agent integration
+- docs, packaging, release prep
 
-- `read`
-- `index`
-- JSON output shapes
+This schedule should be treated as directional. Quality of the graph and schema stability matter more than hitting calendar dates.
 
 ---
 
-## Milestone plan
+## 23. Definition of done for v1
 
-## Milestone 0 — freeze the spec
+`scope` v1 is done when all of the following are true:
 
-**Deliverable:** written decisions for hashing, newline preservation, anchor resolution, and v1 content limits.
-
-**Done when:** there is no unresolved ambiguity about what `edit`, `insert`, and `delete` should do.
-
-## Milestone 1 — bootstrap the crate
-
-**Deliverable:** compiles, parses subcommands, prints placeholders.
-
-**Done when:**
-
-- all CLI commands exist
-- arguments parse cleanly
-- `cargo test` runs
-
-## Milestone 2 — document loading and hashing
-
-**Deliverable:** `Document::load` plus hash generation.
-
-**Done when:**
-
-- LF and CRLF work
-- mixed newline files fail clearly
-- hashes are deterministic
-
-## Milestone 3 — `read` and `index`
-
-**Deliverable:** first user-visible commands.
-
-**Done when:**
-
-- pretty output matches the spec
-- `--json` works
-- snapshot tests pass
-
-## Milestone 4 — anchor parsing and resolution
-
-**Deliverable:** robust anchor handling with good errors.
-
-**Done when:**
-
-- `f1` and `2:f1` resolve correctly
-- ambiguous and stale cases are distinct
-- range resolution works
-
-## Milestone 5 — mutation commands
-
-**Deliverable:** `edit`, `insert`, and `delete` with atomic writes.
-
-**Done when:**
-
-- file content updates correctly
-- newline style is preserved
-- trailing newline behavior is preserved
-- no partial writes occur
-
-## Milestone 6 — polish and hardening
-
-**Deliverable:** better errors, hints, and docs.
-
-**Done when:**
-
-- every user-facing error suggests the next step
-- README examples work exactly as written
-- integration tests cover failure paths
-
-## Milestone 7 — release prep
-
-**Deliverable:** first publishable version.
-
-**Done when:**
-
-- `cargo fmt --check` passes
-- `cargo clippy --all-targets -- -D warnings` passes
-- `cargo test` passes
-- install and smoke-test instructions are verified
+1. A user can index a Rust repo locally.
+2. A user can query file deps, reverse deps, symbols, callers/callees, and impact.
+3. All commands support `--json`.
+4. Output includes reasons and certainty where relevant.
+5. Incremental indexing works.
+6. Fixture repos and golden JSON tests cover major supported patterns.
+7. Documentation clearly states supported patterns and limitations.
 
 ---
 
-## Suggested implementation order
+## 24. First execution checklist
 
-1. create crate and dependency scaffold
-2. implement `Document::load`
-3. implement hashing helpers
-4. implement pretty and JSON output for `read`
-5. implement `index`
-6. implement anchor parser
-7. implement anchor resolution
-8. implement atomic writer
-9. implement `edit`
-10. implement `insert`
-11. implement `delete`
-12. add integration and snapshot tests
-13. tighten errors and hints
-14. validate README examples end-to-end
+### Foundation checklist
 
----
+- [ ] create Cargo workspace
+- [ ] create `scope-core` crate
+- [ ] create `scope-cli` crate
+- [ ] add logging and config
+- [ ] add SQLite migration layer
+- [ ] define normalized data model
+- [ ] define JSON response envelopes
 
-## Acceptance criteria for v1
+### Indexing checklist
 
-Ship v1 only when all of the following are true:
+- [ ] implement repo scanner with ignore support
+- [ ] implement Rust adapter skeleton
+- [ ] parse files with tree-sitter
+- [ ] extract imports/modules
+- [ ] persist file nodes and edges
+- [ ] add `scope index`
 
-- a unique unqualified hash resolves correctly
-- a qualified anchor edits the intended line only when the current line still matches
-- ambiguous hashes never silently choose a target
-- stale anchors never silently choose a target
-- CRLF files stay CRLF after edits
-- files without trailing newline keep that state after edits
-- read/index output is stable enough for agent consumption
-- mutation commands are atomic and leave the file intact on failure
+### Query checklist
 
----
+- [ ] add `deps`
+- [ ] add `deps --reverse`
+- [ ] add `symbols`
+- [ ] add `calls`
+- [ ] add `callers`
+- [ ] add `impact`
+- [ ] add `explain`
 
-## Post-v1 roadmap
+### Quality checklist
 
-Once v1 is stable, the next most valuable additions are:
-
-1. multi-line insert and replace
-2. `linehash diff`
-3. `linehash undo`
-4. optional relaxed anchor resolution for moved lines
-5. support for longer hashes when ambiguity is common
-6. benchmark harness against `str_replace`
+- [ ] create small fixture repos
+- [ ] add golden JSON tests
+- [ ] add benchmark command
+- [ ] add incremental re-indexing
+- [ ] write limitations doc
 
 ---
 
-## One important product note
+## 25. Open questions
 
-The current README text says hashes are computed from **trimmed** line content. If you want strong stale-read protection, change that before implementation and document the new rule explicitly.
+These should be resolved before or during Milestone 1:
 
-The safest rule for Rust v1 is:
+1. Should v1 support only Rust, or Rust plus TS/JS at launch?
+2. Should methods and trait dispatch be included in Rust v1, or postponed until after plain function calls are solid?
+3. Should unresolved dynamic edges appear in default output, or only behind `--verbose`?
+4. Should `scope` prefer a single SQLite DB per repo root, or allow workspace-level overrides?
+5. Should the agent wrapper be built immediately after JSON stabilization or only after CLI adoption?
 
-> hash the exact line bytes, excluding only the newline terminator.
+---
 
-That keeps the tool small while avoiding a major correctness footgun.
+## 26. Recommended next steps
+
+1. Freeze the CLI and JSON contract before writing extraction code.
+2. Build the smallest end-to-end slice: scan -> parse -> persist -> `deps` query.
+3. Add fixtures before adding more language features.
+4. Only expand to symbol and impact analysis after file graph quality is proven.
+5. Keep marketing language honest: “static blast radius” beats “guaranteed full impact.”
+
+---
+
+## 27. One-sentence summary
+
+`scope` is a local Rust static-analysis engine that indexes repo files, symbols, and resolvable calls into SQLite so developers and coding agents can ask dependency and blast-radius questions instantly with structured, explainable results.
