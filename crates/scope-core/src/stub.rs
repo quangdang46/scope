@@ -6,6 +6,7 @@ use crate::{
         Certainty, DependencyRecord, EdgeKind, NodeKind, RepoPath, Span, SymbolKind, SymbolRecord,
         TraversalRecord, Visibility,
     },
+    DatabaseInfo,
 };
 
 #[derive(Debug, Serialize)]
@@ -13,6 +14,7 @@ pub struct IndexData {
     pub repo_root: RepoPath,
     pub no_git: bool,
     pub watch: bool,
+    pub database: DatabaseInfo,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,13 +50,14 @@ pub struct ImpactData {
     pub risk: &'static str,
 }
 
-pub fn index(repo_root: String, no_git: bool, watch: bool) -> JsonEnvelope<IndexData> {
-    JsonEnvelope::stub(
+pub fn index(repo_root: String, no_git: bool, watch: bool, database: DatabaseInfo) -> JsonEnvelope<IndexData> {
+    JsonEnvelope::success(
         "index",
         IndexData {
             repo_root: RepoPath::from(repo_root),
             no_git,
             watch,
+            database,
         },
     )
 }

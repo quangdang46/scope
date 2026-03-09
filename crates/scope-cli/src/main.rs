@@ -1,8 +1,10 @@
 mod cli;
 
+use std::env;
+
 use clap::Parser;
 use cli::{ChangeType, Cli, Commands};
-use scope_core::SymbolKind;
+use scope_core::{BootstrapOptions, DatabaseInfo, SymbolKind, Verbosity};
 
 fn main() {
     if let Err(error) = run() {
@@ -13,13 +15,28 @@ fn main() {
 
 fn run() -> Result<(), scope_core::ScopeError> {
     let cli = Cli::parse();
+    let cwd = env::current_dir().map_err(|error| scope_core::ScopeError::io(".", error))?;
+    let verbosity = verbosity(&cli);
 
     let output = match cli.command {
-        Commands::Index(args) => serde_json::to_string_pretty(&scope_core::stub::index(
-            args.repo_root,
-            args.no_git,
-            args.watch,
-        )),
+        Commands::Index(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone().or(args.repo_root.clone()),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let database = DatabaseInfo {
+                path: context.paths.db_path.display().to_string(),
+                schema_version: context.store.schema_version()?,
+            };
+
+            serde_json::to_string_pretty(&scope_core::stub::index(
+                context.paths.repo_root.display().to_string(),
+                args.no_git,
+                args.watch,
+                database,
+            ))
+        }
         Commands::Deps(args) => serde_json::to_string_pretty(&scope_core::stub::deps(
             args.file,
             args.reverse,
@@ -59,6 +76,16 @@ fn symbol_kind_name(kind: cli::SymbolKind) -> SymbolKind {
         cli::SymbolKind::Module => SymbolKind::Module,
         cli::SymbolKind::Constant => SymbolKind::Constant,
         cli::SymbolKind::Variable => SymbolKind::Variable,
+    }
+}
+
+fn verbosity(cli: &Cli) -> Verbosity {
+    if cli.quiet {
+        Verbosity::Quiet
+    } else if cli.verbose {
+        Verbosity::Verbose
+    } else {
+        Verbosity::Normal
     }
 }
 

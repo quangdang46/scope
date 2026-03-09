@@ -1,9 +1,19 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "scope")]
 #[command(about = "Local static analysis engine for dependency and impact queries")]
 pub struct Cli {
+    #[arg(long, global = true)]
+    pub repo_root: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub db: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub verbose: bool,
+    #[arg(long, global = true)]
+    pub quiet: bool,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -26,8 +36,7 @@ pub enum Commands {
 
 #[derive(Debug, clap::Args)]
 pub struct IndexArgs {
-    #[arg(default_value = ".")]
-    pub repo_root: String,
+    pub repo_root: Option<PathBuf>,
     #[arg(long)]
     pub no_git: bool,
     #[arg(long)]
