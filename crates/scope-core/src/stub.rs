@@ -15,6 +15,7 @@ pub struct IndexData {
     pub no_git: bool,
     pub watch: bool,
     pub database: DatabaseInfo,
+    pub indexed_files: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +77,7 @@ pub fn index(
     no_git: bool,
     watch: bool,
     database: DatabaseInfo,
+    indexed_files: usize,
 ) -> JsonEnvelope<IndexData> {
     JsonEnvelope::success(
         "index",
@@ -84,6 +86,7 @@ pub fn index(
             no_git,
             watch,
             database,
+            indexed_files,
         },
     )
 }
@@ -93,15 +96,16 @@ pub fn deps(
     reverse: bool,
     transitive: bool,
     depth: Option<usize>,
+    dependencies: Vec<DependencyRecord>,
 ) -> JsonEnvelope<DepsData> {
-    JsonEnvelope::stub(
+    JsonEnvelope::success(
         "deps",
         DepsData {
             target: RepoPath::from(target),
             reverse,
             transitive,
             depth,
-            dependencies: Vec::new(),
+            dependencies,
         },
     )
 }

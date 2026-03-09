@@ -9,7 +9,7 @@ pub mod store;
 pub mod stub;
 pub mod tracing;
 
-pub use adapters::Adapter;
+pub use adapters::{Adapter, RustAdapter};
 pub use bootstrap::{bootstrap, AppContext};
 pub use config::{BootstrapOptions, RuntimePaths};
 pub use error::{ScopeError, ScopeResult};

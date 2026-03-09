@@ -4,7 +4,10 @@ use std::env;
 
 use clap::Parser;
 use cli::{ChangeType, Cli, Commands};
-use scope_core::{BootstrapOptions, DatabaseInfo, SymbolKind, Verbosity};
+use scope_core::{
+    scan_repo, Adapter, BootstrapOptions, DatabaseInfo, RustAdapter, ScanConfig, SupportedLanguage,
+    SymbolKind, Verbosity,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -25,6 +28,7 @@ fn run() -> Result<(), scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let indexed_files = index_repo(&context.paths.repo_root, &context.store)?;
             let database = DatabaseInfo {
                 path: context.paths.db_path.display().to_string(),
                 schema_version: context.store.schema_version()?,
@@ -35,14 +39,33 @@ fn run() -> Result<(), scope_core::ScopeError> {
                 args.no_git,
                 args.watch,
                 database,
+                indexed_files,
             ))
         }
-        Commands::Deps(args) => serde_json::to_string_pretty(&scope_core::stub::deps(
-            args.file,
-            args.reverse,
-            args.transitive,
-            args.depth,
-        )),
+        Commands::Deps(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let dependencies = if args.reverse {
+                context
+                    .store
+                    .query_reverse_deps(&scope_core::RepoPath::from(args.file.clone()))?
+            } else {
+                context
+                    .store
+                    .query_deps(&scope_core::RepoPath::from(args.file.clone()))?
+            };
+
+            serde_json::to_string_pretty(&scope_core::stub::deps(
+                args.file,
+                args.reverse,
+                args.transitive,
+                args.depth,
+                dependencies,
+            ))
+        }
         Commands::Symbols(args) => serde_json::to_string_pretty(&scope_core::stub::symbols(
             args.file,
             args.public_only,
@@ -109,4 +132,31 @@ fn change_type_name(change_type: ChangeType) -> String {
         ChangeType::SideEffect => "side-effect",
     }
     .to_string()
+}
+
+fn index_repo(
+    repo_root: &std::path::Path,
+    store: &scope_core::Store,
+) -> Result<usize, scope_core::ScopeError> {
+    let adapter = RustAdapter;
+    let entries = scan_repo(repo_root, &ScanConfig::default())?;
+    let mut indexed_files = 0usize;
+
+    for entry in entries {
+        if entry.language != SupportedLanguage::Rust {
+            continue;
+        }
+
+        if !scope_core::adapters::supports_path(&adapter, &entry.absolute_path) {
+            continue;
+        }
+
+        let source = std::fs::read_to_string(&entry.absolute_path)
+            .map_err(|error| scope_core::ScopeError::io(&entry.absolute_path, error))?;
+        let extract = adapter.extract(&entry, &source);
+        store.persist_extract_result(&extract)?;
+        indexed_files += 1;
+    }
+
+    Ok(indexed_files)
 }
