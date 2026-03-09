@@ -114,14 +114,15 @@ pub fn symbols(
     target: String,
     public_only: bool,
     kind: Option<SymbolKind>,
+    symbols: Vec<SymbolRecord>,
 ) -> JsonEnvelope<SymbolsData> {
-    JsonEnvelope::stub(
+    JsonEnvelope::success(
         "symbols",
         SymbolsData {
             target: RepoPath::from(target),
             public_only,
             kind,
-            symbols: Vec::new(),
+            symbols,
         },
     )
 }

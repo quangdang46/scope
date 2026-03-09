@@ -6,6 +6,7 @@ use std::{
 
 use scope_core::{
     scan_repo, stub, Adapter, RepoPath, RustAdapter, ScanConfig, Store, SupportedLanguage,
+    SymbolKind,
 };
 
 fn repo_root() -> PathBuf {
@@ -185,6 +186,45 @@ fn ts_small_is_scanned_but_not_indexed_by_rust_fixture_indexer() {
     let deps = store.query_deps(&RepoPath::from("src/index.ts")).unwrap();
 
     assert!(deps.is_empty(), "non-Rust fixture should not be indexed yet");
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_symbols_query_returns_persisted_symbols() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let symbols = store
+        .query_symbols(&RepoPath::from("src/lib.rs"), false, None)
+        .unwrap();
+
+    let names: Vec<_> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+    assert_eq!(names, vec!["parser", "resolver", "utils", "greet", "farewell"]);
+    assert_eq!(symbols[0].kind, SymbolKind::Module);
+    assert_eq!(symbols[3].qualname, "lib::greet");
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_symbols_query_filters_public_only_and_kind() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let public_symbols = store
+        .query_symbols(&RepoPath::from("src/parser.rs"), true, None)
+        .unwrap();
+    assert_eq!(public_symbols.len(), 1);
+    assert_eq!(public_symbols[0].name, "parse");
+
+    let function_symbols = store
+        .query_symbols(&RepoPath::from("src/lib.rs"), false, Some(SymbolKind::Function))
+        .unwrap();
+    let names: Vec<_> = function_symbols
+        .iter()
+        .map(|symbol| symbol.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["greet", "farewell"]);
 
     fs::remove_dir_all(repo).unwrap();
 }

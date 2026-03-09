@@ -66,11 +66,26 @@ fn run() -> Result<(), scope_core::ScopeError> {
                 dependencies,
             ))
         }
-        Commands::Symbols(args) => serde_json::to_string_pretty(&scope_core::stub::symbols(
-            args.file,
-            args.public_only,
-            args.kind.map(symbol_kind_name),
-        )),
+        Commands::Symbols(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let kind = args.kind.map(symbol_kind_name);
+            let symbols = context.store.query_symbols(
+                &scope_core::RepoPath::from(args.file.clone()),
+                args.public_only,
+                kind.clone(),
+            )?;
+
+            serde_json::to_string_pretty(&scope_core::stub::symbols(
+                args.file,
+                args.public_only,
+                kind,
+                symbols,
+            ))
+        }
         Commands::Calls(args) => {
             serde_json::to_string_pretty(&scope_core::stub::calls(args.symbol, args.transitive))
         }

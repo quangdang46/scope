@@ -8,10 +8,10 @@ use serde::Serialize;
 
 use crate::{
     Certainty, DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind,
-    RepoPath, ScopeError, ScopeResult,
+    RepoPath, ScopeError, ScopeResult, SymbolKind, SymbolRecord, Visibility,
 };
 
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
 
 const INITIAL_MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS index_meta (
@@ -52,6 +52,25 @@ CREATE TABLE IF NOT EXISTS file_edges (
     FOREIGN KEY(from_file_id) REFERENCES files(id) ON DELETE CASCADE,
     FOREIGN KEY(to_file_id) REFERENCES files(id) ON DELETE CASCADE,
     UNIQUE(from_file_id, to_file_id, kind)
+);
+
+"#;
+
+const SYMBOLS_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS symbols (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    qualname TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    visibility TEXT NOT NULL,
+    exported INTEGER NOT NULL,
+    span_start INTEGER NOT NULL,
+    span_end INTEGER NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE,
+    UNIQUE(file_id, qualname)
 );
 "#;
 
@@ -116,9 +135,15 @@ impl Store {
             .execute("DELETE FROM imports WHERE file_id = ?1", [file_id])?;
         self.connection
             .execute("DELETE FROM file_edges WHERE from_file_id = ?1", [file_id])?;
+        self.connection
+            .execute("DELETE FROM symbols WHERE file_id = ?1", [file_id])?;
 
         for import in &result.imports {
             self.insert_import(file_id, import)?;
+        }
+
+        for symbol in &result.symbols {
+            self.insert_symbol(file_id, symbol)?;
         }
 
         for module in &result.modules {
@@ -195,6 +220,50 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn query_symbols(
+        &self,
+        path: &RepoPath,
+        public_only: bool,
+        kind: Option<SymbolKind>,
+    ) -> ScopeResult<Vec<SymbolRecord>> {
+        let Some(file_id) = self.file_id(path)? else {
+            return Ok(Vec::new());
+        };
+
+        let mut statement = self.connection.prepare(
+            "SELECT name, qualname, kind, visibility, exported, span_start, span_end, start_line, end_line
+             FROM symbols
+             WHERE file_id = ?1
+             ORDER BY start_line ASC, name ASC",
+        )?;
+
+        let rows = statement.query_map([file_id], |row| {
+            Ok(SymbolRecord {
+                file: path.clone(),
+                name: row.get(0)?,
+                qualname: row.get(1)?,
+                kind: symbol_kind_from_db(&row.get::<_, String>(2)?),
+                visibility: visibility_from_db(&row.get::<_, String>(3)?),
+                exported: row.get::<_, i64>(4)? != 0,
+                span: crate::Span {
+                    start_byte: row.get::<_, i64>(5)? as u32,
+                    end_byte: row.get::<_, i64>(6)? as u32,
+                    start_line: row.get::<_, i64>(7)? as u32,
+                    end_line: row.get::<_, i64>(8)? as u32,
+                },
+            })
+        })?;
+
+        let mut symbols = rows.collect::<Result<Vec<_>, _>>()?;
+        if public_only {
+            symbols.retain(|symbol| symbol.exported);
+        }
+        if let Some(kind) = kind {
+            symbols.retain(|symbol| symbol.kind == kind);
+        }
+        Ok(symbols)
+    }
+
     fn file_id(&self, path: &RepoPath) -> ScopeResult<Option<i64>> {
         self.connection
             .query_row(
@@ -242,6 +311,27 @@ impl Store {
         Ok(())
     }
 
+    fn insert_symbol(&self, file_id: i64, symbol: &SymbolRecord) -> ScopeResult<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO symbols (
+                file_id, name, qualname, kind, visibility, exported, span_start, span_end, start_line, end_line
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                file_id,
+                symbol.name,
+                symbol.qualname,
+                symbol_kind_name(&symbol.kind),
+                visibility_name(&symbol.visibility),
+                symbol.exported as i64,
+                symbol.span.start_byte,
+                symbol.span.end_byte,
+                symbol.span.start_line,
+                symbol.span.end_line,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn insert_file_edge(
         &self,
         from_file_id: i64,
@@ -283,6 +373,11 @@ fn run_migrations(connection: &Connection) -> ScopeResult<()> {
 
     if current_version < 1 {
         connection.execute_batch(INITIAL_MIGRATION)?;
+        connection.pragma_update(None, "user_version", 1)?;
+    }
+
+    if current_version < 2 {
+        connection.execute_batch(SYMBOLS_MIGRATION)?;
         connection.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)?;
     }
 
@@ -323,6 +418,62 @@ fn certainty_from_db(value: &str) -> Certainty {
     }
 }
 
+fn symbol_kind_name(kind: &SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Function => "function",
+        SymbolKind::Method => "method",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Class => "class",
+        SymbolKind::Enum => "enum",
+        SymbolKind::TypeAlias => "type_alias",
+        SymbolKind::Module => "module",
+        SymbolKind::Namespace => "namespace",
+        SymbolKind::Constant => "constant",
+        SymbolKind::Static => "static",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Variable => "variable",
+    }
+}
+
+fn symbol_kind_from_db(value: &str) -> SymbolKind {
+    match value {
+        "function" => SymbolKind::Function,
+        "method" => SymbolKind::Method,
+        "struct" => SymbolKind::Struct,
+        "class" => SymbolKind::Class,
+        "enum" => SymbolKind::Enum,
+        "type_alias" => SymbolKind::TypeAlias,
+        "module" => SymbolKind::Module,
+        "namespace" => SymbolKind::Namespace,
+        "constant" => SymbolKind::Constant,
+        "static" => SymbolKind::Static,
+        "interface" => SymbolKind::Interface,
+        "trait" => SymbolKind::Trait,
+        _ => SymbolKind::Variable,
+    }
+}
+
+fn visibility_name(visibility: &Visibility) -> &'static str {
+    match visibility {
+        Visibility::Local => "local",
+        Visibility::Module => "module",
+        Visibility::Package => "package",
+        Visibility::Public => "public",
+        Visibility::Unknown => "unknown",
+    }
+}
+
+fn visibility_from_db(value: &str) -> Visibility {
+    match value {
+        "module" => Visibility::Module,
+        "package" => Visibility::Package,
+        "public" => Visibility::Public,
+        "unknown" => Visibility::Unknown,
+        _ => Visibility::Local,
+    }
+}
+
 fn edge_kind_from_db(value: &str) -> EdgeKind {
     match value {
         "module" => EdgeKind::Contain,
@@ -340,7 +491,7 @@ fn unix_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ImportRecord, ParseStatus, Span};
+    use crate::{ImportRecord, ParseStatus, Span, SymbolRecord, SymbolKind, Visibility};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -367,6 +518,18 @@ mod tests {
             end_byte: 10,
             start_line: line,
             end_line: line,
+        }
+    }
+
+    fn sample_symbol(file: &str, name: &str, kind: SymbolKind, visibility: Visibility) -> SymbolRecord {
+        SymbolRecord {
+            file: RepoPath::from(file),
+            name: name.to_string(),
+            qualname: format!("{}::{name}", file.trim_start_matches("src/").trim_end_matches(".rs")),
+            kind,
+            visibility: visibility.clone(),
+            exported: matches!(visibility, Visibility::Public | Visibility::Package),
+            span: sample_span(1),
         }
     }
 
@@ -472,6 +635,48 @@ mod tests {
             reverse[0].import_text.as_deref(),
             Some("use crate::parser;")
         );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persists_and_queries_symbols() {
+        let dir = unique_temp_dir("db-symbols");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let source = sample_file("src/lib.rs");
+        let extract = ExtractResult {
+            file: source.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![
+                sample_symbol("src/lib.rs", "greet", SymbolKind::Function, Visibility::Public),
+                sample_symbol("src/lib.rs", "helper", SymbolKind::Function, Visibility::Local),
+                sample_symbol("src/lib.rs", "Parser", SymbolKind::Struct, Visibility::Package),
+            ],
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        };
+
+        store.persist_extract_result(&extract).unwrap();
+
+        let all = store.query_symbols(&source.path, false, None).unwrap();
+        assert_eq!(all.len(), 3);
+        let all_names: Vec<_> = all.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert_eq!(all_names, vec!["Parser", "greet", "helper"]);
+        assert_eq!(all[0].kind, SymbolKind::Struct);
+
+        let public_only = store.query_symbols(&source.path, true, None).unwrap();
+        assert_eq!(public_only.len(), 2);
+        assert!(public_only.iter().all(|symbol| symbol.exported));
+
+        let functions = store
+            .query_symbols(&source.path, false, Some(SymbolKind::Function))
+            .unwrap();
+        assert_eq!(functions.len(), 2);
+        assert!(functions.iter().all(|symbol| symbol.kind == SymbolKind::Function));
 
         std::fs::remove_dir_all(dir).unwrap();
     }
