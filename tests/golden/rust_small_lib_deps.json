@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "command": "deps",
+  "status": "ok",
+  "data": {
+    "target": "src/lib.rs",
+    "reverse": false,
+    "transitive": false,
+    "depth": null,
+    "dependencies": []
+  },
+  "warnings": []
+}

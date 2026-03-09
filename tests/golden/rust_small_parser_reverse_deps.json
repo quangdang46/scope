@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "command": "deps",
+  "status": "ok",
+  "data": {
+    "target": "src/parser.rs",
+    "reverse": true,
+    "transitive": false,
+    "depth": null,
+    "dependencies": [
+      {
+        "kind": "file",
+        "path": "src/resolver.rs",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "use crate::parser;",
+        "line": 1
+      }
+    ]
+  },
+  "warnings": []
+}

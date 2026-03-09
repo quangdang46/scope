@@ -4631,6 +4631,8 @@ rl.save_history(&history_path)?;
 
 ### Phase 0 — Node.js POC (~1 day)
 
+**Current status:** Deferred / supplemental, not part of the active execution path unless explicitly reactivated.
+
 **Goal:** Validate graph extraction accuracy and query correctness in a fast-iteration
 environment before committing to the full Rust implementation. Node.js allows quick
 experimentation with tree-sitter and SQLite without compile times.

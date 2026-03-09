@@ -5,6 +5,14 @@
 
 ---
 
+## Status
+
+This Node.js proof of concept is currently **deferred / not in active execution scope**.
+
+It remains in the repository as a supplemental validation artifact and historical sketch for extraction ideas, but the active implementation path for this project is the Rust workspace described in `PLAN.md` and implemented under `crates/`.
+
+If this POC is reactivated later, it should be treated as an explicit, time-boxed validation track rather than an implicit parallel roadmap.
+
 ## POC Goal
 
 Prove that we can:
