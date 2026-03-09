@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "command": "symbols",
+  "status": "ok",
+  "data": {
+    "target": "src/parser.rs",
+    "public_only": true,
+    "kind": null,
+    "symbols": [
+      {
+        "file": "src/parser.rs",
+        "name": "parse",
+        "qualname": "parser::parse",
+        "kind": "function",
+        "visibility": "public",
+        "exported": true,
+        "span": {
+          "start_byte": 0,
+          "end_byte": 42,
+          "start_line": 1,
+          "end_line": 1
+        }
+      }
+    ]
+  },
+  "warnings": []
+}

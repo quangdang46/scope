@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "command": "symbols",
+  "status": "ok",
+  "data": {
+    "target": "src/lib.rs",
+    "public_only": false,
+    "kind": "function",
+    "symbols": [
+      {
+        "file": "src/lib.rs",
+        "name": "greet",
+        "qualname": "lib::greet",
+        "kind": "function",
+        "visibility": "public",
+        "exported": true,
+        "span": {
+          "start_byte": 50,
+          "end_byte": 86,
+          "start_line": 5,
+          "end_line": 5
+        }
+      },
+      {
+        "file": "src/lib.rs",
+        "name": "farewell",
+        "qualname": "lib::farewell",
+        "kind": "function",
+        "visibility": "public",
+        "exported": true,
+        "span": {
+          "start_byte": 172,
+          "end_byte": 211,
+          "start_line": 10,
+          "end_line": 10
+        }
+      }
+    ]
+  },
+  "warnings": []
+}

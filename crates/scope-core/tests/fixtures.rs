@@ -191,40 +191,54 @@ fn ts_small_is_scanned_but_not_indexed_by_rust_fixture_indexer() {
 }
 
 #[test]
-fn rust_small_symbols_query_returns_persisted_symbols() {
+fn rust_small_symbols_query_matches_golden_json() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
     let symbols = store
         .query_symbols(&RepoPath::from("src/lib.rs"), false, None)
         .unwrap();
+    let envelope = stub::symbols("src/lib.rs".to_string(), false, None, symbols);
+    let actual = serde_json::to_string_pretty(&envelope).unwrap();
+    let expected = read_golden("rust_small_lib_symbols.json");
 
-    let names: Vec<_> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
-    assert_eq!(names, vec!["parser", "resolver", "utils", "greet", "farewell"]);
-    assert_eq!(symbols[0].kind, SymbolKind::Module);
-    assert_eq!(symbols[3].qualname, "lib::greet");
+    assert_eq!(actual, expected);
 
     fs::remove_dir_all(repo).unwrap();
 }
 
 #[test]
-fn rust_small_symbols_query_filters_public_only_and_kind() {
+fn rust_small_public_symbols_query_matches_golden_json() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
-
-    let public_symbols = store
+    let symbols = store
         .query_symbols(&RepoPath::from("src/parser.rs"), true, None)
         .unwrap();
-    assert_eq!(public_symbols.len(), 1);
-    assert_eq!(public_symbols[0].name, "parse");
+    let envelope = stub::symbols("src/parser.rs".to_string(), true, None, symbols);
+    let actual = serde_json::to_string_pretty(&envelope).unwrap();
+    let expected = read_golden("rust_small_parser_public_symbols.json");
 
-    let function_symbols = store
+    assert_eq!(actual, expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_function_symbols_query_matches_golden_json() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let symbols = store
         .query_symbols(&RepoPath::from("src/lib.rs"), false, Some(SymbolKind::Function))
         .unwrap();
-    let names: Vec<_> = function_symbols
-        .iter()
-        .map(|symbol| symbol.name.as_str())
-        .collect();
-    assert_eq!(names, vec!["greet", "farewell"]);
+    let envelope = stub::symbols(
+        "src/lib.rs".to_string(),
+        false,
+        Some(SymbolKind::Function),
+        symbols,
+    );
+    let actual = serde_json::to_string_pretty(&envelope).unwrap();
+    let expected = read_golden("rust_small_lib_function_symbols.json");
+
+    assert_eq!(actual, expected);
 
     fs::remove_dir_all(repo).unwrap();
 }

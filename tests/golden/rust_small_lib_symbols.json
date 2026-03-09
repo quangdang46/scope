@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "command": "symbols",
+  "status": "ok",
+  "data": {
+    "target": "src/lib.rs",
+    "public_only": false,
+    "kind": null,
+    "symbols": [
+      {
+        "file": "src/lib.rs",
+        "name": "parser",
+        "qualname": "lib::parser",
+        "kind": "module",
+        "visibility": "public",
+        "exported": true,
+        "span": {
+          "start_byte": 0,
+          "end_byte": 15,
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      {
+        "file": "src/lib.rs",
+        "name": "resolver",
+        "qualname": "lib::resolver",
+        "kind": "module",
+        "visibility": "public",
+        "exported": true,
+        "span": {
+          "start_byte": 16,
+          "end_byte": 33,
+          "start_line": 2,
+          "end_line": 2
+        }
+      },
+      {
+        "file": "src/lib.rs",
+        "name": "utils",
+        "qualname": "lib::utils",
+        "kind": "module",
+        "visibility": "public",
+        "exported": true,
+        "span": {
+          "start_byte": 34,
+          "end_byte": 48,
+          "start_line": 3,
+          "end_line": 3
+        }
+      },
+      {
+        "file": "src/lib.rs",
+        "name": "greet",
+        "qualname": "lib::greet",
+        "kind": "function",
+        "visibility": "public",
+        "exported": true,
+        "span": {
+          "start_byte": 50,
+          "end_byte": 86,
+          "start_line": 5,
+          "end_line": 5
+        }
+      },
+      {
+        "file": "src/lib.rs",
+        "name": "farewell",
+        "qualname": "lib::farewell",
+        "kind": "function",
+        "visibility": "public",
+        "exported": true,
+        "span": {
+          "start_byte": 172,
+          "end_byte": 211,
+          "start_line": 10,
+          "end_line": 10
+        }
+      }
+    ]
+  },
+  "warnings": []
+}
