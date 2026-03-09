@@ -127,26 +127,40 @@ pub fn symbols(
     )
 }
 
-pub fn calls(symbol: String, transitive: bool) -> JsonEnvelope<CallsData> {
-    JsonEnvelope::stub(
-        "calls",
-        CallsData {
-            symbol,
-            transitive,
-            traversals: Vec::new(),
-        },
-    )
+pub fn calls(
+    symbol: String,
+    transitive: bool,
+    traversals: Vec<TraversalRecord>,
+) -> JsonEnvelope<CallsData> {
+    let envelope = CallsData {
+        symbol,
+        transitive,
+        traversals,
+    };
+
+    if transitive {
+        JsonEnvelope::stub("calls", envelope)
+    } else {
+        JsonEnvelope::success("calls", envelope)
+    }
 }
 
-pub fn callers(symbol: String, transitive: bool) -> JsonEnvelope<CallsData> {
-    JsonEnvelope::stub(
-        "callers",
-        CallsData {
-            symbol,
-            transitive,
-            traversals: Vec::new(),
-        },
-    )
+pub fn callers(
+    symbol: String,
+    transitive: bool,
+    traversals: Vec<TraversalRecord>,
+) -> JsonEnvelope<CallsData> {
+    let envelope = CallsData {
+        symbol,
+        transitive,
+        traversals,
+    };
+
+    if transitive {
+        JsonEnvelope::stub("callers", envelope)
+    } else {
+        JsonEnvelope::success("callers", envelope)
+    }
 }
 
 pub fn impact(

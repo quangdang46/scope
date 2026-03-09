@@ -8,10 +8,10 @@ use serde::Serialize;
 
 use crate::{
     Certainty, DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind,
-    RepoPath, ScopeError, ScopeResult, SymbolKind, SymbolRecord, Visibility,
+    RepoPath, ScopeError, ScopeResult, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
 };
 
-pub const INDEX_SCHEMA_VERSION: u32 = 2;
+pub const INDEX_SCHEMA_VERSION: u32 = 3;
 
 const INITIAL_MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS index_meta (
@@ -74,6 +74,20 @@ CREATE TABLE IF NOT EXISTS symbols (
 );
 "#;
 
+const SYMBOL_EDGES_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS symbol_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_symbol_id INTEGER NOT NULL,
+    to_symbol_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    certainty TEXT NOT NULL,
+    call_line INTEGER NOT NULL,
+    FOREIGN KEY(from_symbol_id) REFERENCES symbols(id) ON DELETE CASCADE,
+    FOREIGN KEY(to_symbol_id) REFERENCES symbols(id) ON DELETE CASCADE,
+    UNIQUE(from_symbol_id, to_symbol_id, kind, call_line)
+);
+"#;
+
 #[derive(Debug)]
 pub struct Store {
     connection: Connection,
@@ -131,6 +145,7 @@ impl Store {
 
     pub fn persist_extract_result(&self, result: &ExtractResult) -> ScopeResult<()> {
         let file_id = self.upsert_file(&result.file)?;
+        self.delete_symbol_edges_for_file(file_id)?;
         self.connection
             .execute("DELETE FROM imports WHERE file_id = ?1", [file_id])?;
         self.connection
@@ -159,7 +174,17 @@ impl Store {
             }
         }
 
+        self.insert_resolved_call_edges(file_id, result)?;
+
         Ok(())
+    }
+
+    pub fn refresh_call_edges(&self, result: &ExtractResult) -> ScopeResult<()> {
+        let Some(file_id) = self.file_id(&result.file.path)? else {
+            return Ok(());
+        };
+        self.delete_symbol_edges_for_file(file_id)?;
+        self.insert_resolved_call_edges(file_id, result)
     }
 
     pub fn query_deps(&self, path: &RepoPath) -> ScopeResult<Vec<DependencyRecord>> {
@@ -264,6 +289,30 @@ impl Store {
         Ok(symbols)
     }
 
+    pub fn query_callees(
+        &self,
+        symbol_qualname: &str,
+        transitive: bool,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        if transitive {
+            return Ok(Vec::new());
+        }
+
+        self.query_symbol_edges(symbol_qualname, false)
+    }
+
+    pub fn query_callers(
+        &self,
+        symbol_qualname: &str,
+        transitive: bool,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        if transitive {
+            return Ok(Vec::new());
+        }
+
+        self.query_symbol_edges(symbol_qualname, true)
+    }
+
     fn file_id(&self, path: &RepoPath) -> ScopeResult<Option<i64>> {
         self.connection
             .query_row(
@@ -274,6 +323,18 @@ impl Store {
             .optional()
             .map_err(Into::into)
     }
+
+    fn symbol_id(&self, qualname: &str) -> ScopeResult<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT id FROM symbols WHERE qualname = ?1",
+                [qualname],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
 
     fn insert_import(&self, file_id: i64, import: &crate::ImportRecord) -> ScopeResult<()> {
         let (kind, resolved_file_id, external_pkg) = match &import.import_path {
@@ -309,6 +370,244 @@ impl Store {
         }
 
         Ok(())
+    }
+
+    fn delete_symbol_edges_for_file(&self, file_id: i64) -> ScopeResult<()> {
+        self.connection.execute(
+            "DELETE FROM symbol_edges
+             WHERE from_symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+            [file_id],
+        )?;
+        Ok(())
+    }
+
+    fn insert_resolved_call_edges(&self, file_id: i64, result: &ExtractResult) -> ScopeResult<()> {
+        for call_site in &result.call_sites {
+            if call_site.is_method {
+                continue;
+            }
+
+            let Some(caller_qualname) = &call_site.caller_qualname else {
+                continue;
+            };
+            let Some(caller_symbol_id) = self.symbol_id(caller_qualname)? else {
+                continue;
+            };
+
+            let Some((callee_symbol_id, certainty)) =
+                self.resolve_call_callee(file_id, &result.imports, call_site)?
+            else {
+                continue;
+            };
+
+            self.insert_symbol_edge(
+                caller_symbol_id,
+                callee_symbol_id,
+                "call",
+                certainty_name(&certainty),
+                call_site.span.start_line as i64,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn resolve_call_callee(
+        &self,
+        file_id: i64,
+        imports: &[crate::ImportRecord],
+        call_site: &crate::CallSiteRecord,
+    ) -> ScopeResult<Option<(i64, Certainty)>> {
+        if let Some(callee_qualname) = &call_site.callee_qualname {
+            if let Some(symbol_id) = self.symbol_id(callee_qualname)? {
+                return Ok(Some((symbol_id, Certainty::Resolved)));
+            }
+
+            if let Some((module_name, symbol_name)) = callee_qualname.rsplit_once("::") {
+                let mut target_file_ids = self.imported_file_ids_for_module(file_id, imports, module_name)?;
+                if target_file_ids.is_empty() {
+                    target_file_ids = self.file_ids_for_module_name(module_name)?;
+                }
+
+                if let Some(symbol_id) = self.unique_symbol_id_in_files(&target_file_ids, symbol_name)? {
+                    return Ok(Some((symbol_id, Certainty::Resolved)));
+                }
+            }
+
+            return Ok(None);
+        }
+
+        self.unique_symbol_id_in_file(file_id, &call_site.callee_name)
+            .map(|resolved| resolved.map(|symbol_id| (symbol_id, Certainty::Exact)))
+    }
+
+    fn imported_file_ids_for_module(
+        &self,
+        file_id: i64,
+        imports: &[crate::ImportRecord],
+        module_name: &str,
+    ) -> ScopeResult<Vec<i64>> {
+        let mut file_ids = Vec::new();
+        for import in imports {
+            let Some(imported_name) = import.raw_text.rsplit("::").next() else {
+                continue;
+            };
+            let imported_name = imported_name
+                .trim_end_matches(';')
+                .trim()
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .split_whitespace()
+                .last()
+                .unwrap_or_default();
+
+            if imported_name != module_name {
+                continue;
+            }
+
+            if let ImportPath::Relative(path) = &import.import_path {
+                if let Some(target_file_id) = self.file_id(path)? {
+                    file_ids.push(target_file_id);
+                }
+            }
+        }
+
+        if file_ids.is_empty() {
+            let mut statement = self.connection.prepare(
+                "SELECT to_file_id FROM file_edges
+                 WHERE from_file_id = ?1 AND kind = 'module'",
+            )?;
+            let rows = statement.query_map([file_id], |row| row.get(0))?;
+            let mut filtered_file_ids = Vec::new();
+            for row in rows {
+                let candidate_file_id: i64 = row?;
+                let path = self.file_path_for_id(candidate_file_id)?;
+                let file_name_matches = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == format!("{module_name}.rs") || name == "mod.rs");
+                let parent_matches = path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == module_name);
+                if file_name_matches || parent_matches {
+                    filtered_file_ids.push(candidate_file_id);
+                }
+            }
+            file_ids = filtered_file_ids;
+        }
+
+        file_ids.sort_unstable();
+        file_ids.dedup();
+        Ok(file_ids)
+    }
+
+    fn file_ids_for_module_name(&self, module_name: &str) -> ScopeResult<Vec<i64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, path FROM files WHERE path LIKE ?1 OR path LIKE ?2 ORDER BY path ASC",
+        )?;
+        let rows = statement.query_map(
+            params![format!("%/{module_name}.rs"), format!("%/{module_name}/mod.rs")],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+
+        let mut file_ids = Vec::new();
+        for row in rows {
+            let (id, _path) = row?;
+            file_ids.push(id);
+        }
+        Ok(file_ids)
+    }
+
+    fn unique_symbol_id_in_file(&self, file_id: i64, symbol_name: &str) -> ScopeResult<Option<i64>> {
+        self.unique_symbol_id_in_files(&[file_id], symbol_name)
+    }
+
+    fn unique_symbol_id_in_files(&self, file_ids: &[i64], symbol_name: &str) -> ScopeResult<Option<i64>> {
+        let mut matches = Vec::new();
+        for file_id in file_ids {
+            let mut statement = self.connection.prepare(
+                "SELECT id FROM symbols
+                 WHERE file_id = ?1 AND name = ?2 AND kind = 'function'",
+            )?;
+            let rows = statement.query_map(params![file_id, symbol_name], |row| row.get(0))?;
+            for row in rows {
+                matches.push(row?);
+            }
+        }
+
+        matches.sort_unstable();
+        matches.dedup();
+        if matches.len() == 1 {
+            Ok(matches.into_iter().next())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn file_path_for_id(&self, file_id: i64) -> ScopeResult<std::path::PathBuf> {
+        let path: String = self.connection.query_row(
+            "SELECT path FROM files WHERE id = ?1",
+            [file_id],
+            |row| row.get(0),
+        )?;
+        Ok(std::path::PathBuf::from(path))
+    }
+
+    fn insert_symbol_edge(
+        &self,
+        from_symbol_id: i64,
+        to_symbol_id: i64,
+        kind: &str,
+        certainty: &str,
+        call_line: i64,
+    ) -> ScopeResult<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO symbol_edges (from_symbol_id, to_symbol_id, kind, certainty, call_line)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![from_symbol_id, to_symbol_id, kind, certainty, call_line],
+        )?;
+        Ok(())
+    }
+
+    fn query_symbol_edges(
+        &self,
+        symbol_qualname: &str,
+        reverse: bool,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        let Some(symbol_id) = self.symbol_id(symbol_qualname)? else {
+            return Ok(Vec::new());
+        };
+
+        let (join_column, filter_column, reason_prefix) = if reverse {
+            ("from_symbol_id", "to_symbol_id", "called directly by")
+        } else {
+            ("to_symbol_id", "from_symbol_id", "calls")
+        };
+
+        let query = format!(
+            "SELECT files.path, symbols.qualname, symbol_edges.certainty
+             FROM symbol_edges
+             JOIN symbols ON symbols.id = symbol_edges.{join_column}
+             JOIN files ON files.id = symbols.file_id
+             WHERE symbol_edges.{filter_column} = ?1 AND symbol_edges.kind = 'call'
+             ORDER BY symbols.qualname ASC"
+        );
+        let mut statement = self.connection.prepare(&query)?;
+        let rows = statement.query_map([symbol_id], |row| {
+            Ok(TraversalRecord {
+                kind: NodeKind::Symbol,
+                path: Some(RepoPath(row.get::<_, String>(0)?)),
+                qualname: Some(row.get(1)?),
+                edge_kind: EdgeKind::Call,
+                certainty: certainty_from_db(&row.get::<_, String>(2)?),
+                reason: format!("{reason_prefix} {symbol_qualname}"),
+                distance: 1,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     fn insert_symbol(&self, file_id: i64, symbol: &SymbolRecord) -> ScopeResult<()> {
@@ -378,6 +677,11 @@ fn run_migrations(connection: &Connection) -> ScopeResult<()> {
 
     if current_version < 2 {
         connection.execute_batch(SYMBOLS_MIGRATION)?;
+        connection.pragma_update(None, "user_version", 2)?;
+    }
+
+    if current_version < 3 {
+        connection.execute_batch(SYMBOL_EDGES_MIGRATION)?;
         connection.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)?;
     }
 
@@ -491,7 +795,7 @@ fn unix_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ImportRecord, ParseStatus, Span, SymbolRecord, SymbolKind, Visibility};
+    use crate::{CallSiteRecord, ImportRecord, ParseStatus, Span, SymbolRecord, SymbolKind, Visibility};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -530,6 +834,25 @@ mod tests {
             visibility: visibility.clone(),
             exported: matches!(visibility, Visibility::Public | Visibility::Package),
             span: sample_span(1),
+        }
+    }
+
+    fn sample_call(
+        file: &str,
+        caller_qualname: &str,
+        callee_name: &str,
+        callee_qualname: Option<&str>,
+        is_method: bool,
+        line: u32,
+    ) -> CallSiteRecord {
+        CallSiteRecord {
+            file: RepoPath::from(file),
+            caller_qualname: Some(caller_qualname.to_string()),
+            callee_name: callee_name.to_string(),
+            callee_qualname: callee_qualname.map(ToOwned::to_owned),
+            is_method,
+            span: sample_span(line),
+            certainty: Certainty::Exact,
         }
     }
 
@@ -677,6 +1000,175 @@ mod tests {
             .unwrap();
         assert_eq!(functions.len(), 2);
         assert!(functions.iter().all(|symbol| symbol.kind == SymbolKind::Function));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resolves_same_file_direct_calls() {
+        let dir = unique_temp_dir("db-calls-same-file");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let source = sample_file("src/parser.rs");
+        let extract = ExtractResult {
+            file: source.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![
+                sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public),
+                sample_symbol("src/parser.rs", "tokenize", SymbolKind::Function, Visibility::Local),
+            ],
+            call_sites: vec![sample_call(
+                "src/parser.rs",
+                "parser::parse",
+                "tokenize",
+                None,
+                false,
+                2,
+            )],
+            parse_diagnostics: Vec::new(),
+        };
+
+        store.persist_extract_result(&extract).unwrap();
+
+        let callees = store.query_callees("parser::parse", false).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].qualname.as_deref(), Some("parser::tokenize"));
+        assert_eq!(callees[0].certainty, Certainty::Exact);
+
+        let callers = store.query_callers("parser::tokenize", false).unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].qualname.as_deref(), Some("parser::parse"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resolves_imported_module_direct_calls() {
+        let dir = unique_temp_dir("db-calls-imported");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let parser = sample_file("src/parser.rs");
+        store.upsert_file(&parser).unwrap();
+        store.persist_extract_result(&ExtractResult {
+            file: parser.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public)],
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        }).unwrap();
+
+        let resolver = sample_file("src/resolver.rs");
+        let extract = ExtractResult {
+            file: resolver.clone(),
+            imports: vec![ImportRecord {
+                file: resolver.path.clone(),
+                raw_text: "use crate::parser;".to_string(),
+                import_path: ImportPath::Relative(parser.path.clone()),
+                span: sample_span(1),
+                certainty: Certainty::Exact,
+            }],
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![sample_symbol("src/resolver.rs", "resolve", SymbolKind::Function, Visibility::Public)],
+            call_sites: vec![sample_call(
+                "src/resolver.rs",
+                "resolver::resolve",
+                "parse",
+                Some("parser::parse"),
+                false,
+                4,
+            )],
+            parse_diagnostics: Vec::new(),
+        };
+
+        store.persist_extract_result(&extract).unwrap();
+
+        let callees = store.query_callees("resolver::resolve", false).unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].qualname.as_deref(), Some("parser::parse"));
+        assert_eq!(callees[0].certainty, Certainty::Resolved);
+
+        let callers = store.query_callers("parser::parse", false).unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].qualname.as_deref(), Some("resolver::resolve"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn skips_unresolved_method_calls() {
+        let dir = unique_temp_dir("db-calls-method");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let source = sample_file("src/lib.rs");
+        let extract = ExtractResult {
+            file: source.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![sample_symbol("src/lib.rs", "greet", SymbolKind::Function, Visibility::Public)],
+            call_sites: vec![sample_call("src/lib.rs", "lib::greet", "join", None, true, 7)],
+            parse_diagnostics: Vec::new(),
+        };
+
+        store.persist_extract_result(&extract).unwrap();
+
+        let callees = store.query_callees("lib::greet", false).unwrap();
+        assert!(callees.is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reindexing_replaces_stale_call_edges() {
+        let dir = unique_temp_dir("db-calls-reindex");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let source = sample_file("src/parser.rs");
+        let initial = ExtractResult {
+            file: source.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![
+                sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public),
+                sample_symbol("src/parser.rs", "tokenize", SymbolKind::Function, Visibility::Local),
+            ],
+            call_sites: vec![sample_call(
+                "src/parser.rs",
+                "parser::parse",
+                "tokenize",
+                None,
+                false,
+                2,
+            )],
+            parse_diagnostics: Vec::new(),
+        };
+        store.persist_extract_result(&initial).unwrap();
+        assert_eq!(store.query_callees("parser::parse", false).unwrap().len(), 1);
+
+        let updated = ExtractResult {
+            file: source,
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![
+                sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public),
+                sample_symbol("src/parser.rs", "tokenize", SymbolKind::Function, Visibility::Local),
+            ],
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        };
+        store.persist_extract_result(&updated).unwrap();
+        assert!(store.query_callees("parser::parse", false).unwrap().is_empty());
 
         std::fs::remove_dir_all(dir).unwrap();
     }

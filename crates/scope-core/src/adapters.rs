@@ -4,6 +4,7 @@ use crate::{
     Certainty, ExportRecord, ExtractResult, FileRecord, ImportPath, ImportRecord, ModuleRecord,
     ParseStatus, RepoPath, ScanEntry, Span, SymbolKind, SymbolRecord, Visibility,
 };
+use crate::model::CallSiteRecord;
 
 pub trait Adapter: Send + Sync {
     /// File extensions handled by this adapter, without leading dots.
@@ -35,15 +36,21 @@ impl Adapter for RustAdapter {
         let mut modules = Vec::new();
         let mut exports = Vec::new();
         let mut symbols = Vec::new();
+        let mut call_sites = Vec::new();
 
         let repo_root = infer_repo_root(entry);
         let crate_root = repo_root.join("src");
         let module_dir = rust_module_dir(entry);
 
         let mut byte_offset = 0usize;
+        let mut brace_depth = 0i32;
+        let mut current_function_qualname: Option<String> = None;
         for (line_index, line) in source.lines().enumerate() {
             let trimmed = line.trim();
             let span = line_span(line, byte_offset, line_index);
+            let scan_line = strip_line_comment(line);
+            let line_open_braces = scan_line.bytes().filter(|byte| *byte == b'{').count() as i32;
+            let line_close_braces = scan_line.bytes().filter(|byte| *byte == b'}').count() as i32;
 
             if let Some(module) = parse_module_declaration(trimmed, &entry.path, &module_dir, &span)
             {
@@ -86,9 +93,24 @@ impl Adapter for RustAdapter {
                 });
             }
 
-            if let Some(symbol) = parse_top_level_symbol(trimmed, &entry.path, &span) {
+            let function_qualname_for_line = current_function_qualname.as_deref();
+            call_sites.extend(extract_call_sites_from_line(
+                line,
+                byte_offset,
+                line_index,
+                &entry.path,
+                function_qualname_for_line,
+            ));
+
+            let declared_function_qualname = parse_top_level_symbol(trimmed, &entry.path, &span).map(|symbol| {
+                let qualname = if symbol.kind == SymbolKind::Function {
+                    Some(symbol.qualname.clone())
+                } else {
+                    None
+                };
                 symbols.push(symbol);
-            }
+                qualname
+            }).flatten();
 
             if let Some(import_record) =
                 parse_use_declaration(trimmed, &entry.path, &crate_root, &module_dir, &span)
@@ -107,6 +129,18 @@ impl Adapter for RustAdapter {
                 imports.push(import_record);
             }
 
+            let previous_brace_depth = brace_depth;
+            brace_depth += line_open_braces - line_close_braces;
+
+            if previous_brace_depth == 0 && current_function_qualname.is_none() && line_open_braces > line_close_braces {
+                current_function_qualname = declared_function_qualname;
+            }
+
+            if brace_depth <= 0 {
+                brace_depth = 0;
+                current_function_qualname = None;
+            }
+
             byte_offset += line.len() + 1;
         }
 
@@ -121,7 +155,7 @@ impl Adapter for RustAdapter {
             modules,
             exports,
             symbols,
-            call_sites: Vec::new(),
+            call_sites,
             parse_diagnostics: Vec::new(),
         }
     }
@@ -469,6 +503,190 @@ fn line_span(line: &str, byte_offset: usize, line_index: usize) -> Span {
     }
 }
 
+fn extract_call_sites_from_line(
+    line: &str,
+    byte_offset: usize,
+    line_index: usize,
+    file: &RepoPath,
+    caller_qualname: Option<&str>,
+) -> Vec<CallSiteRecord> {
+    let scan_line = strip_line_comment(line);
+    let trimmed = scan_line.trim();
+    let declared_function_name = declared_function_name_on_line(trimmed);
+    let bytes = scan_line.as_bytes();
+    let mut call_sites = Vec::new();
+
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'(' {
+            continue;
+        }
+
+        let Some(candidate) = callable_candidate_before_paren(&scan_line, index) else {
+            continue;
+        };
+
+        if is_non_call_keyword(&candidate.text)
+            || looks_like_macro_invocation(&scan_line, candidate.start)
+            || declared_function_name.as_deref() == Some(candidate.text.as_str())
+        {
+            continue;
+        }
+
+        let callee_name = candidate
+            .text
+            .rsplit([':', '.'])
+            .next()
+            .unwrap_or(candidate.text.as_str())
+            .to_string();
+
+        let callee_qualname = if candidate.text.contains("::") {
+            Some(candidate.text.clone())
+        } else {
+            None
+        };
+
+        call_sites.push(CallSiteRecord {
+            file: file.clone(),
+            caller_qualname: caller_qualname.map(ToOwned::to_owned),
+            callee_name,
+            callee_qualname,
+            is_method: candidate.is_method,
+            span: Span {
+                start_byte: (byte_offset + candidate.start) as u32,
+                end_byte: (byte_offset + candidate.end) as u32,
+                start_line: line_index as u32 + 1,
+                end_line: line_index as u32 + 1,
+            },
+            certainty: Certainty::Exact,
+        });
+    }
+
+    call_sites
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallCandidate {
+    text: String,
+    start: usize,
+    end: usize,
+    is_method: bool,
+}
+
+fn callable_candidate_before_paren(line: &str, paren_index: usize) -> Option<CallCandidate> {
+    if paren_index == 0 {
+        return None;
+    }
+
+    let bytes = line.as_bytes();
+    let mut end = paren_index;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+
+    if end == 0 {
+        return None;
+    }
+
+    let mut start = end;
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'.') {
+            start -= 1;
+            continue;
+        }
+        break;
+    }
+
+    if start == end {
+        return None;
+    }
+
+    let candidate = &line[start..end];
+    if !candidate.chars().any(|character| character.is_ascii_alphabetic() || character == '_') {
+        return None;
+    }
+
+    let candidate = if let Some((_, method_name)) = candidate.rsplit_once('.') {
+        if method_name.is_empty() {
+            return None;
+        }
+        CallCandidate {
+            text: method_name.to_string(),
+            start: end - method_name.len(),
+            end,
+            is_method: true,
+        }
+    } else {
+        CallCandidate {
+            text: candidate.to_string(),
+            start,
+            end,
+            is_method: false,
+        }
+    };
+
+    if candidate
+        .text
+        .split("::")
+        .any(|segment| !is_valid_rust_identifier(segment))
+    {
+        return None;
+    }
+
+    Some(candidate)
+}
+
+fn strip_line_comment(line: &str) -> &str {
+    line.split("//").next().unwrap_or(line)
+}
+
+fn declared_function_name_on_line(trimmed: &str) -> Option<String> {
+    let body = strip_visibility_prefix(trimmed);
+    let prefix = if body.starts_with("async fn ") {
+        "async fn "
+    } else if body.starts_with("fn ") {
+        "fn "
+    } else {
+        return None;
+    };
+
+    identifier_after_prefix(body, prefix)
+}
+
+fn looks_like_macro_invocation(line: &str, candidate_start: usize) -> bool {
+    line[..candidate_start].trim_end().ends_with('!')
+}
+
+fn is_non_call_keyword(candidate: &str) -> bool {
+    matches!(
+        candidate,
+        "if"
+            | "match"
+            | "while"
+            | "loop"
+            | "for"
+            | "fn"
+            | "struct"
+            | "enum"
+            | "trait"
+            | "impl"
+            | "return"
+    )
+}
+
+fn is_valid_rust_identifier(segment: &str) -> bool {
+    let mut characters = segment.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+
+    characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +821,120 @@ mod tests {
         assert_eq!(result.symbols[0].qualname, "parser::parse");
         assert_eq!(result.symbols[1].qualname, "parser::tokenize");
         assert_eq!(result.symbols[1].span.start_line, 5);
+    }
+
+    #[test]
+    fn extracts_direct_call_sites_from_rust_small_fixture_files() {
+        let adapter = RustAdapter;
+        let entry = fixture_entry("src/lib.rs");
+        let source = std::fs::read_to_string(&entry.absolute_path).unwrap();
+
+        let result = adapter.extract(&entry, &source);
+        let calls: Vec<_> = result
+            .call_sites
+            .iter()
+            .map(|call| {
+                (
+                    call.caller_qualname.clone(),
+                    call.callee_name.clone(),
+                    call.callee_qualname.clone(),
+                    call.span.start_line,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    Some("lib::greet".to_string()),
+                    "parse".to_string(),
+                    Some("parser::parse".to_string()),
+                    6,
+                ),
+                (
+                    Some("lib::greet".to_string()),
+                    "format_output".to_string(),
+                    Some("utils::format_output".to_string()),
+                    7,
+                ),
+                (Some("lib::greet".to_string()), "join".to_string(), None, 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_nested_and_method_calls_conservatively() {
+        let file = RepoPath::from("src/example.rs");
+        let calls = extract_call_sites_from_line(
+            "    outer(inner(), value.join(\"::\"));",
+            0,
+            0,
+            &file,
+            Some("example::caller"),
+        );
+
+        let extracted: Vec<_> = calls
+            .into_iter()
+            .map(|call| {
+                (
+                    call.caller_qualname,
+                    call.callee_name,
+                    call.callee_qualname,
+                    call.is_method,
+                    call.span.start_byte,
+                    call.span.end_byte,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            extracted,
+            vec![
+                (Some("example::caller".to_string()), "outer".to_string(), None, false, 4, 9),
+                (Some("example::caller".to_string()), "inner".to_string(), None, false, 10, 15),
+                (Some("example::caller".to_string()), "join".to_string(), None, true, 25, 29),
+            ]
+        );
+    }
+
+    #[test]
+    fn attributes_calls_to_enclosing_top_level_functions() {
+        let adapter = RustAdapter;
+        let entry = fixture_entry("src/parser.rs");
+        let source = std::fs::read_to_string(&entry.absolute_path).unwrap();
+
+        let result = adapter.extract(&entry, &source);
+        let calls: Vec<_> = result
+            .call_sites
+            .iter()
+            .map(|call| (call.caller_qualname.clone(), call.callee_name.clone()))
+            .collect();
+
+        assert_eq!(
+            calls,
+            vec![
+                (Some("parser::parse".to_string()), "tokenize".to_string()),
+                (Some("parser::tokenize".to_string()), "split_whitespace".to_string()),
+                (Some("parser::tokenize".to_string()), "map".to_string()),
+                (Some("parser::tokenize".to_string()), "collect".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_macros_comments_and_control_flow_keywords() {
+        let file = RepoPath::from("src/example.rs");
+
+        assert!(extract_call_sites_from_line("println!(\"{}\", foo());", 0, 0, &file, None)
+            .into_iter()
+            .map(|call| call.callee_name)
+            .eq(vec!["foo".to_string()]));
+        assert!(extract_call_sites_from_line("if condition(foo()) {}", 0, 0, &file, None)
+            .into_iter()
+            .map(|call| call.callee_name)
+            .eq(vec!["condition".to_string(), "foo".to_string()]));
+        assert!(extract_call_sites_from_line("// ignored_call()", 0, 0, &file, None).is_empty());
     }
 
     #[test]

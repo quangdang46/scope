@@ -153,8 +153,10 @@ pub struct SymbolRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallSiteRecord {
     pub file: RepoPath,
+    pub caller_qualname: Option<String>,
     pub callee_name: String,
     pub callee_qualname: Option<String>,
+    pub is_method: bool,
     pub span: Span,
     pub certainty: Certainty,
 }

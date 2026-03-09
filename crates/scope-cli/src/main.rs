@@ -87,10 +87,30 @@ fn run() -> Result<(), scope_core::ScopeError> {
             ))
         }
         Commands::Calls(args) => {
-            serde_json::to_string_pretty(&scope_core::stub::calls(args.symbol, args.transitive))
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let traversals = context.store.query_callees(&args.symbol, args.transitive)?;
+            serde_json::to_string_pretty(&scope_core::stub::calls(
+                args.symbol,
+                args.transitive,
+                traversals,
+            ))
         }
         Commands::Callers(args) => {
-            serde_json::to_string_pretty(&scope_core::stub::callers(args.symbol, args.transitive))
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let traversals = context.store.query_callers(&args.symbol, args.transitive)?;
+            serde_json::to_string_pretty(&scope_core::stub::callers(
+                args.symbol,
+                args.transitive,
+                traversals,
+            ))
         }
         Commands::Impact(args) => serde_json::to_string_pretty(&scope_core::stub::impact(
             args.target,
@@ -171,6 +191,22 @@ fn index_repo(
         let extract = adapter.extract(&entry, &source);
         store.persist_extract_result(&extract)?;
         indexed_files += 1;
+    }
+
+    let entries = scan_repo(repo_root, &ScanConfig::default())?;
+    for entry in entries {
+        if entry.language != SupportedLanguage::Rust {
+            continue;
+        }
+
+        if !scope_core::adapters::supports_path(&adapter, &entry.absolute_path) {
+            continue;
+        }
+
+        let source = std::fs::read_to_string(&entry.absolute_path)
+            .map_err(|error| scope_core::ScopeError::io(&entry.absolute_path, error))?;
+        let extract = adapter.extract(&entry, &source);
+        store.refresh_call_edges(&extract)?;
     }
 
     Ok(indexed_files)

@@ -5,8 +5,8 @@ use std::{
 };
 
 use scope_core::{
-    scan_repo, stub, Adapter, RepoPath, RustAdapter, ScanConfig, Store, SupportedLanguage,
-    SymbolKind,
+    scan_repo, stub, Adapter, EdgeKind, RepoPath, RustAdapter, ScanConfig, Store,
+    SupportedLanguage, SymbolKind,
 };
 
 fn repo_root() -> PathBuf {
@@ -63,18 +63,21 @@ fn index_fixture(repo_root: &Path) -> Store {
     let store = Store::open(&repo_root.join(".scope/index.db")).unwrap();
     let adapter = RustAdapter;
     let entries = scan_repo(repo_root, &ScanConfig::default()).unwrap();
+    let extracts: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| entry.language == SupportedLanguage::Rust)
+        .filter(|entry| scope_core::adapters::supports_path(&adapter, &entry.absolute_path))
+        .map(|entry| {
+            let source = fs::read_to_string(&entry.absolute_path).unwrap();
+            adapter.extract(&entry, &source)
+        })
+        .collect();
 
-    for entry in entries {
-        if entry.language != SupportedLanguage::Rust {
-            continue;
-        }
-        if !scope_core::adapters::supports_path(&adapter, &entry.absolute_path) {
-            continue;
-        }
-
-        let source = fs::read_to_string(&entry.absolute_path).unwrap();
-        let extract = adapter.extract(&entry, &source);
-        store.persist_extract_result(&extract).unwrap();
+    for extract in &extracts {
+        store.persist_extract_result(extract).unwrap();
+    }
+    for extract in &extracts {
+        store.refresh_call_edges(extract).unwrap();
     }
 
     store
@@ -239,6 +242,53 @@ fn rust_small_function_symbols_query_matches_golden_json() {
     let expected = read_golden("rust_small_lib_function_symbols.json");
 
     assert_eq!(actual, expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_direct_calls_are_resolved_conservatively() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let greet_calls = store.query_callees("lib::greet", false).unwrap();
+    let greet_callees: Vec<_> = greet_calls
+        .iter()
+        .map(|traversal| {
+            (
+                traversal.qualname.clone(),
+                traversal.edge_kind.clone(),
+                traversal.certainty.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        greet_callees,
+        vec![
+            (
+                Some("parser::parse".to_string()),
+                EdgeKind::Call,
+                scope_core::Certainty::Resolved,
+            ),
+            (
+                Some("utils::format_output".to_string()),
+                EdgeKind::Call,
+                scope_core::Certainty::Resolved,
+            ),
+        ]
+    );
+
+    let parser_calls = store.query_callees("parser::parse", false).unwrap();
+    assert_eq!(parser_calls.len(), 1);
+    assert_eq!(parser_calls[0].qualname.as_deref(), Some("parser::tokenize"));
+    assert_eq!(parser_calls[0].certainty, scope_core::Certainty::Exact);
+
+    let parser_callers = store.query_callers("parser::parse", false).unwrap();
+    let parser_caller_names: Vec<_> = parser_callers
+        .iter()
+        .filter_map(|traversal| traversal.qualname.clone())
+        .collect();
+    assert_eq!(parser_caller_names, vec!["lib::greet".to_string(), "resolver::resolve".to_string()]);
 
     fs::remove_dir_all(repo).unwrap();
 }
