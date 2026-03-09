@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     Certainty, ExportRecord, ExtractResult, FileRecord, ImportPath, ImportRecord, ModuleRecord,
-    ParseStatus, RepoPath, ScanEntry, Span, SymbolKind, Visibility,
+    ParseStatus, RepoPath, ScanEntry, Span, SymbolKind, SymbolRecord, Visibility,
 };
 
 pub trait Adapter: Send + Sync {
@@ -34,6 +34,7 @@ impl Adapter for RustAdapter {
         let mut imports = Vec::new();
         let mut modules = Vec::new();
         let mut exports = Vec::new();
+        let mut symbols = Vec::new();
 
         let repo_root = infer_repo_root(entry);
         let crate_root = repo_root.join("src");
@@ -47,6 +48,7 @@ impl Adapter for RustAdapter {
             if let Some(module) = parse_module_declaration(trimmed, &entry.path, &module_dir, &span)
             {
                 let exported_module_name = module.name.clone();
+                let module_qualname = qualified_symbol_name(&entry.path, &module.name);
 
                 if let Some(declared_path) = &module.declared_path {
                     if !repo_root.join(&declared_path.0).exists() {
@@ -65,13 +67,27 @@ impl Adapter for RustAdapter {
                 if trimmed.starts_with("pub mod ") {
                     exports.push(ExportRecord {
                         file: entry.path.clone(),
-                        name: exported_module_name,
+                        name: exported_module_name.clone(),
                         qualname: None,
                         kind: SymbolKind::Module,
                         visibility: Visibility::Public,
                         span: span.clone(),
                     });
                 }
+
+                symbols.push(SymbolRecord {
+                    file: entry.path.clone(),
+                    name: exported_module_name,
+                    qualname: module_qualname,
+                    kind: SymbolKind::Module,
+                    visibility: visibility_from_item(trimmed),
+                    exported: trimmed.starts_with("pub mod "),
+                    span: span.clone(),
+                });
+            }
+
+            if let Some(symbol) = parse_top_level_symbol(trimmed, &entry.path, &span) {
+                symbols.push(symbol);
             }
 
             if let Some(import_record) =
@@ -104,10 +120,130 @@ impl Adapter for RustAdapter {
             imports,
             modules,
             exports,
-            symbols: Vec::new(),
+            symbols,
             call_sites: Vec::new(),
             parse_diagnostics: Vec::new(),
         }
+    }
+}
+
+fn parse_top_level_symbol(trimmed: &str, file: &RepoPath, span: &Span) -> Option<SymbolRecord> {
+    let body = strip_visibility_prefix(trimmed);
+    let (prefix, kind) = [
+        ("fn ", SymbolKind::Function),
+        ("struct ", SymbolKind::Struct),
+        ("enum ", SymbolKind::Enum),
+        ("trait ", SymbolKind::Trait),
+        ("const ", SymbolKind::Constant),
+        ("static ", SymbolKind::Static),
+        ("type ", SymbolKind::TypeAlias),
+    ]
+    .into_iter()
+    .find(|(prefix, _)| body.starts_with(prefix))?;
+
+    let name = identifier_after_prefix(body, prefix)?;
+    let semantics = visibility_semantics(trimmed);
+    Some(SymbolRecord {
+        file: file.clone(),
+        name: name.clone(),
+        qualname: qualified_symbol_name(file, &name),
+        kind,
+        visibility: semantics.visibility,
+        exported: semantics.exported,
+        span: span.clone(),
+    })
+}
+
+fn identifier_after_prefix(trimmed: &str, prefix: &str) -> Option<String> {
+    let remainder = trimmed.strip_prefix(prefix)?.trim_start();
+    let identifier: String = remainder
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect();
+
+    if identifier.is_empty() {
+        None
+    } else {
+        Some(identifier)
+    }
+}
+
+fn qualified_symbol_name(file: &RepoPath, name: &str) -> String {
+    let module = file
+        .0
+        .strip_prefix("src/")
+        .unwrap_or(&file.0)
+        .trim_end_matches(".rs")
+        .replace("/mod", "")
+        .replace('/', "::");
+
+    if module.is_empty() {
+        name.to_string()
+    } else {
+        format!("{module}::{name}")
+    }
+}
+
+#[derive(Clone)]
+struct VisibilitySemantics {
+    visibility: Visibility,
+    exported: bool,
+}
+
+fn visibility_from_item(trimmed: &str) -> Visibility {
+    visibility_semantics(trimmed).visibility
+}
+
+fn visibility_semantics(trimmed: &str) -> VisibilitySemantics {
+    if trimmed.starts_with("pub(crate)") {
+        VisibilitySemantics {
+            visibility: Visibility::Package,
+            exported: true,
+        }
+    } else if trimmed.starts_with("pub(super)") {
+        VisibilitySemantics {
+            visibility: Visibility::Module,
+            exported: false,
+        }
+    } else if trimmed.starts_with("pub(self)") {
+        VisibilitySemantics {
+            visibility: Visibility::Local,
+            exported: false,
+        }
+    } else if trimmed.starts_with("pub(in ") {
+        VisibilitySemantics {
+            visibility: Visibility::Unknown,
+            exported: false,
+        }
+    } else if trimmed.starts_with("pub ") || trimmed == "pub" {
+        VisibilitySemantics {
+            visibility: Visibility::Public,
+            exported: true,
+        }
+    } else {
+        VisibilitySemantics {
+            visibility: Visibility::Local,
+            exported: false,
+        }
+    }
+}
+
+fn strip_visibility_prefix(trimmed: &str) -> &str {
+    if let Some(remainder) = trimmed.strip_prefix("pub(crate) ") {
+        remainder
+    } else if let Some(remainder) = trimmed.strip_prefix("pub(super) ") {
+        remainder
+    } else if let Some(remainder) = trimmed.strip_prefix("pub(self) ") {
+        remainder
+    } else if let Some(remainder) = trimmed.strip_prefix("pub(in ") {
+        remainder
+            .split_once(") ")
+            .map(|(_, tail)| tail)
+            .unwrap_or(remainder)
+    } else if let Some(remainder) = trimmed.strip_prefix("pub ") {
+        remainder
+    } else {
+        trimmed
     }
 }
 
@@ -417,5 +553,118 @@ mod tests {
         );
 
         assert_eq!(path, ImportPath::External("std".to_string()));
+    }
+
+    #[test]
+    fn extracts_top_level_symbols_from_rust_small_files() {
+        let adapter = RustAdapter;
+        let entry = fixture_entry("src/lib.rs");
+        let source = std::fs::read_to_string(&entry.absolute_path).unwrap();
+
+        let result = adapter.extract(&entry, &source);
+        let names_and_kinds: Vec<_> = result
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.name.clone(), symbol.kind.clone(), symbol.visibility.clone()))
+            .collect();
+
+        assert_eq!(
+            names_and_kinds,
+            vec![
+                ("parser".to_string(), SymbolKind::Module, Visibility::Public),
+                ("resolver".to_string(), SymbolKind::Module, Visibility::Public),
+                ("utils".to_string(), SymbolKind::Module, Visibility::Public),
+                ("greet".to_string(), SymbolKind::Function, Visibility::Public),
+                ("farewell".to_string(), SymbolKind::Function, Visibility::Public),
+            ]
+        );
+        assert_eq!(result.symbols[0].qualname, "lib::parser");
+        assert_eq!(result.symbols[3].qualname, "lib::greet");
+        assert_eq!(result.symbols[3].span.start_line, 5);
+        assert_eq!(result.symbols[4].span.start_line, 10);
+    }
+
+    #[test]
+    fn extracts_local_function_symbols_from_nested_files() {
+        let adapter = RustAdapter;
+        let entry = fixture_entry("src/parser.rs");
+        let source = std::fs::read_to_string(&entry.absolute_path).unwrap();
+
+        let result = adapter.extract(&entry, &source);
+        let names: Vec<_> = result.symbols.iter().map(|symbol| symbol.name.clone()).collect();
+        let visibilities: Vec<_> = result
+            .symbols
+            .iter()
+            .map(|symbol| symbol.visibility.clone())
+            .collect();
+
+        assert_eq!(names, vec!["parse", "tokenize"]);
+        assert_eq!(visibilities, vec![Visibility::Public, Visibility::Local]);
+        assert_eq!(result.symbols[0].qualname, "parser::parse");
+        assert_eq!(result.symbols[1].qualname, "parser::tokenize");
+        assert_eq!(result.symbols[1].span.start_line, 5);
+    }
+
+    #[test]
+    fn normalizes_rust_visibility_semantics_conservatively() {
+        assert_eq!(visibility_semantics("pub fn greet() {} ").visibility, Visibility::Public);
+        assert!(visibility_semantics("pub fn greet() {} ").exported);
+
+        assert_eq!(
+            visibility_semantics("pub(crate) fn greet() {}").visibility,
+            Visibility::Package
+        );
+        assert!(visibility_semantics("pub(crate) fn greet() {}").exported);
+
+        assert_eq!(
+            visibility_semantics("pub(super) fn greet() {}").visibility,
+            Visibility::Module
+        );
+        assert!(!visibility_semantics("pub(super) fn greet() {}").exported);
+
+        assert_eq!(
+            visibility_semantics("pub(self) fn greet() {}").visibility,
+            Visibility::Local
+        );
+        assert!(!visibility_semantics("pub(self) fn greet() {}").exported);
+
+        assert_eq!(
+            visibility_semantics("pub(in crate::internal) fn greet() {}").visibility,
+            Visibility::Unknown
+        );
+        assert!(!visibility_semantics("pub(in crate::internal) fn greet() {}").exported);
+
+        assert_eq!(visibility_semantics("fn greet() {}").visibility, Visibility::Local);
+        assert!(!visibility_semantics("fn greet() {}").exported);
+    }
+
+    #[test]
+    fn parses_non_public_visibility_prefixes_for_symbols() {
+        let file = RepoPath::from("src/example.rs");
+        let span = Span {
+            start_byte: 0,
+            end_byte: 24,
+            start_line: 1,
+            end_line: 1,
+        };
+
+        let package_symbol =
+            parse_top_level_symbol("pub(crate) fn helper() {}", &file, &span).unwrap();
+        assert_eq!(package_symbol.visibility, Visibility::Package);
+        assert!(package_symbol.exported);
+
+        let module_symbol =
+            parse_top_level_symbol("pub(super) const VALUE: u32 = 1;", &file, &span).unwrap();
+        assert_eq!(module_symbol.visibility, Visibility::Module);
+        assert!(!module_symbol.exported);
+
+        let unknown_symbol = parse_top_level_symbol(
+            "pub(in crate::internal) type Alias = u32;",
+            &file,
+            &span,
+        )
+        .unwrap();
+        assert_eq!(unknown_symbol.visibility, Visibility::Unknown);
+        assert!(!unknown_symbol.exported);
     }
 }
