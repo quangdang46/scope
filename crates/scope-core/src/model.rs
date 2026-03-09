@@ -120,6 +120,16 @@ pub struct ImportRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModuleRecord {
+    pub file: RepoPath,
+    pub name: String,
+    pub declared_path: Option<RepoPath>,
+    pub is_inline: bool,
+    pub span: Span,
+    pub certainty: Certainty,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExportRecord {
     pub file: RepoPath,
     pub name: String,
@@ -161,6 +171,7 @@ pub struct ParseDiagnostic {
 pub struct ExtractResult {
     pub file: FileRecord,
     pub imports: Vec<ImportRecord>,
+    pub modules: Vec<ModuleRecord>,
     pub exports: Vec<ExportRecord>,
     pub symbols: Vec<SymbolRecord>,
     pub call_sites: Vec<CallSiteRecord>,
