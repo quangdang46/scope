@@ -13,7 +13,11 @@ pub struct AppContext {
     pub store: Store,
 }
 
-pub fn bootstrap(cwd: &Path, options: &BootstrapOptions, verbosity: Verbosity) -> ScopeResult<AppContext> {
+pub fn bootstrap(
+    cwd: &Path,
+    options: &BootstrapOptions,
+    verbosity: Verbosity,
+) -> ScopeResult<AppContext> {
     init_tracing(verbosity)?;
     let paths = discover_runtime_paths(cwd, options)?;
     ensure_scope_dir(&paths.scope_dir)?;

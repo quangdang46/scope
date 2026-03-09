@@ -20,8 +20,12 @@ pub fn init_tracing(verbosity: Verbosity) -> ScopeResult<()> {
 
     let filter = match verbosity {
         Verbosity::Quiet => EnvFilter::new("error"),
-        Verbosity::Normal => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        Verbosity::Verbose => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
+        Verbosity::Normal => {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        }
+        Verbosity::Verbose => {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"))
+        }
     };
 
     tracing_subscriber::fmt()

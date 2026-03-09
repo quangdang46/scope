@@ -28,10 +28,12 @@ pub struct DatabaseInfo {
 impl Store {
     pub fn open(db_path: &Path) -> ScopeResult<Self> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| ScopeError::database(db_path, error))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| ScopeError::database(db_path, error))?;
         }
 
-        let connection = Connection::open(db_path).map_err(|error| ScopeError::database(db_path, error))?;
+        let connection =
+            Connection::open(db_path).map_err(|error| ScopeError::database(db_path, error))?;
         configure_connection(&connection, db_path)?;
         run_migrations(&connection)?;
         bootstrap_meta(&connection)?;

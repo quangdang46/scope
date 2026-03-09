@@ -50,7 +50,33 @@ pub struct ImpactData {
     pub risk: &'static str,
 }
 
-pub fn index(repo_root: String, no_git: bool, watch: bool, database: DatabaseInfo) -> JsonEnvelope<IndexData> {
+#[derive(Debug, Serialize)]
+pub struct ExplainData {
+    pub target: String,
+    pub to: Option<String>,
+    pub depth: Option<usize>,
+    pub traversals: Vec<TraversalRecord>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DoctorData {
+    pub fix: bool,
+    pub checks: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BenchmarkData {
+    pub fixture: Option<String>,
+    pub iterations: Option<u32>,
+    pub benchmarks: Vec<String>,
+}
+
+pub fn index(
+    repo_root: String,
+    no_git: bool,
+    watch: bool,
+    database: DatabaseInfo,
+) -> JsonEnvelope<IndexData> {
     JsonEnvelope::success(
         "index",
         IndexData {
@@ -131,6 +157,43 @@ pub fn impact(
             depth,
             impacted: Vec::new(),
             risk: "unknown",
+        },
+    )
+}
+
+pub fn explain(
+    target: String,
+    to: Option<String>,
+    depth: Option<usize>,
+) -> JsonEnvelope<ExplainData> {
+    JsonEnvelope::stub(
+        "explain",
+        ExplainData {
+            target,
+            to,
+            depth,
+            traversals: Vec::new(),
+        },
+    )
+}
+
+pub fn doctor(fix: bool) -> JsonEnvelope<DoctorData> {
+    JsonEnvelope::stub(
+        "doctor",
+        DoctorData {
+            fix,
+            checks: Vec::new(),
+        },
+    )
+}
+
+pub fn benchmark(fixture: Option<String>, iterations: Option<u32>) -> JsonEnvelope<BenchmarkData> {
+    JsonEnvelope::stub(
+        "benchmark",
+        BenchmarkData {
+            fixture,
+            iterations,
+            benchmarks: Vec::new(),
         },
     )
 }

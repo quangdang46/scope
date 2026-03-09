@@ -59,6 +59,16 @@ fn run() -> Result<(), scope_core::ScopeError> {
             change_type_name(args.change_type),
             args.depth,
         )),
+        Commands::Explain(args) => serde_json::to_string_pretty(&scope_core::stub::explain(
+            args.target,
+            args.to,
+            args.depth,
+        )),
+        Commands::Doctor(args) => serde_json::to_string_pretty(&scope_core::stub::doctor(args.fix)),
+        Commands::Benchmark(args) => serde_json::to_string_pretty(&scope_core::stub::benchmark(
+            args.fixture,
+            args.iterations,
+        )),
     }
     .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
 

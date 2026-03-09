@@ -32,6 +32,12 @@ pub enum Commands {
     Callers(CallersArgs),
     /// Estimate static impact for a change target
     Impact(ImpactArgs),
+    /// Explain why a file or symbol appears in impact results
+    Explain(ExplainArgs),
+    /// Inspect repository and index health
+    Doctor(DoctorArgs),
+    /// Run benchmark scaffolding for future performance work
+    Benchmark(BenchmarkArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -106,4 +112,27 @@ pub enum ChangeType {
     Delete,
     Visibility,
     SideEffect,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ExplainArgs {
+    pub target: String,
+    #[arg(long)]
+    pub to: Option<String>,
+    #[arg(long)]
+    pub depth: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DoctorArgs {
+    #[arg(long)]
+    pub fix: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct BenchmarkArgs {
+    #[arg(long)]
+    pub fixture: Option<String>,
+    #[arg(long)]
+    pub iterations: Option<u32>,
 }

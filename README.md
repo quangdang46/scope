@@ -1,175 +1,237 @@
 # scope
 
-> Instant dependency graph for any file or function. Know the full impact of a change **before** making it.
+> Local static-analysis workspace for dependency and impact queries.
+>
+> Today, `scope` is an early Rust scaffold: it can bootstrap a local SQLite index and expose a machine-readable CLI surface, but the parser, graph builder, and real query engine are still in progress.
 
 ---
 
-## The Problem
+## Current Status
 
-Before editing a file, Claude Code needs to understand:
-- What does this file import?
-- Who imports this file?
-- Which functions are public vs internal?
-- If I change this, what else breaks?
+The repository currently implements:
 
-Without a tool, Claude Code reads file after file, following import chains manually. That's 5–20 file reads per question, burning context window before any real work begins.
+- a Rust workspace with `scope-core`, `scope-cli`, and `scope-mcp`
+- bootstrap logic for discovering the repo root and creating `.scope/index.db`
+- SQLite initialization and schema version tracking
+- a JSON-first CLI surface for planned query commands
+- stub responses for query commands while the analysis engine is being built
 
-## Why scope Is Better
+The repository does **not** yet implement:
 
-| | Claude Code alone | scope |
-|---|---|---|
-| Find all importers of a file | Read N files manually | Instant from index |
-| Map function call graph | Read + parse manually | Pre-built graph |
-| Estimate change impact | Guess or exhaustive read | `scope impact <file>` |
-| Token cost | High (many file reads) | Near zero (structured JSON) |
-| Speed | Seconds to minutes | < 100ms |
+- source walking / `.gitignore`-aware indexing
+- tree-sitter parsing
+- dependency graph construction
+- symbol or call resolution
+- impact traversal
+- a working MCP server
 
-## How It Works
+## The Goal
 
+Before editing a file, an agent should be able to ask:
+
+- What does this file depend on?
+- What depends on this file?
+- Which symbols are defined here?
+- What calls this symbol?
+- What is the likely blast radius of a change?
+
+`scope` is being built to answer those questions from a local persistent index rather than from repeated manual file reads.
+
+## Architecture Direction
+
+The intended architecture is:
+
+```text
+1. Bootstrap runtime state
+   └── discover repo root
+   └── create .scope/
+   └── open SQLite index
+
+2. Index source files   (planned)
+   └── walk source files
+   └── parse files into imports / symbols / call sites
+   └── persist file and symbol graph data
+
+3. Query the graph      (planned)
+   └── deps / symbols / calls / callers / impact
+   └── return structured JSON for agents and tooling
 ```
-1. Index phase  (once, ~2s for 10k file project)
-   └── walk all source files (respects .gitignore)
-   └── tree-sitter extracts: imports, exports, function defs, calls
-   └── build directed graph: file → file, function → function
-   └── persist as sqlite
 
-2. Query phase  (instant)
-   └── graph traversal: O(1) lookups by file/function name
-   └── output as JSON (Claude reads) or pretty-print (human reads)
-```
+The current codebase is mostly stage 1 plus command scaffolding for stages 2 and 3.
 
-**Zero LLM calls. Zero API. Pure static analysis.**
+## Current Tech Stack
 
-## Tech Stack
+### Implemented now
 
 | Crate | Purpose |
 |---|---|
-| `tree-sitter` + grammars | Parse imports/exports/calls per language |
-| `petgraph` | Directed dependency graph (DFS, BFS, cycle detection) |
-| `rusqlite` | Persist graph between runs |
-| `ignore` | Gitignore-aware file walking |
-| `clap` | CLI |
-| `serde_json` | Structured output for Claude Code |
+| `clap` | CLI parsing |
+| `rusqlite` | Local SQLite storage |
+| `serde` / `serde_json` | Machine-readable output |
+| `tracing` / `tracing-subscriber` | Logging |
+| `thiserror` | Error handling |
 
-## Supported Languages
+### Planned / not implemented yet
 
-- JavaScript / TypeScript / JSX / TSX
-- Rust
-- Python
-- Ruby
-- Go
+| Crate / capability | Intended purpose |
+|---|---|
+| `tree-sitter` + grammars | Parse imports / exports / call sites |
+| graph traversal library | Dependency and impact traversal |
+| ignore-aware walking | Respect project boundaries during indexing |
+
+## Workspace Layout
+
+```text
+scope/
+├── crates/
+│   ├── scope-cli/    # CLI entrypoint
+│   ├── scope-core/   # shared models, bootstrap, storage, JSON contracts
+│   └── scope-mcp/    # future MCP server (currently stubbed)
+└── .scope/
+    └── index.db      # local SQLite database
+```
+
+## Command Surface
+
+The current CLI exposes these commands:
+
+```bash
+scope index [PATH]
+scope deps <file>
+scope symbols <file>
+scope calls <symbol>
+scope callers <symbol>
+scope impact <target> --change-type <body|signature|rename|delete|visibility|side-effect>
+```
+
+Right now:
+
+- `scope index` bootstraps `.scope/index.db`
+- query commands return structured stub JSON so downstream tooling can integrate before the engine is complete
+
+## Example Current Output
+
+### `scope index .`
+
+```json
+{
+  "schema_version": 1,
+  "command": "index",
+  "status": "ok",
+  "data": {
+    "repo_root": ".",
+    "no_git": false,
+    "watch": false,
+    "database": {
+      "path": ".scope/index.db",
+      "schema_version": 1
+    }
+  },
+  "warnings": []
+}
+```
+
+### `scope deps src/lib.rs`
+
+```json
+{
+  "schema_version": 1,
+  "command": "deps",
+  "status": "stub",
+  "data": {
+    "target": "src/lib.rs",
+    "reverse": false,
+    "transitive": false,
+    "depth": null,
+    "dependencies": []
+  },
+  "warnings": [
+    "Command is scaffolded but not implemented yet"
+  ]
+}
+```
+
+## Data Model Direction
+
+`scope-core` already defines shared records for the planned engine, including:
+
+- files and parse status
+- imports and exports
+- symbols and visibility
+- call sites
+- dependency traversal records
+- certainty levels such as `exact`, `resolved`, `heuristic`, and `dynamic`
+
+This model is intended to support machine-first static analysis without implying runtime guarantees.
 
 ## Installation
 
-```bash
-cargo install scope-cli
-```
+This project is still under active development and is not yet ready to advertise as a finished package.
 
-## Usage
+For local development:
 
 ```bash
-# Build dependency graph (run once)
-scope index .
-
-# Who imports this file? Who does it import?
-scope file src/auth/middleware.js
-
-# Where is this function called?
-scope fn verifyToken
-
-# If I change this file, what's the blast radius?
-scope impact src/auth/middleware.js
-
-# Full dependency tree (recursive)
-scope tree src/auth/middleware.js --depth 3
+cargo run -p scope-cli -- --help
+cargo run -p scope-cli -- index .
 ```
 
-## Output Examples
+## Near-Term Roadmap
 
-### `scope file src/auth/middleware.js`
+- implement file walking and indexing
+- persist file nodes and dependency edges to SQLite
+- implement symbol inventory queries
+- implement calls / callers queries
+- implement impact traversal
+- replace stub MCP output with a real MCP integration
+- keep JSON contracts stable for agent consumption
 
-```json
-{
-  "file": "src/auth/middleware.js",
-  "imports": [
-    "src/models/User.js",
-    "src/utils/jwt.js",
-    "src/config/env.js"
-  ],
-  "imported_by": [
-    "src/routes/api.js",
-    "src/routes/admin.js",
-    "src/server.js"
-  ],
-  "exports": ["verifyToken", "requireAdmin", "optionalAuth"],
-  "internal_functions": ["decodePayload", "checkExpiry"]
-}
-```
+## Scope Boundaries
 
-### `scope impact src/utils/jwt.js`
+`scope` is intended to provide **static** dependency and impact insight.
 
-```json
-{
-  "file": "src/utils/jwt.js",
-  "direct_dependents": ["src/auth/middleware.js"],
-  "transitive_dependents": [
-    "src/routes/api.js",
-    "src/routes/admin.js",
-    "src/server.js",
-    "tests/auth.test.js"
-  ],
-  "risk": "HIGH",
-  "reason": "4 files depend on this directly or transitively"
-}
-```
+It should not be described as:
 
-### `scope fn verifyToken`
+- a runtime behavior oracle
+- a guarantee that a change is safe
+- a substitute for tests, builds, or human review
 
-```json
-{
-  "function": "verifyToken",
-  "defined_in": "src/auth/middleware.js:14",
-  "called_by": [
-    "src/routes/api.js:23",
-    "src/routes/admin.js:11",
-    "tests/auth.test.js:45"
-  ],
-  "calls": ["jwt.verify", "checkExpiry"]
-}
-```
+When the engine lands, results should be interpreted as structured static evidence with explicit certainty levels.
 
-## Integration with Claude Code
+## Intended Certainty Model
 
-Add to your project's `CLAUDE.md`:
+The planned analysis model uses four certainty levels:
 
-```markdown
-## Custom Tools
+- `exact` — directly supported by unambiguous syntax or deterministic resolution
+- `resolved` — strongly supported by repository context, but requires some inference
+- `heuristic` — plausible and useful, but not guaranteed
+- `dynamic` — known blind spot or unresolved dynamic behavior
 
-- `scope file <path>` — show what a file imports and what imports it
-- `scope fn <name>` — find all call sites of a function
-- `scope impact <path>` — estimate blast radius before editing
+The intended rule is conservative resolution:
 
-Use these BEFORE reading files to plan which files actually need reading.
-```
+- prefer missing a low-confidence edge over inventing a false one
+- reserve `exact` for unambiguous evidence
+- surface uncertainty in results instead of hiding it
 
-Claude Code will use `scope` to orient itself before making changes, saving 10–30 file reads per task.
+This is especially important for impact analysis, where false positives can be more damaging than incomplete-but-honest results.
 
-## Index Location
+## Intended Blind Spots and Limitations
 
-```
-your-project/
-└── .scope/
-    ├── graph.db        # dependency graph
-    └── metadata.json   # index timestamp per file
-```
+Even after the engine is implemented, some classes of behavior should be treated as uncertain or only partially modeled:
 
-Add `.scope/` to `.gitignore`.
+- dynamic imports / computed module paths
+- reflection and metaprogramming
+- macro expansion and generated code
+- dynamic dispatch patterns that cannot be resolved statically
+- framework-specific conventions that require adapters not yet implemented
+- unsupported languages or syntax the parser cannot fully interpret
 
----
+The project direction in `PLAN.md` is to label these cases explicitly rather than pretend they are fully understood.
 
-## Roadmap
+## Intended Failure-Handling Principles
 
-- [ ] Cycle detection and circular dependency warnings
-- [ ] `scope unused` — find exported symbols never imported anywhere
-- [ ] `scope diff <branch>` — show which dependents are affected by branch changes
-- [ ] Language server integration (LSP)
+The project direction also includes a few important trust rules:
+
+- do not silently drop parse problems; surface partial results and diagnostics
+- do not crash on unsupported syntax when partial results are possible
+- do not overclaim “full impact” when the result is only a static approximation
+- keep JSON output machine-readable and stable as the contract evolves
