@@ -113,7 +113,8 @@ Right now:
 - `scope deps` returns direct forward and reverse file dependencies from the SQLite index
 - `scope symbols` returns indexed symbols, with `--public-only` and `--kind` filtering
 - `scope calls` and `scope callers` return direct, conservative call edges for supported Rust cases
-- `scope impact`, `scope explain`, `scope doctor`, and `scope benchmark` still return scaffolded stub JSON
+- `scope impact`, `scope explain`, and `scope doctor` return structured JSON backed by the current index
+- `scope benchmark` benchmarks full versus incremental indexing on an isolated writable copy and returns timing summary JSON
 
 ## Agent Usage Patterns
 

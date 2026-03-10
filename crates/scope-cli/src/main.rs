@@ -3,7 +3,8 @@ mod cli;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    time::UNIX_EPOCH,
+    path::{Path, PathBuf},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use clap::Parser;
@@ -273,9 +274,13 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let stats = context.store.index_health_stats()?;
+            let summary = run_benchmark(
+                &context.paths.repo_root,
+                args.fixture.as_deref(),
+                args.iterations.unwrap_or(1),
+            )?;
             serialize_output(
-                &scope_core::stub::benchmark(args.fixture, args.iterations, stats),
+                &scope_core::stub::benchmark(args.fixture, args.iterations, summary),
                 compact,
             )
         }
@@ -616,9 +621,161 @@ fn context_role_label(role: &ContextFileRole) -> &'static str {
     }
 }
 
+fn run_benchmark(
+    repo_root: &Path,
+    fixture: Option<&str>,
+    iterations: u32,
+) -> Result<scope_core::stub::BenchmarkSummary, scope_core::ScopeError> {
+    let iterations = iterations.max(1);
+    let source_root = fixture
+        .map(fixture_root)
+        .transpose()?
+        .unwrap_or_else(|| repo_root.to_path_buf());
+
+    let mut full_runs = Vec::with_capacity(iterations as usize);
+    let mut incremental_runs = Vec::with_capacity(iterations as usize);
+    let mut indexed_files = 0usize;
+
+    for iteration in 0..iterations {
+        let benchmark_root = prepare_benchmark_copy(&source_root, &format!("benchmark-{iteration}"))?;
+        let summary = benchmark_iteration(&benchmark_root)?;
+        indexed_files = summary.indexed_files;
+        full_runs.push(summary.full_index_ms);
+        incremental_runs.push(summary.incremental_index_ms);
+        fs::remove_dir_all(&benchmark_root)
+            .map_err(|error| scope_core::ScopeError::io(&benchmark_root, error))?;
+    }
+
+    Ok(scope_core::stub::BenchmarkSummary {
+        indexed_files,
+        full_index_ms: average_duration_ms(&full_runs),
+        incremental_index_ms: average_duration_ms(&incremental_runs),
+    })
+}
+
+fn benchmark_iteration(
+    benchmark_root: &Path,
+) -> Result<scope_core::stub::BenchmarkSummary, scope_core::ScopeError> {
+    let db_path = benchmark_root.join(".scope/index.db");
+    let store = scope_core::Store::open(&db_path)?;
+
+    let started = Instant::now();
+    let indexed_files = index_repo(benchmark_root, &store)?;
+    let full_index_ms = started.elapsed().as_millis();
+
+    let target = select_benchmark_mutation_target(benchmark_root)?;
+    apply_benchmark_edit(&target)?;
+
+    let started = Instant::now();
+    let _ = index_repo(benchmark_root, &store)?;
+    let incremental_index_ms = started.elapsed().as_millis();
+
+    Ok(scope_core::stub::BenchmarkSummary {
+        indexed_files,
+        full_index_ms,
+        incremental_index_ms,
+    })
+}
+
+fn average_duration_ms(values: &[u128]) -> u128 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.iter().sum::<u128>() / values.len() as u128
+}
+
+fn fixture_root(name: &str) -> Result<PathBuf, scope_core::ScopeError> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..").join("fixtures").join(name)
+        .canonicalize()
+        .map_err(|error| scope_core::ScopeError::io(format!("fixtures/{name}"), error))?;
+    Ok(root)
+}
+
+fn prepare_benchmark_copy(source_root: &Path, label: &str) -> Result<PathBuf, scope_core::ScopeError> {
+    let destination = unique_temp_dir(label);
+    copy_dir_recursive(source_root, &destination)?;
+    Ok(destination)
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("scope-cli-{prefix}-{nanos}"))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), scope_core::ScopeError> {
+    fs::create_dir_all(dst).map_err(|error| scope_core::ScopeError::io(dst, error))?;
+
+    for entry in fs::read_dir(src).map_err(|error| scope_core::ScopeError::io(src, error))? {
+        let entry = entry.map_err(|error| scope_core::ScopeError::io(src, error))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| scope_core::ScopeError::io(&src_path, error))?;
+
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            if src_path.file_name().and_then(|name| name.to_str()) == Some("index.db")
+                && src_path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some(".scope")
+            {
+                continue;
+            }
+            fs::copy(&src_path, &dst_path)
+                .map_err(|error| scope_core::ScopeError::io(&src_path, error))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn select_benchmark_mutation_target(repo_root: &Path) -> Result<PathBuf, scope_core::ScopeError> {
+    let entries = scan_repo(repo_root, &ScanConfig::default())?;
+    let Some(path) = entries
+        .into_iter()
+        .filter_map(|entry| {
+            let adapter = adapter_for_language(entry.language)?;
+            if scope_core::adapters::supports_path(adapter, &entry.absolute_path) {
+                Some(entry.absolute_path)
+            } else {
+                None
+            }
+        })
+        .min()
+    else {
+        return Err(scope_core::ScopeError::NotFound {
+            kind: "benchmark mutation target",
+            value: repo_root.display().to_string(),
+        });
+    };
+
+    Ok(path)
+}
+
+fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
+    let mut source = fs::read_to_string(path).map_err(|error| scope_core::ScopeError::io(path, error))?;
+    let suffix = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("rs") => "\n// scope benchmark mutation\n",
+        Some("ts") | Some("js") => "\n// scope benchmark mutation\n",
+        _ => "\n",
+    };
+    source.push_str(suffix);
+    fs::write(path, source).map_err(|error| scope_core::ScopeError::io(path, error))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_context_pack, index_repo, render_cli_error, serialize_output};
+    use super::{
+        build_context_pack, index_repo, render_cli_error, run_benchmark, serialize_output,
+    };
     use scope_core::{RepoPath, StabilityRecord, StabilityResult};
     use std::{
         fs,
@@ -661,11 +818,12 @@ mod tests {
             if file_type.is_dir() {
                 copy_dir_recursive(&src_path, &dst_path);
             } else {
-                if src_path
-                    .strip_prefix(src)
-                    .ok()
-                    .and_then(|relative| relative.to_str())
-                    == Some(".scope/index.db")
+                if src_path.file_name().and_then(|name| name.to_str()) == Some("index.db")
+                    && src_path
+                        .parent()
+                        .and_then(|parent| parent.file_name())
+                        .and_then(|name| name.to_str())
+                        == Some(".scope")
                 {
                     continue;
                 }
@@ -691,10 +849,8 @@ mod tests {
     #[test]
     fn render_cli_error_returns_machine_readable_json() {
         let output = render_cli_error(&scope_core::ScopeError::InvalidInput("missing target".to_string()));
-        let value = match serde_json::from_str::<serde_json::Value>(&output) {
-            Ok(value) => value,
-            Err(error) => panic!("expected valid JSON output, got error: {error}"),
-        };
+        let value = serde_json::from_str::<serde_json::Value>(&output)
+            .unwrap_or_else(|error| unreachable!("expected valid JSON output, got error: {error}"));
 
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["command"], "cli");
@@ -841,6 +997,16 @@ mod tests {
         assert!(actual.contains("truncated: yes"));
 
         fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn benchmark_helper_reports_real_full_and_incremental_timings() {
+        let repo = repo_root();
+        let summary = run_benchmark(&repo, Some("rust_small"), 1).unwrap();
+
+        assert!(summary.indexed_files > 0);
+        assert!(summary.full_index_ms <= u128::MAX);
+        assert!(summary.incremental_index_ms <= u128::MAX);
     }
 
     #[test]

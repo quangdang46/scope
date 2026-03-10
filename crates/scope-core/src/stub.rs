@@ -10,6 +10,38 @@ use crate::{
     DatabaseInfo, IndexHealthStats,
 };
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct BenchmarkMutationSummary {
+    pub target_file: RepoPath,
+    pub change_kind: &'static str,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct BenchmarkPhaseSummary {
+    pub avg_ms: u128,
+    pub min_ms: u128,
+    pub max_ms: u128,
+    pub files_processed_avg: usize,
+    pub changed_files_avg: usize,
+    pub deleted_files_avg: usize,
+    pub affected_files_avg: usize,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct BenchmarkComparisonSummary {
+    pub saved_ms: i128,
+    pub incremental_pct_of_full: u32,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct BenchmarkSummary {
+    pub indexed_files: usize,
+    pub mutation: BenchmarkMutationSummary,
+    pub full: BenchmarkPhaseSummary,
+    pub incremental: BenchmarkPhaseSummary,
+    pub comparison: BenchmarkComparisonSummary,
+}
+
 #[derive(Debug, Serialize)]
 pub struct IndexData {
     pub repo_root: RepoPath,
@@ -112,14 +144,7 @@ pub struct DoctorCheck {
 pub struct BenchmarkData {
     pub fixture: Option<String>,
     pub iterations: Option<u32>,
-    pub benchmarks: Vec<BenchmarkMeasurement>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BenchmarkMeasurement {
-    pub name: &'static str,
-    pub value: usize,
-    pub unit: &'static str,
+    pub summary: BenchmarkSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -485,7 +510,7 @@ pub fn doctor(fix: bool, stats: IndexHealthStats) -> JsonEnvelope<DoctorData> {
 pub fn benchmark(
     fixture: Option<String>,
     iterations: Option<u32>,
-    stats: IndexHealthStats,
+    summary: BenchmarkSummary,
 ) -> JsonEnvelope<BenchmarkData> {
     let iterations = Some(iterations.unwrap_or(1));
     JsonEnvelope::success(
@@ -493,28 +518,7 @@ pub fn benchmark(
         BenchmarkData {
             fixture,
             iterations,
-            benchmarks: vec![
-                BenchmarkMeasurement {
-                    name: "indexed_files",
-                    value: stats.files,
-                    unit: "count",
-                },
-                BenchmarkMeasurement {
-                    name: "symbols",
-                    value: stats.symbols,
-                    unit: "count",
-                },
-                BenchmarkMeasurement {
-                    name: "call_edges",
-                    value: stats.call_edges,
-                    unit: "count",
-                },
-                BenchmarkMeasurement {
-                    name: "imports",
-                    value: stats.imports,
-                    unit: "count",
-                },
-            ],
+            summary,
         },
     )
 }

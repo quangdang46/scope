@@ -567,26 +567,27 @@ fn doctor_output_reports_index_health_counts() {
 }
 
 #[test]
-fn benchmark_output_reports_basic_index_measurements() {
+fn benchmark_output_reports_full_and_incremental_timing_summary() {
     let repo = prepare_fixture_copy("ts_small");
     let store = index_fixture(&repo);
 
     let stats = store.index_health_stats().unwrap();
-    let envelope = stub::benchmark(Some("ts_small".to_string()), Some(3), stats.clone());
+    let envelope = stub::benchmark(
+        Some("ts_small".to_string()),
+        Some(3),
+        stub::BenchmarkSummary {
+            indexed_files: stats.files,
+            full_index_ms: 42,
+            incremental_index_ms: 7,
+        },
+    );
 
     assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
     assert_eq!(envelope.data.fixture.as_deref(), Some("ts_small"));
     assert_eq!(envelope.data.iterations, Some(3));
-    assert_eq!(envelope.data.benchmarks.len(), 4);
-    assert_eq!(envelope.data.benchmarks[0].name, "indexed_files");
-    assert_eq!(envelope.data.benchmarks[0].value, stats.files);
-    assert_eq!(envelope.data.benchmarks[0].unit, "count");
-    assert!(envelope.data.benchmarks.iter().any(|measurement| measurement.name == "symbols"));
-    assert!(envelope
-        .data
-        .benchmarks
-        .iter()
-        .any(|measurement| measurement.name == "call_edges"));
+    assert_eq!(envelope.data.summary.indexed_files, stats.files);
+    assert_eq!(envelope.data.summary.full_index_ms, 42);
+    assert_eq!(envelope.data.summary.incremental_index_ms, 7);
 
     fs::remove_dir_all(repo).unwrap();
 }

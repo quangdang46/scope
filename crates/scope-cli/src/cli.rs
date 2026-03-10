@@ -48,7 +48,7 @@ pub enum Commands {
     Stability(StabilityArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
-    /// Run benchmark scaffolding for future performance work
+    /// Benchmark full versus incremental indexing on an isolated repo copy
     Benchmark(BenchmarkArgs),
 }
 
