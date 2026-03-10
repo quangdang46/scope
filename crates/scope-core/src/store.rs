@@ -437,8 +437,15 @@ impl Store {
             return Ok(None);
         }
 
-        self.unique_symbol_id_in_file(file_id, &call_site.callee_name)
-            .map(|resolved| resolved.map(|symbol_id| (symbol_id, Certainty::Exact)))
+        if let Some(symbol_id) = self.unique_symbol_id_in_file(file_id, &call_site.callee_name)? {
+            return Ok(Some((symbol_id, Certainty::Exact)));
+        }
+
+        if let Some(symbol_id) = self.unique_imported_symbol_id(file_id, imports, &call_site.callee_name)? {
+            return Ok(Some((symbol_id, Certainty::Resolved)));
+        }
+
+        Ok(None)
     }
 
     fn imported_file_ids_for_module(
@@ -522,6 +529,61 @@ impl Store {
 
     fn unique_symbol_id_in_file(&self, file_id: i64, symbol_name: &str) -> ScopeResult<Option<i64>> {
         self.unique_symbol_id_in_files(&[file_id], symbol_name)
+    }
+
+    fn unique_imported_symbol_id(
+        &self,
+        file_id: i64,
+        imports: &[crate::ImportRecord],
+        symbol_name: &str,
+    ) -> ScopeResult<Option<i64>> {
+        let mut target_file_ids = Vec::new();
+        for import in imports {
+            if !import_mentions_symbol(&import.raw_text, symbol_name) {
+                continue;
+            }
+
+            if let ImportPath::Relative(path) = &import.import_path {
+                if let Some(target_file_id) = self.file_id(path)? {
+                    target_file_ids.push(target_file_id);
+                    target_file_ids.extend(self.reexport_target_file_ids(target_file_id, symbol_name)?);
+                }
+            }
+        }
+
+        if target_file_ids.is_empty() {
+            let mut statement = self.connection.prepare(
+                "SELECT to_file_id FROM file_edges WHERE from_file_id = ?1 AND kind = 'import'",
+            )?;
+            let rows = statement.query_map([file_id], |row| row.get(0))?;
+            for row in rows {
+                target_file_ids.push(row?);
+            }
+        }
+
+        target_file_ids.sort_unstable();
+        target_file_ids.dedup();
+        self.unique_symbol_id_in_files(&target_file_ids, symbol_name)
+    }
+
+    fn reexport_target_file_ids(&self, file_id: i64, symbol_name: &str) -> ScopeResult<Vec<i64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT imports.resolved_file_id, imports.raw_text
+             FROM imports
+             WHERE imports.file_id = ?1 AND imports.resolved_file_id IS NOT NULL",
+        )?;
+        let rows = statement.query_map([file_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut targets = Vec::new();
+        for row in rows {
+            let (target_file_id, raw_text) = row?;
+            if raw_text.starts_with("export ") && import_mentions_symbol(&raw_text, symbol_name) {
+                targets.push(target_file_id);
+            }
+        }
+        Ok(targets)
     }
 
     fn unique_symbol_id_in_files(&self, file_ids: &[i64], symbol_name: &str) -> ScopeResult<Option<i64>> {
@@ -821,6 +883,10 @@ fn edge_kind_from_db(value: &str) -> EdgeKind {
         "module" => EdgeKind::Contain,
         _ => EdgeKind::Import,
     }
+}
+
+fn import_mentions_symbol(raw_text: &str, symbol_name: &str) -> bool {
+    raw_text.contains(symbol_name)
 }
 
 fn unix_timestamp() -> i64 {

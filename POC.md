@@ -7,11 +7,31 @@
 
 ## Status
 
-This Node.js proof of concept is currently **deferred / not in active execution scope**.
+This Node.js proof of concept is currently **deferred / supplemental rather than the main execution path**, but the repository now includes a runnable prototype under `poc/` that was built to satisfy the Phase 0 validation bead.
 
-It remains in the repository as a supplemental validation artifact and historical sketch for extraction ideas, but the active implementation path for this project is the Rust workspace described in `PLAN.md` and implemented under `crates/`.
+It remains a time-boxed validation artifact rather than the primary product direction. The active implementation path for this project is still the Rust workspace described in `PLAN.md` and implemented under `crates/`.
 
-If this POC is reactivated later, it should be treated as an explicit, time-boxed validation track rather than an implicit parallel roadmap.
+What now exists:
+- `poc/index.js` — a runnable Node.js script using tree-sitter and SQLite
+- `poc/package.json` — local dependencies and helper scripts
+- `.scope/poc.db` — SQLite output created by the prototype at runtime
+- validation against `fixtures/ts_small`
+
+Current validated behavior:
+- indexes `.js/.jsx/.ts/.tsx` files by walking the tree directly and skipping `.git`, `.scope`, `node_modules`, and `target`
+- parses JavaScript with `tree-sitter-javascript` and TypeScript with `tree-sitter-typescript`
+- persists files, imports, exports, functions, and direct call names into SQLite
+- resolves relative imports and re-export barrels well enough to make `impact` traversal useful on the fixture graph
+- answers JSON queries for `index`, `file`, `fn`, and `impact`
+
+Current limitations observed during validation:
+- no `.gitignore` integration yet; ignore handling is only a fixed directory skip list
+- export extraction is intentionally shallow and limited to common direct export / re-export patterns
+- call edges store raw callee text only and do not resolve imported symbols back to definitions
+- no certainty labels, no `why` query, and no Dijkstra/path explanation yet
+- not yet validated on a real external open-source project such as Express or Fastify
+
+If this POC is extended later, it should remain an explicit, time-boxed validation track rather than an implicit parallel roadmap.
 
 ## POC Goal
 
@@ -40,13 +60,14 @@ npm install
 **Dependencies:**
 ```json
 {
-  "tree-sitter": "^0.21.0",
-  "tree-sitter-javascript": "^0.21.0",
-  "tree-sitter-typescript": "^0.21.0",
-  "glob": "^10.0.0",
-  "better-sqlite3": "^9.0.0"
+  "tree-sitter": "^0.21.1",
+  "tree-sitter-javascript": "^0.21.4",
+  "tree-sitter-typescript": "^0.21.2",
+  "better-sqlite3": "^12.4.1"
 }
 ```
+
+These versions were chosen because the initial attempt to mix `tree-sitter` 0.25 with `tree-sitter-typescript` 0.23 produced a peer-dependency conflict during `npm install`.
 
 ---
 
@@ -54,301 +75,123 @@ npm install
 
 ### `poc/index.js`
 
-```javascript
-import Parser from 'tree-sitter'
-import JavaScript from 'tree-sitter-javascript'
-import { globSync } from 'glob'
-import fs from 'fs'
-import path from 'path'
-import Database from 'better-sqlite3'
+The implementation now lives directly in the repository at `poc/index.js`. Rather than duplicating the full source in this document, the important validated design points are:
 
-// ─── 1. Setup ────────────────────────────────────────────────────────────────
+- uses separate parsers for JavaScript and TypeScript
+- writes to `.scope/poc.db`
+- creates SQLite tables for `files`, `imports`, `exports`, `functions`, and `calls`
+- resolves relative imports across `.ts/.tsx/.js/.jsx` plus `index.*` barrel files
+- treats both `import` statements and re-export statements as dependency edges for traversal
+- exposes JSON commands: `index`, `file`, `fn`, `impact`
 
-const parser = new Parser()
-parser.setLanguage(JavaScript)
-
-const db = new Database('.scope/graph.db')
-db.exec(`
-  CREATE TABLE IF NOT EXISTS imports (
-    from_file TEXT,
-    to_file TEXT
-  );
-  CREATE TABLE IF NOT EXISTS exports (
-    file TEXT,
-    symbol TEXT
-  );
-  CREATE TABLE IF NOT EXISTS functions (
-    file TEXT,
-    name TEXT,
-    start_line INTEGER
-  );
-  CREATE TABLE IF NOT EXISTS calls (
-    from_file TEXT,
-    from_fn TEXT,
-    to_fn TEXT,
-    line INTEGER
-  );
-`)
-
-// ─── 2. Extract imports/exports from a single file ───────────────────────────
-
-function resolveImport(fromFile, importPath) {
-  if (!importPath.startsWith('.')) return null // skip node_modules
-  const dir = path.dirname(fromFile)
-  const resolved = path.resolve(dir, importPath)
-  // Try common extensions
-  for (const ext of ['', '.js', '.ts', '.jsx', '.tsx', '/index.js']) {
-    const candidate = resolved + ext
-    if (fs.existsSync(candidate)) return path.relative(process.cwd(), candidate)
-  }
-  return importPath // keep as-is if not found
-}
-
-function extractFileInfo(filePath) {
-  const source = fs.readFileSync(filePath, 'utf8')
-  const tree = parser.parse(source)
-  const lines = source.split('\n')
-
-  const imports = []
-  const exports = []
-  const functions = []
-  const calls = []
-
-  function visit(node, currentFn = null) {
-    // Import statements: import x from './y'
-    if (node.type === 'import_statement') {
-      const sourceNode = node.children.find(c => c.type === 'string')
-      if (sourceNode) {
-        const importPath = sourceNode.text.replace(/['"]/g, '')
-        const resolved = resolveImport(filePath, importPath)
-        if (resolved) imports.push(resolved)
-      }
-    }
-
-    // Export declarations
-    if (node.type === 'export_statement') {
-      const nameNode = node.descendantsOfType('identifier')[0]
-      if (nameNode) exports.push(nameNode.text)
-    }
-
-    // Function declarations
-    if (['function_declaration', 'method_definition'].includes(node.type)) {
-      const nameNode = node.children.find(c => c.type === 'identifier')
-      if (nameNode) {
-        functions.push({
-          name: nameNode.text,
-          line: node.startPosition.row + 1
-        })
-        currentFn = nameNode.text
-      }
-    }
-
-    // Function calls
-    if (node.type === 'call_expression') {
-      const fnNode = node.children[0]
-      if (fnNode && currentFn) {
-        calls.push({
-          from_fn: currentFn,
-          to_fn: fnNode.text,
-          line: node.startPosition.row + 1
-        })
-      }
-    }
-
-    for (const child of node.children) visit(child, currentFn)
-  }
-
-  visit(tree.rootNode)
-  return { imports, exports, functions, calls }
-}
-
-// ─── 3. Index entire directory ────────────────────────────────────────────────
-
-function indexDirectory(dir) {
-  const files = globSync(`${dir}/**/*.{js,ts,jsx,tsx}`, {
-    ignore: ['**/node_modules/**', '**/.git/**', '**/.scope/**']
-  })
-
-  console.log(`Indexing ${files.length} files...`)
-
-  // Clear existing
-  db.exec('DELETE FROM imports; DELETE FROM exports; DELETE FROM functions; DELETE FROM calls;')
-
-  const insertImport = db.prepare('INSERT INTO imports VALUES (?, ?)')
-  const insertExport = db.prepare('INSERT INTO exports VALUES (?, ?)')
-  const insertFn = db.prepare('INSERT INTO functions VALUES (?, ?, ?)')
-  const insertCall = db.prepare('INSERT INTO calls VALUES (?, ?, ?, ?)')
-
-  for (const file of files) {
-    try {
-      const { imports, exports, functions, calls } = extractFileInfo(file)
-      for (const imp of imports) insertImport.run(file, imp)
-      for (const exp of exports) insertExport.run(file, exp)
-      for (const fn of functions) insertFn.run(file, fn.name, fn.line)
-      for (const call of calls) insertCall.run(file, call.from_fn, call.to_fn, call.line)
-    } catch (e) {
-      // skip unparseable files
-    }
-  }
-
-  const stats = {
-    files: files.length,
-    imports: db.prepare('SELECT COUNT(*) as n FROM imports').get().n,
-    exports: db.prepare('SELECT COUNT(*) as n FROM exports').get().n,
-    functions: db.prepare('SELECT COUNT(*) as n FROM functions').get().n,
-  }
-  console.log('Index complete:', stats)
-}
-
-// ─── 4. Query functions ───────────────────────────────────────────────────────
-
-function queryFile(filePath) {
-  const imports = db.prepare('SELECT to_file FROM imports WHERE from_file = ?').all(filePath)
-  const importedBy = db.prepare('SELECT from_file FROM imports WHERE to_file = ?').all(filePath)
-  const exports = db.prepare('SELECT symbol FROM exports WHERE file = ?').all(filePath)
-  const functions = db.prepare('SELECT name, start_line FROM functions WHERE file = ?').all(filePath)
-
-  return {
-    file: filePath,
-    imports: imports.map(r => r.to_file),
-    imported_by: importedBy.map(r => r.from_file),
-    exports: exports.map(r => r.symbol),
-    internal_functions: functions.map(r => ({ name: r.name, line: r.start_line }))
-  }
-}
-
-function queryFunction(fnName) {
-  const defined = db.prepare('SELECT file, start_line FROM functions WHERE name = ?').all(fnName)
-  const calledBy = db.prepare('SELECT from_file, from_fn, line FROM calls WHERE to_fn = ?').all(fnName)
-  const calls = db.prepare('SELECT to_fn, line FROM calls WHERE from_fn = ?').all(fnName)
-
-  return {
-    function: fnName,
-    defined_in: defined.map(r => `${r.file}:${r.start_line}`),
-    called_by: calledBy.map(r => `${r.from_file} (in ${r.from_fn}) line ${r.line}`),
-    calls: calls.map(r => `${r.to_fn} at line ${r.line}`)
-  }
-}
-
-function queryImpact(filePath) {
-  // BFS to find all transitive dependents
-  const visited = new Set()
-  const queue = [filePath]
-  const direct = []
-  const transitive = []
-
-  while (queue.length) {
-    const current = queue.shift()
-    if (visited.has(current)) continue
-    visited.add(current)
-
-    const dependents = db.prepare('SELECT from_file FROM imports WHERE to_file = ?').all(current)
-    for (const dep of dependents) {
-      if (dep.from_file === filePath) {
-        direct.push(dep.from_file)
-      } else {
-        transitive.push(dep.from_file)
-      }
-      queue.push(dep.from_file)
-    }
-  }
-
-  const risk = transitive.length > 5 ? 'HIGH' : transitive.length > 2 ? 'MEDIUM' : 'LOW'
-
-  return {
-    file: filePath,
-    direct_dependents: direct,
-    transitive_dependents: transitive,
-    risk,
-    total_affected: direct.length + transitive.length
-  }
-}
-
-// ─── 5. CLI ───────────────────────────────────────────────────────────────────
-
-fs.mkdirSync('.scope', { recursive: true })
-const [,, command, target] = process.argv
-
-const handlers = {
-  index: () => indexDirectory(target || '.'),
-  file:  () => console.log(JSON.stringify(queryFile(target), null, 2)),
-  fn:    () => console.log(JSON.stringify(queryFunction(target), null, 2)),
-  impact: () => console.log(JSON.stringify(queryImpact(target), null, 2)),
-}
-
-;(handlers[command] || (() => console.log('Usage: scope <index|file|fn|impact> <target>')))()
-```
+The current code is intentionally small and conservative. It proves the extraction/storage/query loop, but it is not meant to be a production architecture.
 
 ---
 
 ## Run the POC
 
 ```bash
-# Index a project
-node poc/index.js index ./test-fixtures
+cd poc
+npm install
+
+# Index the repository's TS fixture
+node index.js index ../fixtures/ts_small
 
 # Query a file
-node poc/index.js file test-fixtures/routes/api.js
+node index.js file ../fixtures/ts_small/src/auth/jwt.ts
 
 # Query a function
-node poc/index.js fn verifyToken
+node index.js fn verifyToken
 
 # Impact analysis
-node poc/index.js impact test-fixtures/utils/jwt.js
+node index.js impact ../fixtures/ts_small/src/auth/jwt.ts
 ```
 
 ---
 
-## Test Fixtures
+## Test Fixture Used For Validation
 
-### `test-fixtures/utils/jwt.js`
-```javascript
-import { env } from './env.js'
-export function verifyToken(token) { return jwt.verify(token, env.SECRET) }
-export function generateToken(payload) { return jwt.sign(payload, env.SECRET) }
-```
+The current validation pass uses `fixtures/ts_small`, which already exists in the Rust workspace as a small TypeScript dependency graph.
 
-### `test-fixtures/middleware/auth.js`
-```javascript
-import { verifyToken } from '../utils/jwt.js'
-export function requireAuth(req, res, next) {
-  const token = req.headers.authorization?.split(' ')[1]
-  req.user = verifyToken(token)
-  next()
+Relevant files:
+
+### `fixtures/ts_small/src/auth/jwt.ts`
+```ts
+export function sign(payload: string): string {
+  return `signed:${payload}`;
+}
+
+export function verify(token: string): boolean {
+  return token.startsWith("signed:");
 }
 ```
 
-### `test-fixtures/routes/api.js`
-```javascript
-import { requireAuth } from '../middleware/auth.js'
-export function setupRoutes(app) {
-  app.get('/profile', requireAuth, getProfile)
-  app.post('/data', requireAuth, postData)
+### `fixtures/ts_small/src/auth/middleware.ts`
+```ts
+import { verify } from "./jwt";
+
+export function verifyToken(token: string): boolean {
+  return verify(token);
 }
+```
+
+### `fixtures/ts_small/src/auth/index.ts`
+```ts
+export { verifyToken } from "./middleware";
+```
+
+### `fixtures/ts_small/src/index.ts`
+```ts
+export { verifyToken } from "./auth/index";
+export { format } from "./utils/formatter";
 ```
 
 ---
 
-## Expected Output
+## Example Validated Output
 
 ```bash
-$ node poc/index.js impact test-fixtures/utils/jwt.js
+$ cd poc
+$ node index.js impact ../fixtures/ts_small/src/auth/jwt.ts
 
 {
-  "file": "test-fixtures/utils/jwt.js",
-  "direct_dependents": ["test-fixtures/middleware/auth.js"],
-  "transitive_dependents": ["test-fixtures/routes/api.js"],
-  "risk": "LOW",
-  "total_affected": 2
+  "command": "impact",
+  "status": "ok",
+  "data": {
+    "file": "fixtures/ts_small/src/auth/jwt.ts",
+    "direct_dependents": [
+      "fixtures/ts_small/src/auth/middleware.ts"
+    ],
+    "transitive_dependents": [
+      "fixtures/ts_small/src/auth/index.ts",
+      "fixtures/ts_small/src/index.ts"
+    ],
+    "total_affected": 3,
+    "risk": "MEDIUM"
+  }
 }
 
-$ node poc/index.js fn verifyToken
+$ node index.js fn verifyToken
 
 {
-  "function": "verifyToken",
-  "defined_in": ["test-fixtures/utils/jwt.js:2"],
-  "called_by": ["test-fixtures/middleware/auth.js (in requireAuth) line 4"],
-  "calls": ["jwt.verify at line 2"]
+  "command": "fn",
+  "status": "ok",
+  "data": {
+    "function": "verifyToken",
+    "defined_in": [
+      {
+        "file": "fixtures/ts_small/src/auth/middleware.ts",
+        "start_line": 3
+      }
+    ],
+    "called_by": [],
+    "calls": [
+      {
+        "to_fn": "verify",
+        "line": 4
+      }
+    ]
+  }
 }
 ```
 
@@ -372,10 +215,18 @@ With `scope`:
 
 ---
 
+## Findings That Should Inform The Rust Path
+
+1. Modeling re-export statements as dependency edges matters immediately; without that, impact traversal misses barrel chains.
+2. A tiny SQLite-backed prototype is enough to validate useful query semantics before designing a richer graph layer.
+3. Call-site extraction is easy to sketch, but symbol resolution remains the real difficulty; storing raw callee text is not enough for trustworthy callers/callees results.
+4. Version compatibility across tree-sitter packages is a practical risk that should be pinned carefully in any future JS/TS validation work.
+5. Fixed-directory ignore rules are not enough for a serious prototype; `.gitignore`-aware walking should be part of any next expansion.
+
 ## Next Steps (Production Rust)
 
-1. Rewrite in Rust with `tree-sitter` crate + multi-language grammars
-2. Replace sqlite with embedded `petgraph` for faster traversal
-3. Add TypeScript, Python, Ruby, Go parsers
-4. Incremental re-index on file change
-5. `scope unused` — find dead exports
+1. Carry the re-export edge lesson into the Rust adapter and future TS/JS adapter design
+2. Keep SQLite as the durable source of truth even if an in-memory graph layer is added for traversal speed
+3. Add certainty labels and reason trails before trusting cross-file call answers
+4. Add `.gitignore`-aware walking if the POC is ever extended beyond the fixture repo
+5. Treat this prototype as validation input, not as code to incrementally evolve into production

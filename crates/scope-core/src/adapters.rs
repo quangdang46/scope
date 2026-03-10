@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     Certainty, ExportRecord, ExtractResult, FileRecord, ImportPath, ImportRecord, ModuleRecord,
-    ParseStatus, RepoPath, ScanEntry, Span, SymbolKind, SymbolRecord, Visibility,
+    ParseStatus, RepoPath, ScanEntry, Span, SupportedLanguage, SymbolKind, SymbolRecord,
+    Visibility,
 };
 use crate::model::CallSiteRecord;
 
@@ -20,7 +21,17 @@ pub trait Adapter: Send + Sync {
     fn extract(&self, entry: &ScanEntry, source: &str) -> ExtractResult;
 }
 
+pub fn adapter_for_language(language: SupportedLanguage) -> Option<&'static dyn Adapter> {
+    match language {
+        SupportedLanguage::Rust => Some(&RustAdapter),
+        SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => Some(&TsJsAdapter),
+        SupportedLanguage::Python | SupportedLanguage::Ruby | SupportedLanguage::Go => None,
+    }
+}
+
 pub struct RustAdapter;
+
+pub struct TsJsAdapter;
 
 impl Adapter for RustAdapter {
     fn extensions(&self) -> &[&str] {
@@ -161,6 +172,122 @@ impl Adapter for RustAdapter {
     }
 }
 
+impl Adapter for TsJsAdapter {
+    fn extensions(&self) -> &[&str] {
+        &["ts", "tsx", "js", "jsx", "mjs", "cjs"]
+    }
+
+    fn language_id(&self) -> &'static str {
+        "typescript_javascript"
+    }
+
+    fn extract(&self, entry: &ScanEntry, source: &str) -> ExtractResult {
+        let repo_root = infer_repo_root(entry);
+        let mut imports = Vec::new();
+        let mut exports = Vec::new();
+        let mut symbols = Vec::new();
+        let mut call_sites = Vec::new();
+        let mut byte_offset = 0usize;
+        let mut brace_depth = 0i32;
+        let mut current_function_qualname: Option<String> = None;
+        let mut saw_non_export_statement = false;
+
+        for (line_index, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            let span = line_span(line, byte_offset, line_index);
+            let scan_line = strip_line_comment(line);
+            let line_open_braces = scan_line.bytes().filter(|byte| *byte == b'{').count() as i32;
+            let line_close_braces = scan_line.bytes().filter(|byte| *byte == b'}').count() as i32;
+
+            if !trimmed.is_empty() && !trimmed.starts_with("export ") {
+                saw_non_export_statement = true;
+            }
+
+            if let Some(import_record) = parse_ts_js_import(trimmed, &entry.path, &repo_root, &span) {
+                imports.push(import_record);
+            }
+
+            if let Some(export_record) = parse_ts_js_named_export(trimmed, &entry.path, &span) {
+                exports.push(export_record);
+            }
+            if let Some(symbol) = parse_ts_js_reexport_function_binding(trimmed, &entry.path, &span) {
+                symbols.push(symbol);
+            }
+
+            let function_qualname_for_line = current_function_qualname.as_deref();
+            call_sites.extend(extract_call_sites_from_line(
+                line,
+                byte_offset,
+                line_index,
+                &entry.path,
+                function_qualname_for_line,
+            ));
+
+            let declared_function_qualname = parse_ts_js_top_level_symbol(trimmed, &entry.path, &span)
+                .map(|symbol| {
+                    let qualname = if symbol.kind == SymbolKind::Function {
+                        Some(symbol.qualname.clone())
+                    } else {
+                        None
+                    };
+                    if symbol.exported {
+                        exports.push(ExportRecord {
+                            file: entry.path.clone(),
+                            name: symbol.name.clone(),
+                            qualname: Some(symbol.qualname.clone()),
+                            kind: symbol.kind.clone(),
+                            visibility: symbol.visibility.clone(),
+                            span: symbol.span.clone(),
+                        });
+                    }
+                    symbols.push(symbol);
+                    qualname
+                })
+                .flatten();
+
+            let previous_brace_depth = brace_depth;
+            brace_depth += line_open_braces - line_close_braces;
+
+            if previous_brace_depth == 0
+                && current_function_qualname.is_none()
+                && line_open_braces > line_close_braces
+            {
+                current_function_qualname = declared_function_qualname;
+            }
+
+            if brace_depth <= 0 {
+                brace_depth = 0;
+                current_function_qualname = None;
+            }
+
+            byte_offset += line.len() + 1;
+        }
+
+        let export_lines = source
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() && !trimmed.starts_with("//")
+            })
+            .all(|line| line.trim().starts_with("export "));
+
+        ExtractResult {
+            file: FileRecord {
+                path: entry.path.clone(),
+                language: self.language_id().to_string(),
+                parse_status: ParseStatus::Ok,
+                is_barrel: export_lines && !saw_non_export_statement,
+            },
+            imports,
+            modules: Vec::new(),
+            exports,
+            symbols,
+            call_sites,
+            parse_diagnostics: Vec::new(),
+        }
+    }
+}
+
 fn parse_top_level_symbol(trimmed: &str, file: &RepoPath, span: &Span) -> Option<SymbolRecord> {
     let body = strip_visibility_prefix(trimmed);
     let (prefix, kind) = [
@@ -208,7 +335,14 @@ fn qualified_symbol_name(file: &RepoPath, name: &str) -> String {
         .strip_prefix("src/")
         .unwrap_or(&file.0)
         .trim_end_matches(".rs")
+        .trim_end_matches(".ts")
+        .trim_end_matches(".tsx")
+        .trim_end_matches(".js")
+        .trim_end_matches(".jsx")
+        .trim_end_matches(".mjs")
+        .trim_end_matches(".cjs")
         .replace("/mod", "")
+        .replace("/index", "")
         .replace('/', "::");
 
     if module.is_empty() {
@@ -279,6 +413,155 @@ fn strip_visibility_prefix(trimmed: &str) -> &str {
     } else {
         trimmed
     }
+}
+
+fn parse_ts_js_import(
+    trimmed: &str,
+    file: &RepoPath,
+    repo_root: &Path,
+    span: &Span,
+) -> Option<ImportRecord> {
+    let specifier = quoted_specifier(trimmed)?;
+    let import_path = normalize_ts_js_import_path(file, repo_root, &specifier);
+    let certainty = match import_path {
+        ImportPath::Relative(_) => Certainty::Exact,
+        ImportPath::External(_) => Certainty::Heuristic,
+        ImportPath::Unresolved => Certainty::Heuristic,
+    };
+
+    Some(ImportRecord {
+        file: file.clone(),
+        raw_text: trimmed.to_string(),
+        import_path,
+        span: span.clone(),
+        certainty,
+    })
+}
+
+fn parse_ts_js_named_export(trimmed: &str, file: &RepoPath, span: &Span) -> Option<ExportRecord> {
+    let remainder = trimmed.strip_prefix("export {")?;
+    let names = remainder.split('}').next()?.trim();
+    let first = names.split(',').next()?.trim();
+    let name = first.split_whitespace().next()?.trim().to_string();
+
+    Some(ExportRecord {
+        file: file.clone(),
+        name,
+        qualname: None,
+        kind: SymbolKind::Function,
+        visibility: Visibility::Public,
+        span: span.clone(),
+    })
+}
+
+fn parse_ts_js_reexport_function_binding(
+    trimmed: &str,
+    file: &RepoPath,
+    span: &Span,
+) -> Option<SymbolRecord> {
+    let export = parse_ts_js_named_export(trimmed, file, span)?;
+    Some(SymbolRecord {
+        file: file.clone(),
+        name: export.name.clone(),
+        qualname: qualified_symbol_name(file, &export.name),
+        kind: SymbolKind::Function,
+        visibility: Visibility::Public,
+        exported: true,
+        span: span.clone(),
+    })
+}
+
+fn parse_ts_js_top_level_symbol(trimmed: &str, file: &RepoPath, span: &Span) -> Option<SymbolRecord> {
+    let (body, exported) = if let Some(remainder) = trimmed.strip_prefix("export ") {
+        (remainder.trim_start(), true)
+    } else {
+        (trimmed, false)
+    };
+
+    let (prefix, kind) = [
+        ("async function ", SymbolKind::Function),
+        ("function ", SymbolKind::Function),
+        ("const ", SymbolKind::Variable),
+        ("let ", SymbolKind::Variable),
+        ("class ", SymbolKind::Class),
+        ("interface ", SymbolKind::Interface),
+        ("type ", SymbolKind::TypeAlias),
+    ]
+    .into_iter()
+    .find(|(prefix, _)| body.starts_with(prefix))?;
+
+    let name = identifier_after_prefix(body, prefix)?;
+    let kind = if matches!(kind, SymbolKind::Variable) && !body.contains("=>") {
+        return None;
+    } else if matches!(kind, SymbolKind::Variable) {
+        SymbolKind::Function
+    } else {
+        kind
+    };
+
+    Some(SymbolRecord {
+        file: file.clone(),
+        name: name.clone(),
+        qualname: qualified_symbol_name(file, &name),
+        kind,
+        visibility: if exported {
+            Visibility::Public
+        } else {
+            Visibility::Local
+        },
+        exported,
+        span: span.clone(),
+    })
+}
+
+fn quoted_specifier(trimmed: &str) -> Option<String> {
+    let quote_index = trimmed.find(['\'', '"'])?;
+    let quote = trimmed.as_bytes()[quote_index] as char;
+    let remainder = &trimmed[quote_index + 1..];
+    let end = remainder.find(quote)?;
+    Some(remainder[..end].to_string())
+}
+
+fn normalize_ts_js_import_path(file: &RepoPath, repo_root: &Path, specifier: &str) -> ImportPath {
+    if !specifier.starts_with('.') {
+        return ImportPath::External(specifier.to_string());
+    }
+
+    let importer = repo_root.join(&file.0);
+    let Some(importer_dir) = importer.parent() else {
+        return ImportPath::Unresolved;
+    };
+    let base = importer_dir.join(specifier);
+
+    for candidate in ts_js_candidates(&base) {
+        if candidate.exists() {
+            let normalized = candidate.canonicalize().unwrap_or(candidate.clone());
+            let normalized_repo_root = repo_root
+                .canonicalize()
+                .unwrap_or_else(|_| repo_root.to_path_buf());
+            return ImportPath::Relative(path_under_explicit_repo(&normalized, &normalized_repo_root));
+        }
+    }
+
+    ImportPath::Unresolved
+}
+
+fn ts_js_candidates(base: &Path) -> Vec<PathBuf> {
+    vec![
+        base.to_path_buf(),
+        base.with_extension("ts"),
+        base.with_extension("tsx"),
+        base.with_extension("js"),
+        base.with_extension("jsx"),
+        base.with_extension("mjs"),
+        base.with_extension("cjs"),
+        base.join("index.ts"),
+        base.join("index.tsx"),
+        base.join("index.js"),
+        base.join("index.jsx"),
+        base.join("index.mjs"),
+        base.join("index.cjs"),
+    ]
 }
 
 pub fn supports_path(adapter: &dyn Adapter, path: &Path) -> bool {
@@ -430,7 +713,11 @@ fn resolve_module_file(base: &Path, segments: &[&str]) -> Option<RepoPath> {
 
 fn path_under_repo(path: &Path, base: &Path) -> RepoPath {
     let repo_root = repo_root_from_base(base);
-    let relative = path.strip_prefix(&repo_root).unwrap_or(path);
+    path_under_explicit_repo(path, &repo_root)
+}
+
+fn path_under_explicit_repo(path: &Path, repo_root: &Path) -> RepoPath {
+    let relative = path.strip_prefix(repo_root).unwrap_or(path);
     RepoPath::from(relative.to_string_lossy().to_string())
 }
 
@@ -642,15 +929,32 @@ fn strip_line_comment(line: &str) -> &str {
 
 fn declared_function_name_on_line(trimmed: &str) -> Option<String> {
     let body = strip_visibility_prefix(trimmed);
-    let prefix = if body.starts_with("async fn ") {
-        "async fn "
+    if let Some(name) = if body.starts_with("async fn ") {
+        identifier_after_prefix(body, "async fn ")
     } else if body.starts_with("fn ") {
-        "fn "
+        identifier_after_prefix(body, "fn ")
     } else {
-        return None;
-    };
+        None
+    } {
+        return Some(name);
+    }
 
-    identifier_after_prefix(body, prefix)
+    let body = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim_start();
+    if let Some(name) = if body.starts_with("async function ") {
+        identifier_after_prefix(body, "async function ")
+    } else if body.starts_with("function ") {
+        identifier_after_prefix(body, "function ")
+    } else if body.starts_with("const ") {
+        identifier_after_prefix(body, "const ")
+    } else if body.starts_with("let ") {
+        identifier_after_prefix(body, "let ")
+    } else {
+        None
+    } {
+        return Some(name);
+    }
+
+    None
 }
 
 fn looks_like_macro_invocation(line: &str, candidate_start: usize) -> bool {
@@ -693,17 +997,21 @@ mod tests {
     use crate::{scanner::SupportedLanguage, RepoPath};
 
     fn fixture_entry(relative: &str) -> ScanEntry {
+        fixture_entry_in("rust_small", relative, SupportedLanguage::Rust)
+    }
+
+    fn fixture_entry_in(fixture: &str, relative: &str, language: SupportedLanguage) -> ScanEntry {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .unwrap();
-        let fixture_root = repo_root.join("fixtures/rust_small");
+        let fixture_root = repo_root.join("fixtures").join(fixture);
         let relative_path = Path::new(relative);
 
         ScanEntry {
             path: RepoPath::from(relative),
             absolute_path: fixture_root.join(relative_path),
-            language: SupportedLanguage::Rust,
+            language,
         }
     }
 
@@ -712,6 +1020,11 @@ mod tests {
         let adapter = RustAdapter;
         assert!(supports_path(&adapter, Path::new("src/lib.rs")));
         assert!(!supports_path(&adapter, Path::new("src/lib.ts")));
+
+        let ts_js = TsJsAdapter;
+        assert!(supports_path(&ts_js, Path::new("src/lib.ts")));
+        assert!(supports_path(&ts_js, Path::new("src/lib.js")));
+        assert!(!supports_path(&ts_js, Path::new("src/lib.rs")));
     }
 
     #[test]
@@ -732,6 +1045,51 @@ mod tests {
             vec!["src/parser.rs", "src/resolver.rs", "src/utils.rs"]
         );
         assert!(result.imports.is_empty());
+    }
+
+    #[test]
+    fn extracts_ts_js_imports_symbols_calls_and_barrels() {
+        let adapter = TsJsAdapter;
+        let middleware_entry = fixture_entry_in(
+            "ts_small",
+            "src/auth/middleware.ts",
+            SupportedLanguage::TypeScript,
+        );
+        let middleware_source = std::fs::read_to_string(&middleware_entry.absolute_path).unwrap();
+        let middleware_result = adapter.extract(&middleware_entry, &middleware_source);
+
+        assert_eq!(middleware_result.imports.len(), 1);
+        assert_eq!(middleware_result.imports[0].raw_text, "import { verify } from \"./jwt\";");
+        assert_eq!(
+            middleware_result.imports[0].import_path,
+            ImportPath::Relative(RepoPath::from("src/auth/jwt.ts"))
+        );
+        assert_eq!(middleware_result.symbols[0].name, "verifyToken");
+        assert_eq!(middleware_result.symbols[0].qualname, "auth::middleware::verifyToken");
+        assert_eq!(middleware_result.call_sites[0].callee_name, "verify");
+        assert_eq!(
+            middleware_result.call_sites[0].caller_qualname,
+            Some("auth::middleware::verifyToken".to_string())
+        );
+        assert!(!middleware_result.file.is_barrel);
+
+        let index_entry = fixture_entry_in("ts_small", "src/index.ts", SupportedLanguage::TypeScript);
+        let index_source = std::fs::read_to_string(&index_entry.absolute_path).unwrap();
+        let index_result = adapter.extract(&index_entry, &index_source);
+
+        assert!(index_result.file.is_barrel);
+        assert_eq!(index_result.imports.len(), 2);
+        assert_eq!(
+            index_result
+                .imports
+                .iter()
+                .map(|import| import.import_path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                ImportPath::Relative(RepoPath::from("src/auth/index.ts")),
+                ImportPath::Relative(RepoPath::from("src/utils/formatter.ts")),
+            ]
+        );
     }
 
     #[test]

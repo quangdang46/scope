@@ -5,8 +5,8 @@ use std::env;
 use clap::Parser;
 use cli::{ChangeType, Cli, Commands};
 use scope_core::{
-    scan_repo, Adapter, BootstrapOptions, DatabaseInfo, RustAdapter, ScanConfig, SupportedLanguage,
-    SymbolKind, Verbosity,
+    adapter_for_language, scan_repo, BootstrapOptions, DatabaseInfo, ScanConfig, SymbolKind,
+    Verbosity,
 };
 
 fn main() {
@@ -173,41 +173,28 @@ fn index_repo(
     repo_root: &std::path::Path,
     store: &scope_core::Store,
 ) -> Result<usize, scope_core::ScopeError> {
-    let adapter = RustAdapter;
     let entries = scan_repo(repo_root, &ScanConfig::default())?;
-    let mut indexed_files = 0usize;
+    let extracts: Vec<_> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            let adapter = adapter_for_language(entry.language)?;
+            if !scope_core::adapters::supports_path(adapter, &entry.absolute_path) {
+                return None;
+            }
+            let source = std::fs::read_to_string(&entry.absolute_path).ok()?;
+            Some(adapter.extract(&entry, &source))
+        })
+        .collect();
 
-    for entry in entries {
-        if entry.language != SupportedLanguage::Rust {
-            continue;
-        }
-
-        if !scope_core::adapters::supports_path(&adapter, &entry.absolute_path) {
-            continue;
-        }
-
-        let source = std::fs::read_to_string(&entry.absolute_path)
-            .map_err(|error| scope_core::ScopeError::io(&entry.absolute_path, error))?;
-        let extract = adapter.extract(&entry, &source);
-        store.persist_extract_result(&extract)?;
-        indexed_files += 1;
+    for extract in &extracts {
+        store.persist_extract_result(extract)?;
+    }
+    for extract in &extracts {
+        store.persist_extract_result(extract)?;
+    }
+    for extract in &extracts {
+        store.refresh_call_edges(extract)?;
     }
 
-    let entries = scan_repo(repo_root, &ScanConfig::default())?;
-    for entry in entries {
-        if entry.language != SupportedLanguage::Rust {
-            continue;
-        }
-
-        if !scope_core::adapters::supports_path(&adapter, &entry.absolute_path) {
-            continue;
-        }
-
-        let source = std::fs::read_to_string(&entry.absolute_path)
-            .map_err(|error| scope_core::ScopeError::io(&entry.absolute_path, error))?;
-        let extract = adapter.extract(&entry, &source);
-        store.refresh_call_edges(&extract)?;
-    }
-
-    Ok(indexed_files)
+    Ok(extracts.len())
 }

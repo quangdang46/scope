@@ -5,7 +5,7 @@ use std::{
 };
 
 use scope_core::{
-    scan_repo, stub, Adapter, EdgeKind, RepoPath, RustAdapter, ScanConfig, Store,
+    adapter_for_language, scan_repo, stub, EdgeKind, RepoPath, ScanConfig, Store,
     SupportedLanguage, SymbolKind,
 };
 
@@ -61,18 +61,22 @@ fn prepare_fixture_copy(name: &str) -> PathBuf {
 
 fn index_fixture(repo_root: &Path) -> Store {
     let store = Store::open(&repo_root.join(".scope/index.db")).unwrap();
-    let adapter = RustAdapter;
     let entries = scan_repo(repo_root, &ScanConfig::default()).unwrap();
     let extracts: Vec<_> = entries
         .into_iter()
-        .filter(|entry| entry.language == SupportedLanguage::Rust)
-        .filter(|entry| scope_core::adapters::supports_path(&adapter, &entry.absolute_path))
-        .map(|entry| {
+        .filter_map(|entry| {
+            let adapter = adapter_for_language(entry.language)?;
+            if !scope_core::adapters::supports_path(adapter, &entry.absolute_path) {
+                return None;
+            }
             let source = fs::read_to_string(&entry.absolute_path).unwrap();
-            adapter.extract(&entry, &source)
+            Some(adapter.extract(&entry, &source))
         })
         .collect();
 
+    for extract in &extracts {
+        store.persist_extract_result(extract).unwrap();
+    }
     for extract in &extracts {
         store.persist_extract_result(extract).unwrap();
     }
@@ -173,7 +177,7 @@ fn rust_small_reverse_deps_match_golden_json() {
 }
 
 #[test]
-fn ts_small_is_scanned_but_not_indexed_by_rust_fixture_indexer() {
+fn ts_small_is_scanned_and_indexed_by_fixture_indexer() {
     let entries = scan_repo(&fixture_root("ts_small"), &ScanConfig::default()).unwrap();
 
     assert!(!entries.is_empty());
@@ -188,7 +192,11 @@ fn ts_small_is_scanned_but_not_indexed_by_rust_fixture_indexer() {
     let store = index_fixture(&repo);
     let deps = store.query_deps(&RepoPath::from("src/index.ts")).unwrap();
 
-    assert!(deps.is_empty(), "non-Rust fixture should not be indexed yet");
+    assert_eq!(deps.len(), 2, "ts fixture should now be indexed");
+    assert_eq!(
+        deps.iter().map(|dep| dep.path.0.clone()).collect::<Vec<_>>(),
+        vec!["src/auth/index.ts", "src/utils/formatter.ts"]
+    );
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -242,6 +250,59 @@ fn rust_small_function_symbols_query_matches_golden_json() {
     let expected = read_golden("rust_small_lib_function_symbols.json");
 
     assert_eq!(actual, expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn ts_small_forward_deps_match_expected_paths() {
+    let repo = prepare_fixture_copy("ts_small");
+    let store = index_fixture(&repo);
+    let deps = store.query_deps(&RepoPath::from("src/index.ts")).unwrap();
+    let dep_paths: Vec<_> = deps.iter().map(|dep| dep.path.0.clone()).collect();
+
+    assert_eq!(dep_paths, vec!["src/auth/index.ts", "src/utils/formatter.ts"]);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn ts_small_reverse_deps_and_symbols_and_calls_work_conservatively() {
+    let repo = prepare_fixture_copy("ts_small");
+    let store = index_fixture(&repo);
+
+    let reverse = store.query_reverse_deps(&RepoPath::from("src/auth/jwt.ts")).unwrap();
+    let reverse_paths: Vec<_> = reverse.iter().map(|dep| dep.path.0.clone()).collect();
+    assert_eq!(reverse_paths, vec!["src/auth/middleware.ts"]);
+
+    let jwt_symbols = store
+        .query_symbols(&RepoPath::from("src/auth/jwt.ts"), false, None)
+        .unwrap();
+    let jwt_symbol_names: Vec<_> = jwt_symbols.iter().map(|symbol| symbol.name.clone()).collect();
+    assert_eq!(jwt_symbol_names, vec!["sign", "verify"]);
+
+    let middleware_symbols = store
+        .query_symbols(&RepoPath::from("src/auth/middleware.ts"), false, None)
+        .unwrap();
+    let middleware_symbol_names: Vec<_> = middleware_symbols
+        .iter()
+        .map(|symbol| symbol.name.clone())
+        .collect();
+    assert_eq!(middleware_symbol_names, vec!["verifyToken"]);
+
+    let verify_token_calls = store.query_callees("auth::middleware::verifyToken", false).unwrap();
+    let verify_token_callees: Vec<_> = verify_token_calls
+        .iter()
+        .map(|traversal| traversal.qualname.clone().unwrap())
+        .collect();
+    assert_eq!(verify_token_callees, vec!["auth::jwt::verify"]);
+
+    let format_calls = store.query_callees("utils::formatter::format", false).unwrap();
+    let format_callees: Vec<_> = format_calls
+        .iter()
+        .map(|traversal| traversal.qualname.clone().unwrap())
+        .collect();
+    assert_eq!(format_callees, vec!["utils::logger::log"]);
 
     fs::remove_dir_all(repo).unwrap();
 }

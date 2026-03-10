@@ -7,7 +7,32 @@
     "reverse": false,
     "transitive": false,
     "depth": null,
-    "dependencies": []
+    "dependencies": [
+      {
+        "kind": "file",
+        "path": "src/parser.rs",
+        "edge_kind": "contain",
+        "certainty": "exact",
+        "import_text": null,
+        "line": null
+      },
+      {
+        "kind": "file",
+        "path": "src/resolver.rs",
+        "edge_kind": "contain",
+        "certainty": "exact",
+        "import_text": null,
+        "line": null
+      },
+      {
+        "kind": "file",
+        "path": "src/utils.rs",
+        "edge_kind": "contain",
+        "certainty": "exact",
+        "import_text": null,
+        "line": null
+      }
+    ]
   },
   "warnings": []
 }

@@ -2,3 +2,4 @@
 .bv/
 .scope/
 target/
+poc/node_modules/

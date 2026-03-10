@@ -10,6 +10,14 @@
     "dependencies": [
       {
         "kind": "file",
+        "path": "src/lib.rs",
+        "edge_kind": "contain",
+        "certainty": "exact",
+        "import_text": null,
+        "line": null
+      },
+      {
+        "kind": "file",
         "path": "src/resolver.rs",
         "edge_kind": "import",
         "certainty": "exact",
