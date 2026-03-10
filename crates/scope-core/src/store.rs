@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashSet, VecDeque},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -7,9 +8,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::{
-    Certainty, DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind,
-    RepoPath, ScopeError, ScopeResult, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
+    ArchFileEdge, Certainty, DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath,
+    NodeKind, RepoPath, ScopeError, ScopeResult, SymbolKind, SymbolRecord, TraversalRecord,
+    Visibility,
 };
+
+const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
 
 pub const INDEX_SCHEMA_VERSION: u32 = 3;
 
@@ -258,6 +262,27 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn query_file_edges(&self) -> ScopeResult<Vec<ArchFileEdge>> {
+        let mut statement = self.connection.prepare(
+            "SELECT from_files.path, to_files.path, file_edges.kind, file_edges.certainty
+             FROM file_edges
+             JOIN files AS from_files ON from_files.id = file_edges.from_file_id
+             JOIN files AS to_files ON to_files.id = file_edges.to_file_id
+             ORDER BY from_files.path ASC, to_files.path ASC, file_edges.kind ASC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(ArchFileEdge {
+                from_file: RepoPath(row.get::<_, String>(0)?),
+                to_file: RepoPath(row.get::<_, String>(1)?),
+                edge_kind: edge_kind_from_db(&row.get::<_, String>(2)?),
+                certainty: certainty_from_db(&row.get::<_, String>(3)?),
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn query_symbols(
         &self,
         path: &RepoPath,
@@ -324,6 +349,92 @@ impl Store {
         }
 
         self.query_symbol_edges(symbol_qualname, true)
+    }
+
+    pub fn query_impact(
+        &self,
+        target: &str,
+        change_type: &str,
+        depth: Option<usize>,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        let max_depth = depth
+            .map(|value| value as u32)
+            .unwrap_or_else(|| default_depth_for_change_type(change_type));
+        let mut impacted = Vec::new();
+
+        if let Some(symbol_id) = self.symbol_id(target)? {
+            let symbol_depth = if change_type == "body" { 1 } else { max_depth };
+            if includes_callers(change_type) {
+                impacted.extend(self.traverse_reverse_callers(symbol_id, target, symbol_depth)?);
+            }
+
+            if includes_importers(change_type) {
+                if let Some(file_id) = self.file_id_for_symbol(symbol_id)? {
+                    impacted.extend(self.traverse_reverse_importers(
+                        file_id,
+                        target,
+                        max_depth,
+                        change_type == "side-effect",
+                    )?);
+                }
+            }
+
+            return Ok(dedup_traversals(impacted));
+        }
+
+        let path = RepoPath::from(target.to_string());
+        let Some(file_id) = self.file_id(&path)? else {
+            return Ok(Vec::new());
+        };
+
+        let file_depth = if change_type == "body" { 1 } else { max_depth };
+        Ok(self.traverse_reverse_importers(file_id, target, file_depth, change_type == "side-effect")?)
+    }
+
+    pub fn query_explain(
+        &self,
+        target: &str,
+        to: Option<&str>,
+        depth: Option<usize>,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        let max_depth = depth
+            .map(|value| value as u32)
+            .unwrap_or(DEFAULT_TRANSITIVE_DEPTH);
+        let mut traversals = Vec::new();
+
+        if let Some(symbol_id) = self.symbol_id(target)? {
+            traversals.extend(self.traverse_reverse_callers(symbol_id, target, max_depth)?);
+            traversals.extend(self.traverse_forward_callees(symbol_id, target, max_depth)?);
+            if let Some(file_id) = self.file_id_for_symbol(symbol_id)? {
+                traversals.extend(self.traverse_reverse_importers(file_id, target, max_depth, false)?);
+            }
+        } else if let Some(file_id) = self.file_id(&RepoPath::from(target.to_string()))? {
+            traversals.extend(self.query_deps(&RepoPath::from(target.to_string()))?.into_iter().map(
+                |dependency| TraversalRecord {
+                    kind: dependency.kind,
+                    path: Some(dependency.path),
+                    qualname: None,
+                    edge_kind: dependency.edge_kind,
+                    certainty: dependency.certainty,
+                    reason: format!("depends on {target}"),
+                    distance: 1,
+                },
+            ));
+            traversals.extend(self.traverse_reverse_importers(file_id, target, max_depth, false)?);
+        }
+
+        let traversals = dedup_traversals(traversals);
+        if let Some(to) = to {
+            Ok(traversals
+                .into_iter()
+                .filter(|record| {
+                    record.qualname.as_deref() == Some(to)
+                        || record.path.as_ref().is_some_and(|path| path.0 == to)
+                })
+                .collect())
+        } else {
+            Ok(traversals)
+        }
     }
 
     fn file_id(&self, path: &RepoPath) -> ScopeResult<Option<i64>> {
@@ -685,6 +796,199 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    fn file_id_for_symbol(&self, symbol_id: i64) -> ScopeResult<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT file_id FROM symbols WHERE id = ?1",
+                [symbol_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn traverse_reverse_callers(
+        &self,
+        start_symbol_id: i64,
+        target_label: &str,
+        max_depth: u32,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::from([start_symbol_id]);
+        let mut queue = VecDeque::from([(start_symbol_id, 0u32)]);
+        let mut traversals = Vec::new();
+
+        while let Some((symbol_id, distance)) = queue.pop_front() {
+            if distance >= max_depth {
+                continue;
+            }
+
+            let mut statement = self.connection.prepare(
+                "SELECT caller_symbols.id, caller_files.path, caller_symbols.qualname, symbol_edges.certainty
+                 FROM symbol_edges
+                 JOIN symbols AS caller_symbols ON caller_symbols.id = symbol_edges.from_symbol_id
+                 JOIN files AS caller_files ON caller_files.id = caller_symbols.file_id
+                 WHERE symbol_edges.to_symbol_id = ?1 AND symbol_edges.kind = 'call'
+                 ORDER BY caller_symbols.qualname ASC",
+            )?;
+            let rows = statement.query_map([symbol_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+
+            for row in rows {
+                let (caller_id, caller_path, caller_qualname, certainty) = row?;
+                let hop_distance = distance + 1;
+                traversals.push(TraversalRecord {
+                    kind: NodeKind::Symbol,
+                    path: Some(RepoPath(caller_path)),
+                    qualname: Some(caller_qualname.clone()),
+                    edge_kind: EdgeKind::Call,
+                    certainty: certainty_from_db(&certainty),
+                    reason: if hop_distance == 1 {
+                        format!("calls {target_label} directly")
+                    } else {
+                        format!("calls a symbol that reaches {target_label}")
+                    },
+                    distance: hop_distance,
+                });
+                if visited.insert(caller_id) {
+                    queue.push_back((caller_id, hop_distance));
+                }
+            }
+        }
+
+        Ok(traversals)
+    }
+
+    fn traverse_forward_callees(
+        &self,
+        start_symbol_id: i64,
+        target_label: &str,
+        max_depth: u32,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::from([start_symbol_id]);
+        let mut queue = VecDeque::from([(start_symbol_id, 0u32)]);
+        let mut traversals = Vec::new();
+
+        while let Some((symbol_id, distance)) = queue.pop_front() {
+            if distance >= max_depth {
+                continue;
+            }
+
+            let mut statement = self.connection.prepare(
+                "SELECT callee_symbols.id, callee_files.path, callee_symbols.qualname, symbol_edges.certainty
+                 FROM symbol_edges
+                 JOIN symbols AS callee_symbols ON callee_symbols.id = symbol_edges.to_symbol_id
+                 JOIN files AS callee_files ON callee_files.id = callee_symbols.file_id
+                 WHERE symbol_edges.from_symbol_id = ?1 AND symbol_edges.kind = 'call'
+                 ORDER BY callee_symbols.qualname ASC",
+            )?;
+            let rows = statement.query_map([symbol_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+
+            for row in rows {
+                let (callee_id, callee_path, callee_qualname, certainty) = row?;
+                let hop_distance = distance + 1;
+                traversals.push(TraversalRecord {
+                    kind: NodeKind::Symbol,
+                    path: Some(RepoPath(callee_path)),
+                    qualname: Some(callee_qualname.clone()),
+                    edge_kind: EdgeKind::Call,
+                    certainty: certainty_from_db(&certainty),
+                    reason: if hop_distance == 1 {
+                        format!("is called by {target_label}")
+                    } else {
+                        format!("is downstream of {target_label} in the call graph")
+                    },
+                    distance: hop_distance,
+                });
+                if visited.insert(callee_id) {
+                    queue.push_back((callee_id, hop_distance));
+                }
+            }
+        }
+
+        Ok(traversals)
+    }
+
+    fn traverse_reverse_importers(
+        &self,
+        start_file_id: i64,
+        target_label: &str,
+        max_depth: u32,
+        import_only_reason: bool,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::from([start_file_id]);
+        let mut queue = VecDeque::from([(start_file_id, 0u32)]);
+        let mut traversals = Vec::new();
+
+        while let Some((file_id, distance)) = queue.pop_front() {
+            if distance >= max_depth {
+                continue;
+            }
+
+            let mut statement = self.connection.prepare(
+                "SELECT importer_files.id, importer_files.path, file_edges.certainty
+                 FROM file_edges
+                 JOIN files AS importer_files ON importer_files.id = file_edges.from_file_id
+                 WHERE file_edges.to_file_id = ?1 AND file_edges.kind = 'import'
+                 ORDER BY importer_files.path ASC",
+            )?;
+            let rows = statement.query_map([file_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+
+            for row in rows {
+                let (importer_id, importer_path, certainty) = row?;
+                let hop_distance = distance + 1;
+                traversals.push(TraversalRecord {
+                    kind: NodeKind::File,
+                    path: Some(RepoPath(importer_path.clone())),
+                    qualname: None,
+                    edge_kind: EdgeKind::Import,
+                    certainty: certainty_from_db(&certainty),
+                    reason: if hop_distance == 1 || import_only_reason {
+                        format!("imports {target_label}")
+                    } else {
+                        format!("imports a file that reaches {target_label}")
+                    },
+                    distance: hop_distance,
+                });
+                if visited.insert(importer_id) {
+                    queue.push_back((importer_id, hop_distance));
+                }
+            }
+        }
+
+        Ok(traversals)
+    }
+
     fn insert_symbol(&self, file_id: i64, symbol: &SymbolRecord) -> ScopeResult<()> {
         self.connection.execute(
             "INSERT OR REPLACE INTO symbols (
@@ -900,6 +1204,48 @@ fn edge_kind_from_db(value: &str) -> EdgeKind {
 
 fn import_mentions_symbol(raw_text: &str, symbol_name: &str) -> bool {
     raw_text.contains(symbol_name)
+}
+
+fn includes_callers(change_type: &str) -> bool {
+    !matches!(change_type, "side-effect")
+}
+
+fn includes_importers(change_type: &str) -> bool {
+    !matches!(change_type, "body")
+}
+
+fn default_depth_for_change_type(change_type: &str) -> u32 {
+    if change_type == "body" {
+        1
+    } else {
+        DEFAULT_TRANSITIVE_DEPTH
+    }
+}
+
+fn dedup_traversals(traversals: Vec<TraversalRecord>) -> Vec<TraversalRecord> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+
+    for traversal in traversals {
+        let key = (
+            traversal.kind.clone(),
+            traversal.path.clone().map(|path| path.0),
+            traversal.qualname.clone(),
+            traversal.edge_kind.clone(),
+            traversal.distance,
+        );
+        if seen.insert(key) {
+            deduped.push(traversal);
+        }
+    }
+
+    deduped.sort_by(|left, right| {
+        left.distance
+            .cmp(&right.distance)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.qualname.cmp(&right.qualname))
+    });
+    deduped
 }
 
 fn unix_timestamp() -> i64 {
@@ -1427,6 +1773,274 @@ mod tests {
         };
         store.persist_extract_result(&updated).unwrap();
         assert!(store.query_callees("parser::parse", false).unwrap().is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn impact_body_returns_only_direct_callers() {
+        let dir = unique_temp_dir("db-impact-body");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let parser = sample_file("src/parser.rs");
+        let resolver = sample_file("src/resolver.rs");
+        let main = sample_file("src/main.rs");
+
+        let extracts = vec![
+            ExtractResult {
+                file: parser.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public)],
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: resolver.clone(),
+                imports: vec![ImportRecord {
+                    file: resolver.path.clone(),
+                    raw_text: "use crate::parser;".to_string(),
+                    import_path: ImportPath::Relative(parser.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol("src/resolver.rs", "resolve", SymbolKind::Function, Visibility::Public)],
+                call_sites: vec![sample_call(
+                    "src/resolver.rs",
+                    "resolver::resolve",
+                    "parse",
+                    Some("parser::parse"),
+                    false,
+                    2,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: main.clone(),
+                imports: vec![ImportRecord {
+                    file: main.path.clone(),
+                    raw_text: "use crate::resolver;".to_string(),
+                    import_path: ImportPath::Relative(resolver.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol("src/main.rs", "run", SymbolKind::Function, Visibility::Public)],
+                call_sites: vec![sample_call(
+                    "src/main.rs",
+                    "main::run",
+                    "resolve",
+                    Some("resolver::resolve"),
+                    false,
+                    2,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
+        let impacted = store.query_impact("parser::parse", "body", None).unwrap();
+
+        assert_eq!(impacted.len(), 1);
+        assert_eq!(impacted[0].qualname.as_deref(), Some("resolver::resolve"));
+        assert_eq!(impacted[0].distance, 1);
+        assert_eq!(impacted[0].edge_kind, EdgeKind::Call);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn impact_signature_includes_transitive_callers_and_importers() {
+        let dir = unique_temp_dir("db-impact-signature");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let parser = sample_file("src/parser.rs");
+        let resolver = sample_file("src/resolver.rs");
+        let main = sample_file("src/main.rs");
+
+        let extracts = vec![
+            ExtractResult {
+                file: parser.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public)],
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: resolver.clone(),
+                imports: vec![ImportRecord {
+                    file: resolver.path.clone(),
+                    raw_text: "use crate::parser;".to_string(),
+                    import_path: ImportPath::Relative(parser.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol("src/resolver.rs", "resolve", SymbolKind::Function, Visibility::Public)],
+                call_sites: vec![sample_call(
+                    "src/resolver.rs",
+                    "resolver::resolve",
+                    "parse",
+                    Some("parser::parse"),
+                    false,
+                    2,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: main.clone(),
+                imports: vec![ImportRecord {
+                    file: main.path.clone(),
+                    raw_text: "use crate::resolver;".to_string(),
+                    import_path: ImportPath::Relative(resolver.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol("src/main.rs", "run", SymbolKind::Function, Visibility::Public)],
+                call_sites: vec![sample_call(
+                    "src/main.rs",
+                    "main::run",
+                    "resolve",
+                    Some("resolver::resolve"),
+                    false,
+                    2,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
+        let impacted = store.query_impact("parser::parse", "signature", None).unwrap();
+
+        assert!(impacted.iter().any(|record| record.qualname.as_deref() == Some("resolver::resolve") && record.distance == 1));
+        assert!(impacted.iter().any(|record| record.qualname.as_deref() == Some("main::run") && record.distance == 2));
+        assert!(impacted.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/resolver.rs") && record.edge_kind == EdgeKind::Import));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn impact_delete_and_side_effect_follow_reverse_imports() {
+        let dir = unique_temp_dir("db-impact-importers");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let parser = sample_file("src/parser.rs");
+        let resolver = sample_file("src/resolver.rs");
+        let main = sample_file("src/main.rs");
+        let extracts = vec![
+            ExtractResult {
+                file: parser.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: resolver.clone(),
+                imports: vec![ImportRecord {
+                    file: resolver.path.clone(),
+                    raw_text: "use crate::parser;".to_string(),
+                    import_path: ImportPath::Relative(parser.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: main.clone(),
+                imports: vec![ImportRecord {
+                    file: main.path.clone(),
+                    raw_text: "use crate::resolver;".to_string(),
+                    import_path: ImportPath::Relative(resolver.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
+
+        let deleted = store.query_impact("src/parser.rs", "delete", None).unwrap();
+        assert!(deleted.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/resolver.rs") && record.distance == 1));
+        assert!(deleted.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/main.rs") && record.distance == 2));
+
+        let side_effect = store.query_impact("src/parser.rs", "side-effect", None).unwrap();
+        assert!(side_effect.iter().all(|record| record.edge_kind == EdgeKind::Import));
+        assert!(side_effect.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/main.rs") && record.distance == 2));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn explain_returns_incident_call_and_import_evidence() {
+        let dir = unique_temp_dir("db-explain");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let parser = sample_file("src/parser.rs");
+        let resolver = sample_file("src/resolver.rs");
+        let extracts = vec![
+            ExtractResult {
+                file: parser.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public)],
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: resolver.clone(),
+                imports: vec![ImportRecord {
+                    file: resolver.path.clone(),
+                    raw_text: "use crate::parser;".to_string(),
+                    import_path: ImportPath::Relative(parser.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol("src/resolver.rs", "resolve", SymbolKind::Function, Visibility::Public)],
+                call_sites: vec![sample_call(
+                    "src/resolver.rs",
+                    "resolver::resolve",
+                    "parse",
+                    Some("parser::parse"),
+                    false,
+                    2,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
+        let explain = store.query_explain("parser::parse", None, None).unwrap();
+
+        assert!(explain.iter().any(|record| record.qualname.as_deref() == Some("resolver::resolve") && record.edge_kind == EdgeKind::Call));
+        assert!(explain.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/resolver.rs") && record.edge_kind == EdgeKind::Import));
 
         std::fs::remove_dir_all(dir).unwrap();
     }

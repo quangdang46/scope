@@ -34,6 +34,8 @@ pub enum Commands {
     Impact(ImpactArgs),
     /// Explain why a file or symbol appears in impact results
     Explain(ExplainArgs),
+    /// Check architecture rules against indexed file dependencies
+    Arch(ArchArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Run benchmark scaffolding for future performance work
@@ -122,6 +124,21 @@ pub struct ExplainArgs {
     #[arg(long)]
     pub depth: Option<usize>,
 }
+
+#[derive(Debug, clap::Args)]
+pub struct ArchArgs {
+    #[command(subcommand)]
+    pub command: ArchCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArchCommand {
+    /// Check layer rules against direct indexed file edges
+    Check(ArchCheckArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ArchCheckArgs {}
 
 #[derive(Debug, clap::Args)]
 pub struct DoctorArgs {

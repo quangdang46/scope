@@ -1,0 +1,30 @@
+[[layer]]
+name = "routes"
+pattern = "src/routes/**"
+
+[[layer]]
+name = "services"
+pattern = "src/services/**"
+
+[[layer]]
+name = "models"
+pattern = "src/models/**"
+
+[[layer]]
+name = "utils"
+pattern = "src/utils/**"
+
+[[rule]]
+from = "services"
+may_not_import = ["routes"]
+message = "services must not import routes"
+
+[[rule]]
+from = "models"
+may_not_import = ["services", "routes"]
+message = "models must not import services or routes"
+
+[[rule]]
+from = "utils"
+may_not_import = ["models", "services", "routes"]
+message = "utils must stay infrastructure-only"

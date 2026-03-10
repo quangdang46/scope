@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "command": "arch-check",
+  "status": "ok",
+  "data": {
+    "config_path": ".scope/arch.toml",
+    "checked_edges": 5,
+    "checked_layered_edges": 5,
+    "violations": [
+      {
+        "from_file": "src/models/account.ts",
+        "to_file": "src/services/user.ts",
+        "from_layer": "models",
+        "to_layer": "services",
+        "message": "models must not import services or routes"
+      },
+      {
+        "from_file": "src/services/user.ts",
+        "to_file": "src/routes/http.ts",
+        "from_layer": "services",
+        "to_layer": "routes",
+        "message": "services must not import routes"
+      },
+      {
+        "from_file": "src/utils/format.ts",
+        "to_file": "src/models/account.ts",
+        "from_layer": "utils",
+        "to_layer": "models",
+        "message": "utils must stay infrastructure-only"
+      }
+    ]
+  },
+  "warnings": []
+}

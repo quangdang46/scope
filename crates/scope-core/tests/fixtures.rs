@@ -5,8 +5,8 @@ use std::{
 };
 
 use scope_core::{
-    adapter_for_language, scan_repo, stub, EdgeKind, RepoPath, ScanConfig, Store,
-    SupportedLanguage, SymbolKind,
+    adapter_for_language, arch_check, load_arch_config, scan_repo, stub, EdgeKind, RepoPath,
+    ScanConfig, Store, SupportedLanguage, SymbolKind,
 };
 
 fn repo_root() -> PathBuf {
@@ -42,11 +42,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         let file_type = entry.file_type().unwrap();
 
         if file_type.is_dir() {
-            if entry.file_name() == ".scope" {
-                continue;
-            }
             copy_dir_recursive(&src_path, &dst_path);
         } else {
+            if src_path
+                .strip_prefix(src)
+                .ok()
+                .and_then(|relative| relative.to_str())
+                == Some(".scope/index.db")
+            {
+                continue;
+            }
             fs::copy(&src_path, &dst_path).unwrap();
         }
     }
@@ -135,6 +140,24 @@ fn ts_small_fixture_has_expected_files() {
         assert!(
             root.join(relative).is_file(),
             "missing ts_small file: {relative}"
+        );
+    }
+}
+
+#[test]
+fn arch_violations_fixture_has_expected_files() {
+    let root = fixture_root("arch_violations");
+    for relative in [
+        "package.json",
+        ".scope/arch.toml",
+        "src/routes/http.ts",
+        "src/services/user.ts",
+        "src/models/account.ts",
+        "src/utils/format.ts",
+    ] {
+        assert!(
+            root.join(relative).is_file(),
+            "missing arch_violations file: {relative}"
         );
     }
 }
@@ -384,6 +407,61 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
         .filter_map(|traversal| traversal.qualname.clone())
         .collect();
     assert_eq!(parser_caller_names, vec!["lib::greet".to_string(), "resolver::resolve".to_string()]);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn arch_violations_fixture_matches_expected_json() {
+    let repo = prepare_fixture_copy("arch_violations");
+    let store = index_fixture(&repo);
+    let config = load_arch_config(&repo).unwrap();
+    let result = arch_check(&store, &config).unwrap();
+
+    assert_eq!(result.checked_edges, 5);
+    assert_eq!(result.checked_layered_edges, 5);
+    assert_eq!(result.violations.len(), 3);
+
+    let violation_pairs: Vec<_> = result
+        .violations
+        .iter()
+        .map(|violation| {
+            (
+                violation.from_file.0.clone(),
+                violation.to_file.0.clone(),
+                violation.from_layer.clone(),
+                violation.to_layer.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        violation_pairs,
+        vec![
+            (
+                "src/models/account.ts".to_string(),
+                "src/services/user.ts".to_string(),
+                "models".to_string(),
+                "services".to_string(),
+            ),
+            (
+                "src/services/user.ts".to_string(),
+                "src/routes/http.ts".to_string(),
+                "services".to_string(),
+                "routes".to_string(),
+            ),
+            (
+                "src/utils/format.ts".to_string(),
+                "src/models/account.ts".to_string(),
+                "utils".to_string(),
+                "models".to_string(),
+            ),
+        ]
+    );
+
+    let envelope = stub::arch_check(result);
+    let actual = serde_json::to_string_pretty(&envelope).unwrap();
+    let expected = read_golden("arch_violations_check.json");
+    assert_eq!(actual, expected);
 
     fs::remove_dir_all(repo).unwrap();
 }

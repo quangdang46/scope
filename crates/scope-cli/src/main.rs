@@ -3,23 +3,27 @@ mod cli;
 use std::env;
 
 use clap::Parser;
-use cli::{ChangeType, Cli, Commands};
+use cli::{ArchCommand, ChangeType, Cli, Commands};
 use scope_core::{
-    adapter_for_language, scan_repo, BootstrapOptions, DatabaseInfo, ScanConfig, SymbolKind,
-    Verbosity,
+    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, DatabaseInfo,
+    ScanConfig, SymbolKind, Verbosity,
 };
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("{error}");
-        std::process::exit(2);
+    match run() {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
     }
 }
 
-fn run() -> Result<(), scope_core::ScopeError> {
+fn run() -> Result<i32, scope_core::ScopeError> {
     let cli = Cli::parse();
     let cwd = env::current_dir().map_err(|error| scope_core::ScopeError::io(".", error))?;
     let verbosity = verbosity(&cli);
+    let mut exit_code = 0;
 
     let output = match cli.command {
         Commands::Index(args) => {
@@ -112,16 +116,56 @@ fn run() -> Result<(), scope_core::ScopeError> {
                 traversals,
             ))
         }
-        Commands::Impact(args) => serde_json::to_string_pretty(&scope_core::stub::impact(
-            args.target,
-            change_type_name(args.change_type),
-            args.depth,
-        )),
-        Commands::Explain(args) => serde_json::to_string_pretty(&scope_core::stub::explain(
-            args.target,
-            args.to,
-            args.depth,
-        )),
+        Commands::Impact(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let change_type = change_type_name(args.change_type);
+            let impacted = context
+                .store
+                .query_impact(&args.target, &change_type, args.depth)?;
+            serde_json::to_string_pretty(&scope_core::stub::impact(
+                args.target,
+                change_type,
+                args.depth,
+                impacted,
+            ))
+        }
+        Commands::Explain(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let traversals = context
+                .store
+                .query_explain(&args.target, args.to.as_deref(), args.depth)?;
+            serde_json::to_string_pretty(&scope_core::stub::explain(
+                args.target,
+                args.to,
+                args.depth,
+                traversals,
+            ))
+        }
+        Commands::Arch(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            match args.command {
+                ArchCommand::Check(_) => {
+                    let config = load_arch_config(&context.paths.repo_root)?;
+                    let result = arch_check(&context.store, &config)?;
+                    if !result.violations.is_empty() {
+                        exit_code = 1;
+                    }
+                    serde_json::to_string_pretty(&scope_core::stub::arch_check(result))
+                }
+            }
+        }
         Commands::Doctor(args) => serde_json::to_string_pretty(&scope_core::stub::doctor(args.fix)),
         Commands::Benchmark(args) => serde_json::to_string_pretty(&scope_core::stub::benchmark(
             args.fixture,
@@ -131,7 +175,7 @@ fn run() -> Result<(), scope_core::ScopeError> {
     .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
 
     println!("{output}");
-    Ok(())
+    Ok(exit_code)
 }
 
 fn symbol_kind_name(kind: cli::SymbolKind) -> SymbolKind {

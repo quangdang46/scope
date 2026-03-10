@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct RepoPath(pub String);
 
@@ -76,7 +76,7 @@ pub enum SymbolKind {
     Variable,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
     Import,
@@ -87,7 +87,7 @@ pub enum EdgeKind {
     Dynamic,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     File,
@@ -199,4 +199,77 @@ pub struct TraversalRecord {
     pub certainty: Certainty,
     pub reason: String,
     pub distance: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImpactChangeType {
+    Body,
+    Signature,
+    Rename,
+    Delete,
+    Visibility,
+    SideEffect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImpactTraversalRule {
+    pub change_type: ImpactChangeType,
+    pub summary: String,
+    pub traversal_strategy: String,
+    pub primary_blast_radius: String,
+    pub allowed_edge_kinds: Vec<EdgeKind>,
+    pub include_transitive: bool,
+    pub default_max_distance: Option<u32>,
+    pub include_re_exports: bool,
+    pub include_importers: bool,
+    pub include_callers: bool,
+    pub include_visibility_boundary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchLayer {
+    pub name: String,
+    pub pattern: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchRule {
+    pub from: String,
+    pub may_not_import: Vec<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ArchConfig {
+    #[serde(default, rename = "layer")]
+    pub layers: Vec<ArchLayer>,
+    #[serde(default, rename = "rule")]
+    pub rules: Vec<ArchRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchFileEdge {
+    pub from_file: RepoPath,
+    pub to_file: RepoPath,
+    pub edge_kind: EdgeKind,
+    pub certainty: Certainty,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchViolation {
+    pub from_file: RepoPath,
+    pub to_file: RepoPath,
+    pub from_layer: String,
+    pub to_layer: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchCheckResult {
+    pub config_path: RepoPath,
+    pub checked_edges: usize,
+    pub checked_layered_edges: usize,
+    pub violations: Vec<ArchViolation>,
 }

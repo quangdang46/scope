@@ -3,7 +3,8 @@ use serde::Serialize;
 use crate::{
     json::JsonEnvelope,
     model::{
-        Certainty, DependencyRecord, EdgeKind, NodeKind, RepoPath, Span, SymbolKind, SymbolRecord,
+        ArchCheckResult, Certainty, DependencyRecord, EdgeKind, ImpactChangeType,
+        ImpactTraversalRule, NodeKind, RepoPath, Span, SymbolKind, SymbolRecord,
         TraversalRecord, Visibility,
     },
     DatabaseInfo,
@@ -49,6 +50,7 @@ pub struct ImpactData {
     pub depth: Option<usize>,
     pub impacted: Vec<TraversalRecord>,
     pub risk: &'static str,
+    pub traversal_rule: ImpactTraversalRule,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +72,14 @@ pub struct BenchmarkData {
     pub fixture: Option<String>,
     pub iterations: Option<u32>,
     pub benchmarks: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArchCheckData {
+    pub config_path: RepoPath,
+    pub checked_edges: usize,
+    pub checked_layered_edges: usize,
+    pub violations: Vec<crate::ArchViolation>,
 }
 
 pub fn index(
@@ -167,31 +177,148 @@ pub fn impact(
     target: String,
     change_type: String,
     depth: Option<usize>,
+    impacted: Vec<TraversalRecord>,
 ) -> JsonEnvelope<ImpactData> {
-    JsonEnvelope::stub(
+    let traversal_rule = impact_rule(&change_type);
+    JsonEnvelope::success(
         "impact",
         ImpactData {
             target,
             change_type,
             depth,
-            impacted: Vec::new(),
-            risk: "unknown",
+            risk: impact_risk_label(&impacted),
+            impacted,
+            traversal_rule,
         },
     )
+}
+
+fn impact_risk_label(impacted: &[TraversalRecord]) -> &'static str {
+    if impacted.is_empty() {
+        "low"
+    } else if impacted.iter().any(|record| matches!(record.certainty, Certainty::Dynamic)) {
+        "high"
+    } else if impacted.iter().any(|record| matches!(record.certainty, Certainty::Heuristic)) {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+pub fn impact_rule(change_type: &str) -> ImpactTraversalRule {
+    match change_type {
+        "body" => ImpactTraversalRule {
+            change_type: ImpactChangeType::Body,
+            summary: "Implementation changed without changing the public shape".to_string(),
+            traversal_strategy: "Reverse call graph only".to_string(),
+            primary_blast_radius: "Direct callers and behavioral tests".to_string(),
+            allowed_edge_kinds: vec![EdgeKind::Call],
+            include_transitive: false,
+            default_max_distance: Some(1),
+            include_re_exports: false,
+            include_importers: false,
+            include_callers: true,
+            include_visibility_boundary: false,
+        },
+        "signature" => ImpactTraversalRule {
+            change_type: ImpactChangeType::Signature,
+            summary: "Parameters, return type, or callable contract changed".to_string(),
+            traversal_strategy: "Reverse call graph plus importer/re-export expansion".to_string(),
+            primary_blast_radius: "All callers, transitive wrappers, and exported API consumers"
+                .to_string(),
+            allowed_edge_kinds: vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export],
+            include_transitive: true,
+            default_max_distance: None,
+            include_re_exports: true,
+            include_importers: true,
+            include_callers: true,
+            include_visibility_boundary: false,
+        },
+        "rename" => ImpactTraversalRule {
+            change_type: ImpactChangeType::Rename,
+            summary: "A symbol, file, or module name changed".to_string(),
+            traversal_strategy: "Traverse all reference-bearing edges".to_string(),
+            primary_blast_radius: "References, import sites, and re-export chains".to_string(),
+            allowed_edge_kinds: vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export],
+            include_transitive: true,
+            default_max_distance: None,
+            include_re_exports: true,
+            include_importers: true,
+            include_callers: true,
+            include_visibility_boundary: false,
+        },
+        "delete" => ImpactTraversalRule {
+            change_type: ImpactChangeType::Delete,
+            summary: "The target was removed entirely".to_string(),
+            traversal_strategy: "Traverse all reverse dependencies and reference edges".to_string(),
+            primary_blast_radius: "All callers and importers that would break".to_string(),
+            allowed_edge_kinds: vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export],
+            include_transitive: true,
+            default_max_distance: None,
+            include_re_exports: true,
+            include_importers: true,
+            include_callers: true,
+            include_visibility_boundary: false,
+        },
+        "visibility" => ImpactTraversalRule {
+            change_type: ImpactChangeType::Visibility,
+            summary: "Accessibility changed across a visibility boundary".to_string(),
+            traversal_strategy: "Inspect external import/call edges across the narrowed boundary"
+                .to_string(),
+            primary_blast_radius: "External consumers and re-export paths outside the boundary"
+                .to_string(),
+            allowed_edge_kinds: vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export],
+            include_transitive: true,
+            default_max_distance: None,
+            include_re_exports: true,
+            include_importers: true,
+            include_callers: true,
+            include_visibility_boundary: true,
+        },
+        "side-effect" => ImpactTraversalRule {
+            change_type: ImpactChangeType::SideEffect,
+            summary: "File-level initialization or execution behavior changed".to_string(),
+            traversal_strategy: "Reverse file-import graph only".to_string(),
+            primary_blast_radius: "Importers and transitive importers affected by init order"
+                .to_string(),
+            allowed_edge_kinds: vec![EdgeKind::Import],
+            include_transitive: true,
+            default_max_distance: None,
+            include_re_exports: false,
+            include_importers: true,
+            include_callers: false,
+            include_visibility_boundary: false,
+        },
+        _ => ImpactTraversalRule {
+            change_type: ImpactChangeType::Body,
+            summary: "Unknown change type; defaulting to the narrowest documented traversal"
+                .to_string(),
+            traversal_strategy: "Reverse call graph only".to_string(),
+            primary_blast_radius: "Direct callers only".to_string(),
+            allowed_edge_kinds: vec![EdgeKind::Call],
+            include_transitive: false,
+            default_max_distance: Some(1),
+            include_re_exports: false,
+            include_importers: false,
+            include_callers: true,
+            include_visibility_boundary: false,
+        },
+    }
 }
 
 pub fn explain(
     target: String,
     to: Option<String>,
     depth: Option<usize>,
+    traversals: Vec<TraversalRecord>,
 ) -> JsonEnvelope<ExplainData> {
-    JsonEnvelope::stub(
+    JsonEnvelope::success(
         "explain",
         ExplainData {
             target,
             to,
             depth,
-            traversals: Vec::new(),
+            traversals,
         },
     )
 }
@@ -213,6 +340,18 @@ pub fn benchmark(fixture: Option<String>, iterations: Option<u32>) -> JsonEnvelo
             fixture,
             iterations,
             benchmarks: Vec::new(),
+        },
+    )
+}
+
+pub fn arch_check(result: ArchCheckResult) -> JsonEnvelope<ArchCheckData> {
+    JsonEnvelope::success(
+        "arch-check",
+        ArchCheckData {
+            config_path: result.config_path,
+            checked_edges: result.checked_edges,
+            checked_layered_edges: result.checked_layered_edges,
+            violations: result.violations,
         },
     )
 }
@@ -246,5 +385,90 @@ pub fn placeholder_symbol(path: RepoPath, name: &str, kind: SymbolKind) -> Symbo
             start_line: 0,
             end_line: 0,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn impact_rules_cover_all_supported_change_types() {
+        let cases = [
+            ("body", vec![EdgeKind::Call], false, Some(1), false, true),
+            (
+                "signature",
+                vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export],
+                true,
+                None,
+                true,
+                true,
+            ),
+            (
+                "rename",
+                vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export],
+                true,
+                None,
+                true,
+                true,
+            ),
+            (
+                "delete",
+                vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export],
+                true,
+                None,
+                true,
+                true,
+            ),
+            (
+                "visibility",
+                vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export],
+                true,
+                None,
+                true,
+                true,
+            ),
+            ("side-effect", vec![EdgeKind::Import], true, None, true, false),
+        ];
+
+        for (change_type, expected_edges, transitive, max_distance, importers, callers) in cases {
+            let rule = impact_rule(change_type);
+            assert_eq!(rule.allowed_edge_kinds, expected_edges, "unexpected edge kinds for {change_type}");
+            assert_eq!(rule.include_transitive, transitive, "unexpected transitive flag for {change_type}");
+            assert_eq!(rule.default_max_distance, max_distance, "unexpected max distance for {change_type}");
+            assert_eq!(rule.include_importers, importers, "unexpected importer flag for {change_type}");
+            assert_eq!(rule.include_callers, callers, "unexpected caller flag for {change_type}");
+        }
+    }
+
+    #[test]
+    fn impact_stub_embeds_traversal_rule_metadata() {
+        let traversals = vec![TraversalRecord {
+            kind: NodeKind::Symbol,
+            path: Some(RepoPath::from("src/parser.rs")),
+            qualname: Some("parser::parse".to_string()),
+            edge_kind: EdgeKind::Call,
+            certainty: Certainty::Resolved,
+            reason: "calls parser::parse directly".to_string(),
+            distance: 1,
+        }];
+        let envelope = impact(
+            "parser::parse".to_string(),
+            "signature".to_string(),
+            Some(3),
+            traversals,
+        );
+        assert!(matches!(envelope.status, crate::json::JsonStatus::Ok));
+        assert_eq!(envelope.data.change_type, "signature");
+        assert_eq!(envelope.data.depth, Some(3));
+        assert_eq!(envelope.data.risk, "low");
+        assert_eq!(envelope.data.traversal_rule.change_type, ImpactChangeType::Signature);
+        assert!(envelope.data.traversal_rule.include_re_exports);
+        assert!(envelope.data.traversal_rule.include_importers);
+        assert!(envelope.data.traversal_rule.include_callers);
+        assert_eq!(
+            envelope.data.traversal_rule.allowed_edge_kinds,
+            vec![EdgeKind::Call, EdgeKind::Import, EdgeKind::Export]
+        );
     }
 }

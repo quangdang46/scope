@@ -15,10 +15,12 @@ description = "Local static analysis engine and CLI for dependency and impact qu
 
 [workspace.dependencies]
 clap = { version = "4.5.32", features = ["derive"] }
+glob = "0.3.2"
 ignore = "0.4.23"
 rusqlite = { version = "0.34.0", features = ["bundled"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
+toml = "0.8.20"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
