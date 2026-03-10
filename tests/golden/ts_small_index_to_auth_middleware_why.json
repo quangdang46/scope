@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "command": "why",
+  "status": "ok",
+  "data": {
+    "from": "src/index.ts",
+    "to": "src/auth/middleware.ts",
+    "depth": null,
+    "path": [
+      {
+        "kind": "file",
+        "path": "src/auth/index.ts",
+        "qualname": null,
+        "edge_kind": "import",
+        "certainty": "exact",
+        "reason": "imported by src/index.ts",
+        "distance": 1
+      },
+      {
+        "kind": "file",
+        "path": "src/auth/middleware.ts",
+        "qualname": null,
+        "edge_kind": "import",
+        "certainty": "exact",
+        "reason": "imported by src/auth/index.ts",
+        "distance": 2
+      }
+    ]
+  },
+  "warnings": []
+}

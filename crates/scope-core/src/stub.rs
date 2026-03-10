@@ -81,6 +81,14 @@ pub struct ExplainData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WhyData {
+    pub from: String,
+    pub to: String,
+    pub depth: Option<usize>,
+    pub path: Vec<TraversalRecord>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DoctorData {
     pub fix: bool,
     pub checks: Vec<String>,
@@ -381,6 +389,23 @@ pub fn explain(
             to,
             depth,
             traversals,
+        },
+    )
+}
+
+pub fn why(
+    from: String,
+    to: String,
+    depth: Option<usize>,
+    path: Vec<TraversalRecord>,
+) -> JsonEnvelope<WhyData> {
+    JsonEnvelope::success(
+        "why",
+        WhyData {
+            from,
+            to,
+            depth,
+            path,
         },
     )
 }

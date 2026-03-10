@@ -34,6 +34,8 @@ pub enum Commands {
     Impact(ImpactArgs),
     /// Explain why a file or symbol appears in impact results
     Explain(ExplainArgs),
+    /// Explain the shortest path connecting two files or symbols
+    Why(WhyArgs),
     /// Check architecture rules against indexed file dependencies
     Arch(ArchArgs),
     /// Inspect repository and index health
@@ -121,6 +123,14 @@ pub struct ExplainArgs {
     pub target: String,
     #[arg(long)]
     pub to: Option<String>,
+    #[arg(long)]
+    pub depth: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WhyArgs {
+    pub from: String,
+    pub to: String,
     #[arg(long)]
     pub depth: Option<usize>,
 }

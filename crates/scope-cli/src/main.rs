@@ -149,6 +149,20 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 traversals,
             ))
         }
+        Commands::Why(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let path = context.store.query_why(&args.from, &args.to, args.depth)?;
+            serde_json::to_string_pretty(&scope_core::stub::why(
+                args.from,
+                args.to,
+                args.depth,
+                path,
+            ))
+        }
         Commands::Arch(args) => {
             let bootstrap_options = BootstrapOptions {
                 repo_root_override: cli.repo_root.clone(),

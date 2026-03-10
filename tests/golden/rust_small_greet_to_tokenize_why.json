@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "command": "why",
+  "status": "ok",
+  "data": {
+    "from": "lib::greet",
+    "to": "parser::tokenize",
+    "depth": null,
+    "path": [
+      {
+        "kind": "symbol",
+        "path": "src/parser.rs",
+        "qualname": "parser::parse",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "called by lib::greet",
+        "distance": 1
+      },
+      {
+        "kind": "symbol",
+        "path": "src/parser.rs",
+        "qualname": "parser::tokenize",
+        "edge_kind": "call",
+        "certainty": "exact",
+        "reason": "called by parser::parse",
+        "distance": 2
+      }
+    ]
+  },
+  "warnings": []
+}

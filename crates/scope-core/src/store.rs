@@ -391,6 +391,45 @@ impl Store {
         Ok(self.traverse_reverse_importers(file_id, target, file_depth, change_type == "side-effect")?)
     }
 
+    pub fn query_why(
+        &self,
+        from: &str,
+        to: &str,
+        depth: Option<usize>,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        if from == to {
+            return Ok(Vec::new());
+        }
+
+        let max_depth = depth
+            .map(|value| value as u32)
+            .unwrap_or(DEFAULT_TRANSITIVE_DEPTH);
+
+        if let (Some(from_symbol_id), Some(to_symbol_id)) = (self.symbol_id(from)?, self.symbol_id(to)?) {
+            return self.shortest_symbol_path(from_symbol_id, from, to_symbol_id, to, max_depth);
+        }
+
+        if let (Some(from_file_id), Some(to_file_id)) = (
+            self.file_id(&RepoPath::from(from.to_string()))?,
+            self.file_id(&RepoPath::from(to.to_string()))?,
+        ) {
+            return self.shortest_file_path(from_file_id, from, to_file_id, to, max_depth);
+        }
+
+        let from_is_symbol = self.symbol_id(from)?.is_some();
+        let to_is_symbol = self.symbol_id(to)?.is_some();
+        let from_is_file = self.file_id(&RepoPath::from(from.to_string()))?.is_some();
+        let to_is_file = self.file_id(&RepoPath::from(to.to_string()))?.is_some();
+
+        if (from_is_symbol && to_is_file) || (from_is_file && to_is_symbol) {
+            return Err(ScopeError::InvalidInput(
+                "scope why requires both endpoints to be files or both to be symbols".to_string(),
+            ));
+        }
+
+        Ok(Vec::new())
+    }
+
     pub fn query_explain(
         &self,
         target: &str,
@@ -987,6 +1026,196 @@ impl Store {
         }
 
         Ok(traversals)
+    }
+
+    fn shortest_file_path(
+        &self,
+        start_file_id: i64,
+        start_label: &str,
+        goal_file_id: i64,
+        _goal_label: &str,
+        max_depth: u32,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::from([start_file_id]);
+        let mut queue = VecDeque::from([(start_file_id, 0u32)]);
+        let mut predecessors = std::collections::HashMap::<i64, (i64, RepoPath, Certainty)>::new();
+
+        while let Some((file_id, distance)) = queue.pop_front() {
+            if distance >= max_depth {
+                continue;
+            }
+
+            let mut statement = self.connection.prepare(
+                "SELECT dependency_files.id, dependency_files.path, file_edges.certainty
+                 FROM file_edges
+                 JOIN files AS dependency_files ON dependency_files.id = file_edges.to_file_id
+                 WHERE file_edges.from_file_id = ?1 AND file_edges.kind = 'import'
+                 ORDER BY dependency_files.path ASC",
+            )?;
+            let rows = statement.query_map([file_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    RepoPath(row.get::<_, String>(1)?),
+                    certainty_from_db(&row.get::<_, String>(2)?),
+                ))
+            })?;
+
+            for row in rows {
+                let (next_id, next_path, certainty) = row?;
+                if visited.insert(next_id) {
+                    predecessors.insert(next_id, (file_id, next_path.clone(), certainty));
+                    if next_id == goal_file_id {
+                        return self.reconstruct_file_path(predecessors, start_file_id, start_label, goal_file_id);
+                    }
+                    queue.push_back((next_id, distance + 1));
+                }
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    fn shortest_symbol_path(
+        &self,
+        start_symbol_id: i64,
+        start_label: &str,
+        goal_symbol_id: i64,
+        _goal_label: &str,
+        max_depth: u32,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::from([start_symbol_id]);
+        let mut queue = VecDeque::from([(start_symbol_id, 0u32)]);
+        let mut predecessors = std::collections::HashMap::<i64, (i64, RepoPath, String, Certainty)>::new();
+
+        while let Some((symbol_id, distance)) = queue.pop_front() {
+            if distance >= max_depth {
+                continue;
+            }
+
+            let mut statement = self.connection.prepare(
+                "SELECT callee_symbols.id, callee_files.path, callee_symbols.qualname, symbol_edges.certainty
+                 FROM symbol_edges
+                 JOIN symbols AS callee_symbols ON callee_symbols.id = symbol_edges.to_symbol_id
+                 JOIN files AS callee_files ON callee_files.id = callee_symbols.file_id
+                 WHERE symbol_edges.from_symbol_id = ?1 AND symbol_edges.kind = 'call'
+                 ORDER BY callee_symbols.qualname ASC",
+            )?;
+            let rows = statement.query_map([symbol_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    RepoPath(row.get::<_, String>(1)?),
+                    row.get::<_, String>(2)?,
+                    certainty_from_db(&row.get::<_, String>(3)?),
+                ))
+            })?;
+
+            for row in rows {
+                let (next_id, next_path, next_qualname, certainty) = row?;
+                if visited.insert(next_id) {
+                    predecessors.insert(
+                        next_id,
+                        (symbol_id, next_path.clone(), next_qualname.clone(), certainty),
+                    );
+                    if next_id == goal_symbol_id {
+                        return self.reconstruct_symbol_path(
+                            predecessors,
+                            start_symbol_id,
+                            start_label,
+                            goal_symbol_id,
+                        );
+                    }
+                    queue.push_back((next_id, distance + 1));
+                }
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    fn reconstruct_file_path(
+        &self,
+        predecessors: std::collections::HashMap<i64, (i64, RepoPath, Certainty)>,
+        start_file_id: i64,
+        start_label: &str,
+        goal_file_id: i64,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        let mut current_id = goal_file_id;
+        let mut reversed = Vec::new();
+
+        while current_id != start_file_id {
+            let Some((previous_id, path, certainty)) = predecessors.get(&current_id) else {
+                return Ok(Vec::new());
+            };
+            reversed.push((current_id, *previous_id, path.clone(), certainty.clone()));
+            current_id = *previous_id;
+        }
+
+        reversed.reverse();
+        let mut previous_label = start_label.to_string();
+        let mut path = Vec::with_capacity(reversed.len());
+
+        for (index, (_current_id, _previous_id, next_path, certainty)) in reversed.into_iter().enumerate() {
+            path.push(TraversalRecord {
+                kind: NodeKind::File,
+                path: Some(next_path.clone()),
+                qualname: None,
+                edge_kind: EdgeKind::Import,
+                certainty,
+                reason: format!("imported by {previous_label}"),
+                distance: (index + 1) as u32,
+            });
+            previous_label = next_path.0;
+        }
+
+        Ok(path)
+    }
+
+    fn reconstruct_symbol_path(
+        &self,
+        predecessors: std::collections::HashMap<i64, (i64, RepoPath, String, Certainty)>,
+        start_symbol_id: i64,
+        start_label: &str,
+        goal_symbol_id: i64,
+    ) -> ScopeResult<Vec<TraversalRecord>> {
+        let mut current_id = goal_symbol_id;
+        let mut reversed = Vec::new();
+
+        while current_id != start_symbol_id {
+            let Some((previous_id, path, qualname, certainty)) = predecessors.get(&current_id) else {
+                return Ok(Vec::new());
+            };
+            reversed.push((current_id, *previous_id, path.clone(), qualname.clone(), certainty.clone()));
+            current_id = *previous_id;
+        }
+
+        reversed.reverse();
+        let mut previous_label = start_label.to_string();
+        let mut path = Vec::with_capacity(reversed.len());
+
+        for (index, (_current_id, _previous_id, next_path, next_qualname, certainty)) in
+            reversed.into_iter().enumerate()
+        {
+            path.push(TraversalRecord {
+                kind: NodeKind::Symbol,
+                path: Some(next_path),
+                qualname: Some(next_qualname.clone()),
+                edge_kind: EdgeKind::Call,
+                certainty,
+                reason: format!("called by {previous_label}"),
+                distance: (index + 1) as u32,
+            });
+            previous_label = next_qualname;
+        }
+
+        Ok(path)
     }
 
     fn insert_symbol(&self, file_id: i64, symbol: &SymbolRecord) -> ScopeResult<()> {

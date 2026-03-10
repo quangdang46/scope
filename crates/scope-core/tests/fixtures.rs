@@ -467,6 +467,67 @@ fn rust_small_explain_query_matches_golden_json() {
 }
 
 #[test]
+fn why_queries_match_golden_json_and_handle_limits() {
+    let rust_repo = prepare_fixture_copy("rust_small");
+    let rust_store = index_fixture(&rust_repo);
+
+    let symbol_path = rust_store.query_why("lib::greet", "parser::tokenize", None).unwrap();
+    let symbol_envelope = stub::why(
+        "lib::greet".to_string(),
+        "parser::tokenize".to_string(),
+        None,
+        symbol_path.clone(),
+    );
+    let symbol_actual = serde_json::to_string_pretty(&symbol_envelope).unwrap();
+    let symbol_expected = read_golden("rust_small_greet_to_tokenize_why.json");
+    assert_eq!(symbol_actual, symbol_expected);
+    assert_eq!(symbol_path.len(), 2);
+    assert_eq!(symbol_path[0].qualname.as_deref(), Some("parser::parse"));
+    assert_eq!(symbol_path[1].qualname.as_deref(), Some("parser::tokenize"));
+
+    let depth_limited = rust_store
+        .query_why("lib::greet", "parser::tokenize", Some(1))
+        .unwrap();
+    assert!(depth_limited.is_empty());
+
+    let same_target = rust_store.query_why("lib::greet", "lib::greet", None).unwrap();
+    assert!(same_target.is_empty());
+
+    assert!(matches!(
+        rust_store.query_why("src/lib.rs", "parser::parse", None),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+
+    fs::remove_dir_all(rust_repo).unwrap();
+
+    let ts_repo = prepare_fixture_copy("ts_small");
+    let ts_store = index_fixture(&ts_repo);
+
+    let file_path = ts_store
+        .query_why("src/index.ts", "src/auth/middleware.ts", None)
+        .unwrap();
+    let file_envelope = stub::why(
+        "src/index.ts".to_string(),
+        "src/auth/middleware.ts".to_string(),
+        None,
+        file_path.clone(),
+    );
+    let file_actual = serde_json::to_string_pretty(&file_envelope).unwrap();
+    let file_expected = read_golden("ts_small_index_to_auth_middleware_why.json");
+    assert_eq!(file_actual, file_expected);
+    assert_eq!(file_path.len(), 2);
+    assert_eq!(file_path[0].path.as_ref().map(|path| path.0.as_str()), Some("src/auth/index.ts"));
+    assert_eq!(file_path[1].path.as_ref().map(|path| path.0.as_str()), Some("src/auth/middleware.ts"));
+
+    let disconnected = ts_store
+        .query_why("src/utils/logger.ts", "src/auth/middleware.ts", None)
+        .unwrap();
+    assert!(disconnected.is_empty());
+
+    fs::remove_dir_all(ts_repo).unwrap();
+}
+
+#[test]
 fn rust_small_impact_queries_match_golden_json() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
