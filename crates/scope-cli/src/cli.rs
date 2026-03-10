@@ -46,6 +46,8 @@ pub enum Commands {
     Arch(ArchArgs),
     /// Report Martin instability scores from indexed file dependencies
     Stability(StabilityArgs),
+    /// Report churn-weighted risk scores from indexed file dependencies
+    Risk(RiskArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
@@ -180,10 +182,44 @@ pub enum ArchCommand {
 #[derive(Debug, clap::Args)]
 pub struct ArchCheckArgs {}
 
+#[derive(Debug, Clone, ValueEnum)]
+pub enum StabilitySortArg {
+    Instability,
+    FanIn,
+    FanOut,
+    Path,
+}
+
 #[derive(Debug, clap::Args)]
 pub struct StabilityArgs {
     #[arg(long)]
     pub file: Option<String>,
+    #[arg(long)]
+    pub flag_threshold: Option<f64>,
+    #[arg(long, value_enum, default_value_t = StabilitySortArg::Instability)]
+    pub sort: StabilitySortArg,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum RiskSortArg {
+    Score,
+    Churn,
+    Dependents,
+    Path,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct RiskArgs {
+    #[arg(long)]
+    pub file: Option<String>,
+    #[arg(long, default_value_t = 90)]
+    pub days: u32,
+    #[arg(long)]
+    pub threshold: Option<f64>,
+    #[arg(long)]
+    pub top: Option<usize>,
+    #[arg(long, value_enum, default_value_t = RiskSortArg::Score)]
+    pub sort: RiskSortArg,
 }
 
 #[derive(Debug, clap::Args)]

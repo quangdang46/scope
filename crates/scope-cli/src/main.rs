@@ -4,16 +4,17 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use clap::Parser;
-use cli::{ArchCommand, ChangeType, Cli, Commands};
-use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath};
+use cli::{ArchCommand, ChangeType, Cli, Commands, RiskSortArg, StabilitySortArg};
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, DatabaseInfo,
-    ScanConfig, SymbolKind, Verbosity,
+    RiskSort, ScanConfig, SymbolKind, Verbosity,
 };
+use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
 fn main() {
     match run() {
@@ -32,7 +33,10 @@ fn render_cli_error(error: &scope_core::ScopeError) -> String {
     })
 }
 
-fn serialize_output<T: serde::Serialize>(value: &T, compact: bool) -> Result<String, serde_json::Error> {
+fn serialize_output<T: serde::Serialize>(
+    value: &T,
+    compact: bool,
+) -> Result<String, serde_json::Error> {
     if compact {
         let mut json = serde_json::to_value(value)?;
         compact_json_value(&mut json);
@@ -80,6 +84,11 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let indexed = index_repo(&context.paths.repo_root, &context.store)?;
+            if args.no_git {
+                context.store.clear_file_churn()?;
+            } else {
+                let _ = refresh_git_churn(&context.paths.repo_root, &context.store, 90);
+            }
             let database = DatabaseInfo {
                 path: context.paths.db_path.display().to_string(),
                 schema_version: context.store.schema_version()?,
@@ -186,9 +195,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let traversals = context
-                .store
-                .query_explain(&args.target, args.to.as_deref(), args.depth)?;
+            let traversals =
+                context
+                    .store
+                    .query_explain(&args.target, args.to.as_deref(), args.depth)?;
             serialize_output(
                 &scope_core::stub::explain(args.target, args.to, args.depth, traversals),
                 compact,
@@ -227,8 +237,9 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             let change_type = change_type_name(args.change_type);
             let pack = build_context_pack(&context.store, &args.target, &change_type, args.budget)?;
             if let Some(output_path) = args.output {
-                fs::write(&output_path, &pack)
-                    .map_err(|error| scope_core::ScopeError::io(output_path.display().to_string(), error))?;
+                fs::write(&output_path, &pack).map_err(|error| {
+                    scope_core::ScopeError::io(output_path.display().to_string(), error)
+                })?;
             }
             Ok(pack)
         }
@@ -256,8 +267,34 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let file = args.file.as_deref().map(RepoPath::from);
-            let result = context.store.query_stability(file.as_ref())?;
+            let sort = match args.sort {
+                StabilitySortArg::Instability => StabilitySort::Instability,
+                StabilitySortArg::FanIn => StabilitySort::FanIn,
+                StabilitySortArg::FanOut => StabilitySort::FanOut,
+                StabilitySortArg::Path => StabilitySort::Path,
+            };
+            let result = context
+                .store
+                .query_stability(file.as_ref(), args.flag_threshold, sort)?;
             serialize_output(&scope_core::stub::stability(result), compact)
+        }
+        Commands::Risk(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let file = args.file.as_deref().map(RepoPath::from);
+            let sort = match args.sort {
+                RiskSortArg::Score => RiskSort::Score,
+                RiskSortArg::Churn => RiskSort::Churn,
+                RiskSortArg::Dependents => RiskSort::Dependents,
+                RiskSortArg::Path => RiskSort::Path,
+            };
+            let result = context
+                .store
+                .query_risk(file.as_ref(), args.days, args.threshold, args.top, sort)?;
+            serialize_output(&scope_core::stub::risk(result), compact)
         }
         Commands::Doctor(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -289,6 +326,62 @@ fn run() -> Result<i32, scope_core::ScopeError> {
 
     println!("{output}");
     Ok(exit_code)
+}
+
+fn refresh_git_churn(
+    repo_root: &Path,
+    store: &scope_core::Store,
+    days: u32,
+) -> Result<(), scope_core::ScopeError> {
+    store.clear_file_churn()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("log")
+        .arg(format!("--since={} days ago", days))
+        .arg("--format=%H|%ae|%ct")
+        .arg("--name-only")
+        .output()
+        .map_err(|error| scope_core::ScopeError::io("git log", error))?;
+
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let mut current_commit: Option<(String, String, i64)> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            current_commit = None;
+            continue;
+        }
+        if let Some(header) = parse_git_log_header(trimmed) {
+            current_commit = Some(header);
+            continue;
+        }
+        let Some((sha, email, timestamp)) = current_commit.as_ref() else {
+            continue;
+        };
+        let _ = store.persist_file_churn(
+            &RepoPath::from(trimmed.to_string()),
+            sha,
+            Some(email.as_str()),
+            Some(*timestamp),
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_git_log_header(line: &str) -> Option<(String, String, i64)> {
+    let mut parts = line.split('|');
+    let sha = parts.next()?.to_string();
+    let email = parts.next()?.to_string();
+    let timestamp = parts.next()?.parse().ok()?;
+    if sha.is_empty() {
+        return None;
+    }
+    Some((sha, email, timestamp))
 }
 
 fn symbol_kind_name(kind: cli::SymbolKind) -> SymbolKind {
@@ -423,7 +516,10 @@ fn build_context_pack(
     Ok(pack)
 }
 
-fn format_public_surface(store: &scope_core::Store, target: &str) -> Result<String, scope_core::ScopeError> {
+fn format_public_surface(
+    store: &scope_core::Store,
+    target: &str,
+) -> Result<String, scope_core::ScopeError> {
     let path = target_file_for_target(store, target)?;
     let Some(path) = path else {
         return Ok(String::new());
@@ -445,7 +541,10 @@ fn format_public_surface(store: &scope_core::Store, target: &str) -> Result<Stri
     Ok(lines.join("\n"))
 }
 
-fn format_direct_callers(store: &scope_core::Store, target: &str) -> Result<String, scope_core::ScopeError> {
+fn format_direct_callers(
+    store: &scope_core::Store,
+    target: &str,
+) -> Result<String, scope_core::ScopeError> {
     if !looks_like_symbol(target) {
         return Ok(String::new());
     }
@@ -464,7 +563,10 @@ fn format_direct_callers(store: &scope_core::Store, target: &str) -> Result<Stri
     Ok(lines.join("\n"))
 }
 
-fn format_direct_callees(store: &scope_core::Store, target: &str) -> Result<String, scope_core::ScopeError> {
+fn format_direct_callees(
+    store: &scope_core::Store,
+    target: &str,
+) -> Result<String, scope_core::ScopeError> {
     if !looks_like_symbol(target) {
         return Ok(String::new());
     }
@@ -524,7 +626,11 @@ fn format_change_specific_section(
 }
 
 fn format_traversal_line(record: &scope_core::TraversalRecord) -> String {
-    let path = record.path.as_ref().map(|path| path.0.as_str()).unwrap_or("<unknown>");
+    let path = record
+        .path
+        .as_ref()
+        .map(|path| path.0.as_str())
+        .unwrap_or("<unknown>");
     let label = record.qualname.as_deref().unwrap_or(path);
     format!(
         "{} | {} | certainty: {} | distance: {} | {}",
@@ -565,7 +671,10 @@ fn target_file_for_target(
 }
 
 fn looks_like_symbol(target: &str) -> bool {
-    target.contains("::") && !target.ends_with(".rs") && !target.ends_with(".ts") && !target.ends_with(".js")
+    target.contains("::")
+        && !target.ends_with(".rs")
+        && !target.ends_with(".ts")
+        && !target.ends_with(".js")
 }
 
 fn estimate_text_tokens(text: &str) -> usize {
@@ -653,7 +762,8 @@ fn run_benchmark(
     let mut runs = Vec::with_capacity(iterations as usize);
 
     for iteration in 0..iterations {
-        let benchmark_root = prepare_benchmark_copy(&source_root, &format!("benchmark-{iteration}"))?;
+        let benchmark_root =
+            prepare_benchmark_copy(&source_root, &format!("benchmark-{iteration}"))?;
         let summary = benchmark_iteration(&benchmark_root, fixture)?;
         runs.push(summary);
         fs::remove_dir_all(&benchmark_root)
@@ -668,11 +778,7 @@ fn run_benchmark(
             .unwrap_or_else(|| RepoPath::from("")),
         change_kind: "append_comment",
     };
-    let full = summarize_phase(
-        &runs,
-        |run| run.full_ms,
-        |run| &run.full_stats,
-    );
+    let full = summarize_phase(&runs, |run| run.full_ms, |run| &run.full_stats);
     let incremental = summarize_phase(
         &runs,
         |run| run.incremental_ms,
@@ -731,16 +837,28 @@ fn summarize_phase(
 ) -> scope_core::stub::BenchmarkPhaseSummary {
     let durations: Vec<_> = runs.iter().map(duration).collect();
     let files_processed_avg = average_usize(
-        &runs.iter().map(|run| stats(run).affected_files).collect::<Vec<_>>(),
+        &runs
+            .iter()
+            .map(|run| stats(run).affected_files)
+            .collect::<Vec<_>>(),
     );
     let changed_files_avg = average_usize(
-        &runs.iter().map(|run| stats(run).changed_files).collect::<Vec<_>>(),
+        &runs
+            .iter()
+            .map(|run| stats(run).changed_files)
+            .collect::<Vec<_>>(),
     );
     let deleted_files_avg = average_usize(
-        &runs.iter().map(|run| stats(run).deleted_files).collect::<Vec<_>>(),
+        &runs
+            .iter()
+            .map(|run| stats(run).deleted_files)
+            .collect::<Vec<_>>(),
     );
     let affected_files_avg = average_usize(
-        &runs.iter().map(|run| stats(run).affected_files).collect::<Vec<_>>(),
+        &runs
+            .iter()
+            .map(|run| stats(run).affected_files)
+            .collect::<Vec<_>>(),
     );
 
     scope_core::stub::BenchmarkPhaseSummary {
@@ -770,13 +888,18 @@ fn average_usize(values: &[usize]) -> usize {
 
 fn fixture_root(name: &str) -> Result<PathBuf, scope_core::ScopeError> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..").join("fixtures").join(name)
+        .join("../..")
+        .join("fixtures")
+        .join(name)
         .canonicalize()
         .map_err(|error| scope_core::ScopeError::io(format!("fixtures/{name}"), error))?;
     Ok(root)
 }
 
-fn prepare_benchmark_copy(source_root: &Path, label: &str) -> Result<PathBuf, scope_core::ScopeError> {
+fn prepare_benchmark_copy(
+    source_root: &Path,
+    label: &str,
+) -> Result<PathBuf, scope_core::ScopeError> {
     let destination = unique_temp_dir(label);
     copy_dir_recursive(source_root, &destination)?;
     Ok(destination)
@@ -861,7 +984,8 @@ fn repo_relative_path(repo_root: &Path, path: &Path) -> RepoPath {
 }
 
 fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
-    let mut source = fs::read_to_string(path).map_err(|error| scope_core::ScopeError::io(path, error))?;
+    let mut source =
+        fs::read_to_string(path).map_err(|error| scope_core::ScopeError::io(path, error))?;
     let suffix = match path.extension().and_then(|ext| ext.to_str()) {
         Some("rs") => "\n// scope benchmark mutation\n",
         Some("ts") | Some("js") => "\n// scope benchmark mutation\n",
@@ -876,7 +1000,7 @@ mod tests {
     use super::{
         build_context_pack, index_repo, render_cli_error, run_benchmark, serialize_output,
     };
-    use scope_core::{RepoPath, StabilityRecord, StabilityResult};
+    use scope_core::{RepoPath, RiskRecord, RiskResult, StabilityRecord, StabilityResult};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -948,7 +1072,9 @@ mod tests {
 
     #[test]
     fn render_cli_error_returns_machine_readable_json() {
-        let output = render_cli_error(&scope_core::ScopeError::InvalidInput("missing target".to_string()));
+        let output = render_cli_error(&scope_core::ScopeError::InvalidInput(
+            "missing target".to_string(),
+        ));
         let value = serde_json::from_str::<serde_json::Value>(&output)
             .unwrap_or_else(|error| unreachable!("expected valid JSON output, got error: {error}"));
 
@@ -956,7 +1082,10 @@ mod tests {
         assert_eq!(value["command"], "cli");
         assert_eq!(value["status"], "error");
         assert_eq!(value["data"]["kind"], "invalid_input");
-        assert_eq!(value["data"]["message"], "invalid command input: missing target");
+        assert_eq!(
+            value["data"]["message"],
+            "invalid command input: missing target"
+        );
         assert_eq!(value["warnings"], serde_json::json!([]));
     }
 
@@ -1019,7 +1148,12 @@ mod tests {
 
     #[test]
     fn serialize_output_compact_mode_prunes_null_fields_inside_data() {
-        let envelope = scope_core::stub::why("src/lib.rs".to_string(), "src/parser.rs".to_string(), None, Vec::new());
+        let envelope = scope_core::stub::why(
+            "src/lib.rs".to_string(),
+            "src/parser.rs".to_string(),
+            None,
+            Vec::new(),
+        );
         let compact = serialize_output(&envelope, true).unwrap();
         let compact_value: serde_json::Value = serde_json::from_str(&compact).unwrap();
 
@@ -1032,12 +1166,26 @@ mod tests {
     fn serialize_output_stability_command_uses_expected_envelope_shape() {
         let envelope = scope_core::stub::stability(StabilityResult {
             file: None,
+            flag_threshold: Some(0.5),
+            sort: scope_core::StabilitySort::Instability,
             files: vec![StabilityRecord {
                 path: RepoPath::from("src/lib.rs"),
                 fan_in: 1,
                 fan_out: 2,
                 instability: 0.6666666666666666,
+                category: scope_core::StabilityCategory::Balanced,
+                flagged: false,
+                reason: None,
             }],
+            summary: scope_core::StabilitySummary {
+                avg_instability: 0.6666666666666666,
+                flagged_count: 0,
+                stable_count: 0,
+                stable_abstraction_count: 0,
+                balanced_count: 1,
+                healthy_leaf_count: 0,
+                isolated_count: 0,
+            },
         });
         let output = serialize_output(&envelope, true).unwrap();
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -1045,7 +1193,47 @@ mod tests {
         assert_eq!(value["command"], "stability");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["files"][0]["path"], "src/lib.rs");
+        assert_eq!(value["data"]["result"]["files"][0]["category"], "balanced");
+        assert_eq!(value["data"]["result"]["sort"], "instability");
+        assert_eq!(value["data"]["result"]["summary"]["balanced_count"], 1);
         assert!(value["data"]["result"].get("file").is_none());
+        assert!(value["data"]["result"]["files"][0].get("reason").is_none());
+    }
+
+    #[test]
+    fn serialize_output_risk_command_uses_expected_envelope_shape() {
+        let envelope = scope_core::stub::risk(RiskResult {
+            file: None,
+            top: Some(1),
+            days: 90,
+            sort: scope_core::RiskSort::Score,
+            files: vec![RiskRecord {
+                path: RepoPath::from("src/parser.rs"),
+                direct_dependents: 1,
+                transitive_dependents: 2,
+                churn_commits: 3,
+                score: 2.5,
+                normalized_score: 100,
+                reason: "log2-based risk score".to_string(),
+            }],
+            summary: scope_core::RiskSummary {
+                git_available: true,
+                scored_files: 5,
+                avg_score: 1.2,
+                max_score: 2.5,
+            },
+        });
+        let output = serialize_output(&envelope, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["command"], "risk");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["files"][0]["path"], "src/parser.rs");
+        assert_eq!(value["data"]["result"]["files"][0]["normalized_score"], 100);
+        assert_eq!(value["data"]["result"]["sort"], "score");
+        assert_eq!(value["data"]["result"]["summary"]["git_available"], true);
+        assert!(value["data"]["result"].get("file").is_none());
+        assert_eq!(value["data"]["result"]["top"], 1);
     }
 
     #[test]
@@ -1072,7 +1260,8 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let actual = build_context_pack(&store, "auth::middleware::verifyToken", "rename", 400).unwrap();
+        let actual =
+            build_context_pack(&store, "auth::middleware::verifyToken", "rename", 400).unwrap();
         let expected = read_golden("ts_small_verify_token_pack_rename.txt");
 
         assert_eq!(actual, expected);
@@ -1090,7 +1279,8 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let actual = build_context_pack(&store, "auth::middleware::verifyToken", "rename", 120).unwrap();
+        let actual =
+            build_context_pack(&store, "auth::middleware::verifyToken", "rename", 120).unwrap();
         let expected = read_golden("ts_small_verify_token_pack_rename_budget.txt");
 
         assert_eq!(actual, expected);
@@ -1105,7 +1295,10 @@ mod tests {
         let summary = run_benchmark(&repo, Some("rust_small"), 1).unwrap();
 
         assert!(summary.indexed_files > 0);
-        assert_eq!(summary.mutation.target_file, RepoPath::from("src/parser.rs"));
+        assert_eq!(
+            summary.mutation.target_file,
+            RepoPath::from("src/parser.rs")
+        );
         assert_eq!(summary.mutation.change_kind, "append_comment");
         assert_eq!(summary.full.files_processed_avg, summary.indexed_files);
         assert!(summary.incremental.changed_files_avg >= 1);
@@ -1124,18 +1317,39 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let initial = index_repo(&repo, &store).unwrap();
         assert_eq!(initial.affected_files, 5);
-        assert_eq!(store.query_reverse_deps(&RepoPath::from("src/parser.rs")).unwrap().len(), 2);
+        assert_eq!(
+            store
+                .query_reverse_deps(&RepoPath::from("src/parser.rs"))
+                .unwrap()
+                .len(),
+            2
+        );
 
         fs::remove_file(repo.join("src/parser.rs")).unwrap();
 
         let rebuilt = index_repo(&repo, &store).unwrap();
         assert_eq!(rebuilt.affected_files, 2);
-        assert!(store.list_indexed_files().unwrap().iter().all(|path| path != &RepoPath::from("src/parser.rs")));
-        assert!(store.query_symbols(&RepoPath::from("src/parser.rs"), false, None).unwrap().is_empty());
-        assert!(store.query_reverse_deps(&RepoPath::from("src/parser.rs")).unwrap().is_empty());
+        assert!(store
+            .list_indexed_files()
+            .unwrap()
+            .iter()
+            .all(|path| path != &RepoPath::from("src/parser.rs")));
+        assert!(store
+            .query_symbols(&RepoPath::from("src/parser.rs"), false, None)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .query_reverse_deps(&RepoPath::from("src/parser.rs"))
+            .unwrap()
+            .is_empty());
         let lib_deps = store.query_deps(&RepoPath::from("src/lib.rs")).unwrap();
-        assert!(lib_deps.iter().all(|dep| dep.path != RepoPath::from("src/parser.rs")));
-        assert!(store.query_deps(&RepoPath::from("src/resolver.rs")).unwrap().is_empty());
+        assert!(lib_deps
+            .iter()
+            .all(|dep| dep.path != RepoPath::from("src/parser.rs")));
+        assert!(store
+            .query_deps(&RepoPath::from("src/resolver.rs"))
+            .unwrap()
+            .is_empty());
 
         fs::remove_dir_all(repo).unwrap();
     }

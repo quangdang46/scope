@@ -4,7 +4,7 @@ use crate::{
     json::JsonEnvelope,
     model::{
         ArchCheckResult, Certainty, ContextResult, DependencyRecord, EdgeKind, ImpactChangeType,
-        ImpactTraversalRule, NodeKind, RepoPath, Span, StabilityResult, SymbolKind,
+        ImpactTraversalRule, NodeKind, RepoPath, RiskResult, Span, StabilityResult, SymbolKind,
         SymbolRecord, TraversalRecord, Visibility,
     },
     DatabaseInfo, IndexHealthStats,
@@ -158,6 +158,11 @@ pub struct ArchCheckData {
 #[derive(Debug, Serialize)]
 pub struct StabilityData {
     pub result: StabilityResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RiskData {
+    pub result: RiskResult,
 }
 
 pub fn index(
@@ -317,9 +322,15 @@ fn impact_groups(impacted: &[TraversalRecord]) -> ImpactGroups {
 fn impact_risk_label(impacted: &[TraversalRecord]) -> &'static str {
     if impacted.is_empty() {
         "low"
-    } else if impacted.iter().any(|record| matches!(record.certainty, Certainty::Dynamic)) {
+    } else if impacted
+        .iter()
+        .any(|record| matches!(record.certainty, Certainty::Dynamic))
+    {
         "high"
-    } else if impacted.iter().any(|record| matches!(record.certainty, Certainty::Heuristic)) {
+    } else if impacted
+        .iter()
+        .any(|record| matches!(record.certainty, Certainty::Heuristic))
+    {
         "medium"
     } else {
         "low"
@@ -466,7 +477,11 @@ pub fn context(result: ContextResult) -> JsonEnvelope<ContextData> {
 }
 
 pub fn doctor(fix: bool, stats: IndexHealthStats) -> JsonEnvelope<DoctorData> {
-    let unresolved_status = if stats.unresolved_imports == 0 { "ok" } else { "warn" };
+    let unresolved_status = if stats.unresolved_imports == 0 {
+        "ok"
+    } else {
+        "warn"
+    };
     let parse_status = if stats.parse_status.error == 0 {
         if stats.parse_status.partial == 0 {
             "ok"
@@ -491,7 +506,10 @@ pub fn doctor(fix: bool, stats: IndexHealthStats) -> JsonEnvelope<DoctorData> {
                 DoctorCheck {
                     name: "unresolved_imports",
                     status: unresolved_status,
-                    detail: format!("{} unresolved non-external import(s)", stats.unresolved_imports),
+                    detail: format!(
+                        "{} unresolved non-external import(s)",
+                        stats.unresolved_imports
+                    ),
                 },
                 DoctorCheck {
                     name: "parse_status",
@@ -537,6 +555,10 @@ pub fn arch_check(result: ArchCheckResult) -> JsonEnvelope<ArchCheckData> {
 
 pub fn stability(result: StabilityResult) -> JsonEnvelope<StabilityData> {
     JsonEnvelope::success("stability", StabilityData { result })
+}
+
+pub fn risk(result: RiskResult) -> JsonEnvelope<RiskData> {
+    JsonEnvelope::success("risk", RiskData { result })
 }
 
 pub fn mcp_stub_message() -> JsonEnvelope<TraversalRecord> {
@@ -611,16 +633,38 @@ mod tests {
                 true,
                 true,
             ),
-            ("side-effect", vec![EdgeKind::Import], true, None, true, false),
+            (
+                "side-effect",
+                vec![EdgeKind::Import],
+                true,
+                None,
+                true,
+                false,
+            ),
         ];
 
         for (change_type, expected_edges, transitive, max_distance, importers, callers) in cases {
             let rule = impact_rule(change_type);
-            assert_eq!(rule.allowed_edge_kinds, expected_edges, "unexpected edge kinds for {change_type}");
-            assert_eq!(rule.include_transitive, transitive, "unexpected transitive flag for {change_type}");
-            assert_eq!(rule.default_max_distance, max_distance, "unexpected max distance for {change_type}");
-            assert_eq!(rule.include_importers, importers, "unexpected importer flag for {change_type}");
-            assert_eq!(rule.include_callers, callers, "unexpected caller flag for {change_type}");
+            assert_eq!(
+                rule.allowed_edge_kinds, expected_edges,
+                "unexpected edge kinds for {change_type}"
+            );
+            assert_eq!(
+                rule.include_transitive, transitive,
+                "unexpected transitive flag for {change_type}"
+            );
+            assert_eq!(
+                rule.default_max_distance, max_distance,
+                "unexpected max distance for {change_type}"
+            );
+            assert_eq!(
+                rule.include_importers, importers,
+                "unexpected importer flag for {change_type}"
+            );
+            assert_eq!(
+                rule.include_callers, callers,
+                "unexpected caller flag for {change_type}"
+            );
         }
     }
 
@@ -654,7 +698,10 @@ mod tests {
         assert_eq!(envelope.data.grouped.exact.len(), 0);
         assert_eq!(envelope.data.grouped.heuristic.len(), 0);
         assert_eq!(envelope.data.grouped.dynamic.len(), 0);
-        assert_eq!(envelope.data.traversal_rule.change_type, ImpactChangeType::Signature);
+        assert_eq!(
+            envelope.data.traversal_rule.change_type,
+            ImpactChangeType::Signature
+        );
         assert!(envelope.data.traversal_rule.include_re_exports);
         assert!(envelope.data.traversal_rule.include_importers);
         assert!(envelope.data.traversal_rule.include_callers);

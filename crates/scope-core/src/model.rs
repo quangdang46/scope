@@ -367,16 +367,91 @@ pub struct ArchCheckResult {
     pub violations: Vec<ArchViolation>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StabilityCategory {
+    Stable,
+    StableAbstraction,
+    Balanced,
+    UnstableAndCentral,
+    HealthyLeaf,
+    Isolated,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StabilityRecord {
     pub path: RepoPath,
     pub fan_in: usize,
     pub fan_out: usize,
     pub instability: f64,
+    pub category: StabilityCategory,
+    pub flagged: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StabilitySummary {
+    pub avg_instability: f64,
+    pub flagged_count: usize,
+    pub stable_count: usize,
+    pub stable_abstraction_count: usize,
+    pub balanced_count: usize,
+    pub healthy_leaf_count: usize,
+    pub isolated_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StabilitySort {
+    Instability,
+    FanIn,
+    FanOut,
+    Path,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StabilityResult {
     pub file: Option<RepoPath>,
+    pub flag_threshold: Option<f64>,
+    pub sort: StabilitySort,
     pub files: Vec<StabilityRecord>,
+    pub summary: StabilitySummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskSort {
+    Score,
+    Churn,
+    Dependents,
+    Path,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiskRecord {
+    pub path: RepoPath,
+    pub direct_dependents: usize,
+    pub transitive_dependents: usize,
+    pub churn_commits: usize,
+    pub score: f64,
+    pub normalized_score: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiskSummary {
+    pub git_available: bool,
+    pub scored_files: usize,
+    pub avg_score: f64,
+    pub max_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiskResult {
+    pub file: Option<RepoPath>,
+    pub top: Option<usize>,
+    pub days: u32,
+    pub sort: RiskSort,
+    pub files: Vec<RiskRecord>,
+    pub summary: RiskSummary,
 }

@@ -195,7 +195,9 @@ fn rust_small_forward_deps_match_golden_json() {
 fn rust_small_reverse_deps_match_golden_json() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
-    let deps = store.query_reverse_deps(&RepoPath::from("src/parser.rs")).unwrap();
+    let deps = store
+        .query_reverse_deps(&RepoPath::from("src/parser.rs"))
+        .unwrap();
     let envelope = stub::deps("src/parser.rs".to_string(), true, false, None, deps);
     let actual = serde_json::to_string_pretty(&envelope).unwrap();
     let expected = read_golden("rust_small_parser_reverse_deps.json");
@@ -223,7 +225,9 @@ fn ts_small_is_scanned_and_indexed_by_fixture_indexer() {
 
     assert_eq!(deps.len(), 2, "ts fixture should now be indexed");
     assert_eq!(
-        deps.iter().map(|dep| dep.path.0.clone()).collect::<Vec<_>>(),
+        deps.iter()
+            .map(|dep| dep.path.0.clone())
+            .collect::<Vec<_>>(),
         vec!["src/auth/index.ts", "src/utils/formatter.ts"]
     );
 
@@ -267,7 +271,11 @@ fn rust_small_function_symbols_query_matches_golden_json() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
     let symbols = store
-        .query_symbols(&RepoPath::from("src/lib.rs"), false, Some(SymbolKind::Function))
+        .query_symbols(
+            &RepoPath::from("src/lib.rs"),
+            false,
+            Some(SymbolKind::Function),
+        )
         .unwrap();
     let envelope = stub::symbols(
         "src/lib.rs".to_string(),
@@ -290,11 +298,19 @@ fn ts_small_forward_deps_match_expected_paths() {
     let deps = store.query_deps(&RepoPath::from("src/index.ts")).unwrap();
     let dep_paths: Vec<_> = deps.iter().map(|dep| dep.path.0.clone()).collect();
 
-    assert_eq!(dep_paths, vec!["src/auth/index.ts", "src/utils/formatter.ts"]);
+    assert_eq!(
+        dep_paths,
+        vec!["src/auth/index.ts", "src/utils/formatter.ts"]
+    );
 
-    let auth_deps = store.query_deps(&RepoPath::from("src/auth/index.ts")).unwrap();
+    let auth_deps = store
+        .query_deps(&RepoPath::from("src/auth/index.ts"))
+        .unwrap();
     let auth_dep_paths: Vec<_> = auth_deps.iter().map(|dep| dep.path.0.clone()).collect();
-    assert_eq!(auth_dep_paths, vec!["src/auth/aliases.ts", "src/auth/middleware.ts"]);
+    assert_eq!(
+        auth_dep_paths,
+        vec!["src/auth/aliases.ts", "src/auth/middleware.ts"]
+    );
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -304,14 +320,22 @@ fn ts_small_reverse_deps_and_symbols_and_calls_work_conservatively() {
     let repo = prepare_fixture_copy("ts_small");
     let store = index_fixture(&repo);
 
-    let reverse = store.query_reverse_deps(&RepoPath::from("src/auth/jwt.ts")).unwrap();
+    let reverse = store
+        .query_reverse_deps(&RepoPath::from("src/auth/jwt.ts"))
+        .unwrap();
     let reverse_paths: Vec<_> = reverse.iter().map(|dep| dep.path.0.clone()).collect();
-    assert_eq!(reverse_paths, vec!["src/auth/aliases.ts", "src/auth/middleware.ts"]);
+    assert_eq!(
+        reverse_paths,
+        vec!["src/auth/aliases.ts", "src/auth/middleware.ts"]
+    );
 
     let jwt_symbols = store
         .query_symbols(&RepoPath::from("src/auth/jwt.ts"), false, None)
         .unwrap();
-    let jwt_symbol_names: Vec<_> = jwt_symbols.iter().map(|symbol| symbol.name.clone()).collect();
+    let jwt_symbol_names: Vec<_> = jwt_symbols
+        .iter()
+        .map(|symbol| symbol.name.clone())
+        .collect();
     assert_eq!(jwt_symbol_names, vec!["sign", "verify"]);
 
     let middleware_symbols = store
@@ -326,7 +350,10 @@ fn ts_small_reverse_deps_and_symbols_and_calls_work_conservatively() {
     let alias_symbols = store
         .query_symbols(&RepoPath::from("src/auth/aliases.ts"), false, None)
         .unwrap();
-    let alias_symbol_names: Vec<_> = alias_symbols.iter().map(|symbol| symbol.name.clone()).collect();
+    let alias_symbol_names: Vec<_> = alias_symbols
+        .iter()
+        .map(|symbol| symbol.name.clone())
+        .collect();
     assert_eq!(alias_symbol_names, vec!["verifyJwt"]);
 
     let auth_index_symbols = store
@@ -338,14 +365,18 @@ fn ts_small_reverse_deps_and_symbols_and_calls_work_conservatively() {
         .collect();
     assert_eq!(auth_index_symbol_names, vec!["verifyToken", "verifyJwt"]);
 
-    let verify_token_calls = store.query_callees("auth::middleware::verifyToken", false).unwrap();
+    let verify_token_calls = store
+        .query_callees("auth::middleware::verifyToken", false)
+        .unwrap();
     let verify_token_callees: Vec<_> = verify_token_calls
         .iter()
         .map(|traversal| traversal.qualname.clone().unwrap())
         .collect();
     assert_eq!(verify_token_callees, vec!["auth::jwt::verify"]);
 
-    let format_calls = store.query_callees("utils::formatter::format", false).unwrap();
+    let format_calls = store
+        .query_callees("utils::formatter::format", false)
+        .unwrap();
     let format_callees: Vec<_> = format_calls
         .iter()
         .map(|traversal| traversal.qualname.clone().unwrap())
@@ -397,16 +428,26 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
     let parser_expected = read_golden("rust_small_parse_calls.json");
     assert_eq!(parser_actual, parser_expected);
     assert_eq!(parser_calls.len(), 1);
-    assert_eq!(parser_calls[0].qualname.as_deref(), Some("parser::tokenize"));
+    assert_eq!(
+        parser_calls[0].qualname.as_deref(),
+        Some("parser::tokenize")
+    );
     assert_eq!(parser_calls[0].certainty, scope_core::Certainty::Exact);
 
     let parser_calls_transitive = store.query_callees("parser::parse", true).unwrap();
-    let parser_calls_transitive_envelope =
-        stub::calls("parser::parse".to_string(), true, parser_calls_transitive.clone());
+    let parser_calls_transitive_envelope = stub::calls(
+        "parser::parse".to_string(),
+        true,
+        parser_calls_transitive.clone(),
+    );
     let parser_calls_transitive_actual =
         serde_json::to_string_pretty(&parser_calls_transitive_envelope).unwrap();
-    let parser_calls_transitive_expected = read_golden("rust_small_parse_calls_transitive_stub.json");
-    assert_eq!(parser_calls_transitive_actual, parser_calls_transitive_expected);
+    let parser_calls_transitive_expected =
+        read_golden("rust_small_parse_calls_transitive_stub.json");
+    assert_eq!(
+        parser_calls_transitive_actual,
+        parser_calls_transitive_expected
+    );
     assert!(parser_calls_transitive.is_empty());
 
     let farewell_calls = store.query_callees("lib::farewell", false).unwrap();
@@ -414,10 +455,14 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
     let farewell_actual = serde_json::to_string_pretty(&farewell_envelope).unwrap();
     let farewell_expected = read_golden("rust_small_farewell_calls.json");
     assert_eq!(farewell_actual, farewell_expected);
-    assert!(farewell_calls.is_empty(), "farewell should conservatively omit dynamic formatting internals");
+    assert!(
+        farewell_calls.is_empty(),
+        "farewell should conservatively omit dynamic formatting internals"
+    );
 
     let parser_callers = store.query_callers("parser::parse", false).unwrap();
-    let callers_envelope = stub::callers("parser::parse".to_string(), false, parser_callers.clone());
+    let callers_envelope =
+        stub::callers("parser::parse".to_string(), false, parser_callers.clone());
     let callers_actual = serde_json::to_string_pretty(&callers_envelope).unwrap();
     let callers_expected = read_golden("rust_small_parse_callers.json");
     assert_eq!(callers_actual, callers_expected);
@@ -425,16 +470,25 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
         .iter()
         .filter_map(|traversal| traversal.qualname.clone())
         .collect();
-    assert_eq!(parser_caller_names, vec!["lib::greet".to_string(), "resolver::resolve".to_string()]);
+    assert_eq!(
+        parser_caller_names,
+        vec!["lib::greet".to_string(), "resolver::resolve".to_string()]
+    );
 
     let parser_callers_transitive = store.query_callers("parser::parse", true).unwrap();
-    let parser_callers_transitive_envelope =
-        stub::callers("parser::parse".to_string(), true, parser_callers_transitive.clone());
+    let parser_callers_transitive_envelope = stub::callers(
+        "parser::parse".to_string(),
+        true,
+        parser_callers_transitive.clone(),
+    );
     let parser_callers_transitive_actual =
         serde_json::to_string_pretty(&parser_callers_transitive_envelope).unwrap();
     let parser_callers_transitive_expected =
         read_golden("rust_small_parse_callers_transitive_stub.json");
-    assert_eq!(parser_callers_transitive_actual, parser_callers_transitive_expected);
+    assert_eq!(
+        parser_callers_transitive_actual,
+        parser_callers_transitive_expected
+    );
     assert!(parser_callers_transitive.is_empty());
 
     fs::remove_dir_all(repo).unwrap();
@@ -452,9 +506,15 @@ fn rust_small_explain_query_matches_golden_json() {
 
     assert_eq!(actual, expected);
     assert_eq!(traversals.len(), 4);
-    assert!(traversals.iter().any(|record| record.qualname.as_deref() == Some("lib::greet")));
-    assert!(traversals.iter().any(|record| record.qualname.as_deref() == Some("parser::tokenize")));
-    assert!(traversals.iter().any(|record| record.path.as_ref().map(|path| path.0.as_str()) == Some("src/resolver.rs")));
+    assert!(traversals
+        .iter()
+        .any(|record| record.qualname.as_deref() == Some("lib::greet")));
+    assert!(traversals
+        .iter()
+        .any(|record| record.qualname.as_deref() == Some("parser::tokenize")));
+    assert!(traversals
+        .iter()
+        .any(|record| record.path.as_ref().map(|path| path.0.as_str()) == Some("src/resolver.rs")));
 
     let filtered = store
         .query_explain("parser::parse", Some("resolver::resolve"), None)
@@ -481,12 +541,21 @@ fn rust_small_public_surface_contains_only_exported_symbols() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
 
-    let surface = store.query_public_surface(&RepoPath::from("src/parser.rs")).unwrap();
-    let names: Vec<_> = surface.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+    let surface = store
+        .query_public_surface(&RepoPath::from("src/parser.rs"))
+        .unwrap();
+    let names: Vec<_> = surface
+        .symbols
+        .iter()
+        .map(|symbol| symbol.name.as_str())
+        .collect();
 
     assert_eq!(surface.file, RepoPath::from("src/parser.rs"));
     assert_eq!(names, vec!["parse"]);
-    assert!(surface.symbols.iter().all(|symbol| symbol.qualname.starts_with("parser::")));
+    assert!(surface
+        .symbols
+        .iter()
+        .all(|symbol| symbol.qualname.starts_with("parser::")));
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -510,17 +579,26 @@ fn ts_small_public_surface_diff_captures_added_removed_and_modified_symbols() {
         .changes
         .iter()
         .any(|change| change.kind == PublicSurfaceChangeKind::Added
-            && change.after.as_ref().is_some_and(|symbol| symbol.name == "verifyJwt")));
+            && change
+                .after
+                .as_ref()
+                .is_some_and(|symbol| symbol.name == "verifyJwt")));
     assert!(diff
         .changes
         .iter()
         .filter(|change| change.kind == PublicSurfaceChangeKind::Removed)
-        .any(|change| change.before.as_ref().is_some_and(|symbol| symbol.name == "sign")));
+        .any(|change| change
+            .before
+            .as_ref()
+            .is_some_and(|symbol| symbol.name == "sign")));
     assert!(diff
         .changes
         .iter()
         .filter(|change| change.kind == PublicSurfaceChangeKind::Removed)
-        .any(|change| change.before.as_ref().is_some_and(|symbol| symbol.name == "verify")));
+        .any(|change| change
+            .before
+            .as_ref()
+            .is_some_and(|symbol| symbol.name == "verify")));
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -534,7 +612,10 @@ fn fixture_indexing_persists_file_fingerprint_metadata() {
         .file_state(&RepoPath::from("src/lib.rs"))
         .unwrap()
         .unwrap();
-    assert!(state.content_hash.as_ref().is_some_and(|hash| !hash.is_empty()));
+    assert!(state
+        .content_hash
+        .as_ref()
+        .is_some_and(|hash| !hash.is_empty()));
     assert!(state.mtime_unix_seconds.is_some());
     assert!(state.size_bytes.is_some_and(|size| size > 0));
 
@@ -550,7 +631,10 @@ fn doctor_output_reports_index_health_counts() {
     let envelope = stub::doctor(false, stats.clone());
 
     assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
-    assert_eq!(envelope.data.schema_version, scope_core::INDEX_SCHEMA_VERSION);
+    assert_eq!(
+        envelope.data.schema_version,
+        scope_core::INDEX_SCHEMA_VERSION
+    );
     assert_eq!(envelope.data.stats.files, 5);
     assert_eq!(envelope.data.stats.imports, 1);
     assert_eq!(envelope.data.stats.unresolved_imports, 0);
@@ -610,7 +694,10 @@ fn benchmark_output_reports_full_and_incremental_timing_summary() {
     assert_eq!(envelope.data.fixture.as_deref(), Some("ts_small"));
     assert_eq!(envelope.data.iterations, Some(3));
     assert_eq!(envelope.data.summary.indexed_files, stats.files);
-    assert_eq!(envelope.data.summary.mutation.target_file, RepoPath::from("src/auth/jwt.ts"));
+    assert_eq!(
+        envelope.data.summary.mutation.target_file,
+        RepoPath::from("src/auth/jwt.ts")
+    );
     assert_eq!(envelope.data.summary.full.avg_ms, 42);
     assert_eq!(envelope.data.summary.incremental.avg_ms, 7);
     assert_eq!(envelope.data.summary.comparison.saved_ms, 35);
@@ -623,9 +710,16 @@ fn stability_query_reports_expected_scores_and_filtering() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
 
-    let result = store.query_stability(None).unwrap();
+    let result = store
+        .query_stability(None, None, scope_core::StabilitySort::Instability)
+        .unwrap();
     assert_eq!(result.file, None);
+    assert_eq!(result.flag_threshold, None);
+    assert_eq!(result.sort, scope_core::StabilitySort::Instability);
     assert_eq!(result.files.len(), 5);
+    assert_eq!(result.summary.flagged_count, 0);
+    assert_eq!(result.summary.healthy_leaf_count, 1);
+    assert_eq!(result.summary.isolated_count, 3);
 
     let lib = result
         .files
@@ -635,6 +729,12 @@ fn stability_query_reports_expected_scores_and_filtering() {
     assert_eq!(lib.fan_in, 0);
     assert_eq!(lib.fan_out, 0);
     assert_eq!(lib.instability, 0.0);
+    assert_eq!(lib.category, scope_core::StabilityCategory::Isolated);
+    assert!(!lib.flagged);
+    assert_eq!(
+        lib.reason.as_deref(),
+        Some("no direct imports and no dependents — isolated file")
+    );
 
     let parser = result
         .files
@@ -644,6 +744,7 @@ fn stability_query_reports_expected_scores_and_filtering() {
     assert_eq!(parser.fan_in, 1);
     assert_eq!(parser.fan_out, 0);
     assert_eq!(parser.instability, 0.0);
+    assert_eq!(parser.category, scope_core::StabilityCategory::Stable);
 
     let resolver = result
         .files
@@ -653,16 +754,51 @@ fn stability_query_reports_expected_scores_and_filtering() {
     assert_eq!(resolver.fan_in, 0);
     assert_eq!(resolver.fan_out, 1);
     assert_eq!(resolver.instability, 1.0);
+    assert_eq!(
+        resolver.category,
+        scope_core::StabilityCategory::HealthyLeaf
+    );
+    assert_eq!(
+        resolver.reason.as_deref(),
+        Some("no downstream dependents and fan-out 1 — healthy leaf node")
+    );
 
     let filtered = store
-        .query_stability(Some(&RepoPath::from("src/parser.rs")))
+        .query_stability(
+            Some(&RepoPath::from("src/parser.rs")),
+            Some(0.5),
+            scope_core::StabilitySort::FanIn,
+        )
         .unwrap();
     assert_eq!(filtered.file, Some(RepoPath::from("src/parser.rs")));
+    assert_eq!(filtered.flag_threshold, Some(0.5));
+    assert_eq!(filtered.sort, scope_core::StabilitySort::FanIn);
     assert_eq!(filtered.files.len(), 1);
     assert_eq!(filtered.files[0].path, RepoPath::from("src/parser.rs"));
 
+    let flagged_only = store
+        .query_stability(None, Some(0.5), scope_core::StabilitySort::Instability)
+        .unwrap();
+    assert!(flagged_only.files.is_empty());
+
+    let sorted_by_path = store
+        .query_stability(None, None, scope_core::StabilitySort::Path)
+        .unwrap();
+    assert_eq!(
+        sorted_by_path.files.first().unwrap().path,
+        RepoPath::from("src/lib.rs")
+    );
+
     assert!(matches!(
-        store.query_stability(Some(&RepoPath::from("src/missing.rs"))),
+        store.query_stability(None, Some(1.5), scope_core::StabilitySort::Instability),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        store.query_stability(
+            Some(&RepoPath::from("src/missing.rs")),
+            None,
+            scope_core::StabilitySort::Instability,
+        ),
         Err(scope_core::ScopeError::InvalidInput(_))
     ));
 
@@ -674,11 +810,116 @@ fn stability_query_reports_expected_scores_and_filtering() {
 }
 
 #[test]
+fn risk_query_reports_expected_scores_and_fallbacks() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/parser.rs"),
+            "c1",
+            Some("agent@example.com"),
+            Some(1_700_000_000),
+        )
+        .unwrap();
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/parser.rs"),
+            "c2",
+            Some("agent@example.com"),
+            Some(1_700_000_100),
+        )
+        .unwrap();
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/utils.rs"),
+            "c3",
+            Some("agent@example.com"),
+            Some(1_700_000_200),
+        )
+        .unwrap();
+
+    let result = store
+        .query_risk(None, 10_000, None, None, scope_core::RiskSort::Score)
+        .unwrap();
+    assert_eq!(result.file, None);
+    assert_eq!(result.days, 10_000);
+    assert_eq!(result.sort, scope_core::RiskSort::Score);
+    assert!(result.summary.git_available);
+    assert_eq!(result.summary.scored_files, 5);
+    assert_eq!(result.files.len(), 5);
+
+    let parser = result
+        .files
+        .iter()
+        .find(|record| record.path == RepoPath::from("src/parser.rs"))
+        .unwrap();
+    assert_eq!(parser.direct_dependents, 1);
+    assert_eq!(parser.transitive_dependents, 1);
+    assert_eq!(parser.churn_commits, 2);
+    assert!(parser.score > 0.0);
+
+    let actual = serde_json::to_string_pretty(&stub::risk(result.clone())).unwrap();
+    let expected = read_golden("rust_small_risk.json");
+    assert_eq!(actual, expected);
+
+    let single = store
+        .query_risk(
+            Some(&RepoPath::from("src/parser.rs")),
+            10_000,
+            None,
+            None,
+            scope_core::RiskSort::Score,
+        )
+        .unwrap();
+    assert_eq!(single.files.len(), 1);
+    assert_eq!(single.files[0].path, RepoPath::from("src/parser.rs"));
+
+    let filtered = store
+        .query_risk(None, 10_000, Some(1.0), Some(1), scope_core::RiskSort::Score)
+        .unwrap();
+    assert_eq!(filtered.files.len(), 1);
+    assert_eq!(filtered.files[0].path, RepoPath::from("src/parser.rs"));
+
+    store.clear_file_churn().unwrap();
+    let fallback = store
+        .query_risk(None, 30, None, None, scope_core::RiskSort::Score)
+        .unwrap();
+    assert!(!fallback.summary.git_available);
+    assert!(fallback
+        .files
+        .iter()
+        .all(|record| record.reason.contains("git churn unavailable")));
+    let fallback_actual = serde_json::to_string_pretty(&stub::risk(fallback.clone())).unwrap();
+    let fallback_expected = read_golden("rust_small_risk_no_git.json");
+    assert_eq!(fallback_actual, fallback_expected);
+
+    assert!(matches!(
+        store.query_risk(None, 0, None, None, scope_core::RiskSort::Score),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        store.query_risk(
+            Some(&RepoPath::from("src/missing.rs")),
+            30,
+            None,
+            None,
+            scope_core::RiskSort::Score,
+        ),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn why_queries_match_golden_json_and_handle_limits() {
     let rust_repo = prepare_fixture_copy("rust_small");
     let rust_store = index_fixture(&rust_repo);
 
-    let symbol_path = rust_store.query_why("lib::greet", "parser::tokenize", None).unwrap();
+    let symbol_path = rust_store
+        .query_why("lib::greet", "parser::tokenize", None)
+        .unwrap();
     let symbol_envelope = stub::why(
         "lib::greet".to_string(),
         "parser::tokenize".to_string(),
@@ -697,7 +938,9 @@ fn why_queries_match_golden_json_and_handle_limits() {
         .unwrap();
     assert!(depth_limited.is_empty());
 
-    let same_target = rust_store.query_why("lib::greet", "lib::greet", None).unwrap();
+    let same_target = rust_store
+        .query_why("lib::greet", "lib::greet", None)
+        .unwrap();
     assert!(same_target.is_empty());
 
     assert!(matches!(
@@ -723,8 +966,14 @@ fn why_queries_match_golden_json_and_handle_limits() {
     let file_expected = read_golden("ts_small_index_to_auth_middleware_why.json");
     assert_eq!(file_actual, file_expected);
     assert_eq!(file_path.len(), 2);
-    assert_eq!(file_path[0].path.as_ref().map(|path| path.0.as_str()), Some("src/auth/index.ts"));
-    assert_eq!(file_path[1].path.as_ref().map(|path| path.0.as_str()), Some("src/auth/middleware.ts"));
+    assert_eq!(
+        file_path[0].path.as_ref().map(|path| path.0.as_str()),
+        Some("src/auth/index.ts")
+    );
+    assert_eq!(
+        file_path[1].path.as_ref().map(|path| path.0.as_str()),
+        Some("src/auth/middleware.ts")
+    );
 
     let disconnected = ts_store
         .query_why("src/utils/logger.ts", "src/auth/middleware.ts", None)
@@ -883,7 +1132,11 @@ fn context_queries_match_golden_json_and_budget_behavior() {
     let ts_store = index_fixture(&ts_repo);
 
     let rename_result = ts_store
-        .query_context(&["auth::middleware::verifyToken".to_string()], "rename", None)
+        .query_context(
+            &["auth::middleware::verifyToken".to_string()],
+            "rename",
+            None,
+        )
         .unwrap();
     let rename_envelope = stub::context(rename_result.clone());
     let rename_actual = serde_json::to_string_pretty(&rename_envelope).unwrap();
@@ -905,7 +1158,11 @@ fn context_queries_match_golden_json_and_budget_behavior() {
         .any(|record| record.path.0 == "src/index.ts"));
 
     let budget_result = ts_store
-        .query_context(&["auth::middleware::verifyToken".to_string()], "rename", Some(90))
+        .query_context(
+            &["auth::middleware::verifyToken".to_string()],
+            "rename",
+            Some(90),
+        )
         .unwrap();
     let budget_envelope = stub::context(budget_result.clone());
     let budget_actual = serde_json::to_string_pretty(&budget_envelope).unwrap();

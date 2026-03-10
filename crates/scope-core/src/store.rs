@@ -11,13 +11,14 @@ use crate::{
     ArchFileEdge, Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary,
     DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind, PublicSurface,
     PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary,
-    PublicSurfaceSymbol, RepoPath, ScopeError, ScopeResult, StabilityRecord, StabilityResult,
-    SymbolKind, SymbolRecord, TraversalRecord, Visibility,
+    PublicSurfaceSymbol, RepoPath, RiskRecord, RiskResult, RiskSort, RiskSummary, ScopeError,
+    ScopeResult, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
+    StabilitySummary, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
 
-pub const INDEX_SCHEMA_VERSION: u32 = 4;
+pub const INDEX_SCHEMA_VERSION: u32 = 5;
 
 const INITIAL_MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS index_meta (
@@ -95,13 +96,33 @@ CREATE TABLE IF NOT EXISTS symbol_edges (
 "#;
 
 const FILE_METADATA_MIGRATION_COLUMNS: &[(&str, &str)] = &[
-    ("content_hash", "ALTER TABLE files ADD COLUMN content_hash TEXT"),
+    (
+        "content_hash",
+        "ALTER TABLE files ADD COLUMN content_hash TEXT",
+    ),
     (
         "mtime_unix_seconds",
         "ALTER TABLE files ADD COLUMN mtime_unix_seconds INTEGER",
     ),
-    ("size_bytes", "ALTER TABLE files ADD COLUMN size_bytes INTEGER"),
+    (
+        "size_bytes",
+        "ALTER TABLE files ADD COLUMN size_bytes INTEGER",
+    ),
 ];
+
+const FILE_CHURN_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS file_churn (
+    file_id INTEGER NOT NULL,
+    commit_sha TEXT NOT NULL,
+    author_email TEXT,
+    committed_at INTEGER,
+    PRIMARY KEY (file_id, commit_sha),
+    FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_churn_file_id ON file_churn(file_id);
+CREATE INDEX IF NOT EXISTS idx_file_churn_committed_at ON file_churn(committed_at);
+"#;
 
 #[derive(Debug)]
 pub struct Store {
@@ -241,10 +262,7 @@ impl Store {
             .map_err(Into::into)
     }
 
-    pub fn classify_file_change(
-        &self,
-        current: &FileRecord,
-    ) -> ScopeResult<Option<bool>> {
+    pub fn classify_file_change(&self, current: &FileRecord) -> ScopeResult<Option<bool>> {
         let Some(previous) = self.file_state(&current.path)? else {
             return Ok(None);
         };
@@ -262,7 +280,8 @@ impl Store {
         let call_edges = self.count_rows("symbol_edges")?;
         let parse_status = ParseStatusCounts {
             ok: self.count_query("SELECT COUNT(*) FROM files WHERE parse_status = 'ok'")?,
-            partial: self.count_query("SELECT COUNT(*) FROM files WHERE parse_status = 'partial'")?,
+            partial: self
+                .count_query("SELECT COUNT(*) FROM files WHERE parse_status = 'partial'")?,
             error: self.count_query("SELECT COUNT(*) FROM files WHERE parse_status = 'error'")?,
         };
 
@@ -399,13 +418,56 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn query_stability(&self, file: Option<&RepoPath>) -> ScopeResult<StabilityResult> {
+    pub fn persist_file_churn(
+        &self,
+        path: &RepoPath,
+        commit_sha: &str,
+        author_email: Option<&str>,
+        committed_at: Option<i64>,
+    ) -> ScopeResult<bool> {
+        let Some(file_id) = self.file_id(path)? else {
+            return Ok(false);
+        };
+
+        self.connection.execute(
+            "INSERT INTO file_churn (file_id, commit_sha, author_email, committed_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(file_id, commit_sha) DO UPDATE SET
+                 author_email = excluded.author_email,
+                 committed_at = excluded.committed_at",
+            params![file_id, commit_sha, author_email, committed_at],
+        )?;
+        Ok(true)
+    }
+
+    pub fn clear_file_churn(&self) -> ScopeResult<()> {
+        self.connection.execute("DELETE FROM file_churn", [])?;
+        Ok(())
+    }
+
+    pub fn query_stability(
+        &self,
+        file: Option<&RepoPath>,
+        flag_threshold: Option<f64>,
+        sort: StabilitySort,
+    ) -> ScopeResult<StabilityResult> {
+        if let Some(threshold) = flag_threshold {
+            if !(0.0..=1.0).contains(&threshold) {
+                return Err(ScopeError::InvalidInput(format!(
+                    "flag threshold must be between 0.0 and 1.0: {threshold}"
+                )));
+            }
+        }
+
         let all_files = self.list_indexed_files()?;
         let edges = self.query_file_edges()?;
         let mut fan_in: HashMap<RepoPath, usize> = HashMap::new();
         let mut fan_out: HashMap<RepoPath, usize> = HashMap::new();
 
-        for edge in edges.into_iter().filter(|edge| edge.edge_kind == EdgeKind::Import) {
+        for edge in edges
+            .into_iter()
+            .filter(|edge| edge.edge_kind == EdgeKind::Import)
+        {
             *fan_out.entry(edge.from_file.clone()).or_default() += 1;
             *fan_in.entry(edge.to_file.clone()).or_default() += 1;
         }
@@ -421,35 +483,188 @@ impl Store {
                 } else {
                     outgoing as f64 / total as f64
                 };
+                let category = stability_category(incoming, outgoing, instability);
+                let flagged = incoming > 10 && instability > flag_threshold.unwrap_or(0.5);
+                let reason = stability_reason(incoming, outgoing, instability, &category, flagged);
 
                 StabilityRecord {
                     path,
                     fan_in: incoming,
                     fan_out: outgoing,
                     instability,
+                    category,
+                    flagged,
+                    reason,
                 }
             })
             .collect::<Vec<_>>();
 
-        records.sort_by(|left, right| {
-            right
-                .instability
-                .total_cmp(&left.instability)
-                .then(right.fan_in.cmp(&left.fan_in))
-                .then(left.path.0.cmp(&right.path.0))
-        });
+        let summary = stability_summary(&records);
 
-        let target = if let Some(path) = file {
+        if let Some(path) = file {
             if !all_files_set(&records).contains(path) {
+                return Err(ScopeError::InvalidInput(format!(
+                    "file not indexed: {}",
+                    path.0
+                )));
+            }
+            records.retain(|record| &record.path == path);
+        } else if flag_threshold.is_some() {
+            records.retain(|record| record.flagged);
+        }
+
+        sort_stability_records(&mut records, sort.clone());
+
+        let target = file.cloned();
+
+        Ok(StabilityResult {
+            file: target,
+            flag_threshold,
+            sort,
+            files: records,
+            summary,
+        })
+    }
+
+    pub fn query_risk(
+        &self,
+        file: Option<&RepoPath>,
+        days: u32,
+        threshold: Option<f64>,
+        top: Option<usize>,
+        sort: RiskSort,
+    ) -> ScopeResult<RiskResult> {
+        if days == 0 {
+            return Err(ScopeError::InvalidInput(
+                "risk window days must be greater than 0".to_string(),
+            ));
+        }
+        if let Some(threshold) = threshold {
+            if threshold < 0.0 {
+                return Err(ScopeError::InvalidInput(format!(
+                    "risk threshold must be non-negative: {threshold}"
+                )));
+            }
+        }
+        if let Some(top) = top {
+            if top == 0 {
+                return Err(ScopeError::InvalidInput(
+                    "top must be greater than 0".to_string(),
+                ));
+            }
+        }
+
+        let all_files = self.list_indexed_files()?;
+        let edges = self.query_file_edges()?;
+        let mut direct_dependents: HashMap<RepoPath, usize> = HashMap::new();
+        let mut reverse_adjacency: HashMap<RepoPath, Vec<RepoPath>> = HashMap::new();
+
+        for edge in edges
+            .into_iter()
+            .filter(|edge| edge.edge_kind == EdgeKind::Import)
+        {
+            *direct_dependents.entry(edge.to_file.clone()).or_default() += 1;
+            reverse_adjacency
+                .entry(edge.to_file)
+                .or_default()
+                .push(edge.from_file);
+        }
+
+        let since = unix_timestamp() - (days as i64 * 24 * 60 * 60);
+        let mut churn_statement = self.connection.prepare(
+            "SELECT files.path, COUNT(DISTINCT file_churn.commit_sha)
+             FROM files
+             LEFT JOIN file_churn ON file_churn.file_id = files.id AND (file_churn.committed_at IS NULL OR file_churn.committed_at >= ?1)
+             GROUP BY files.path",
+        )?;
+        let churn_rows = churn_statement.query_map([since], |row| {
+            Ok((
+                RepoPath(row.get::<_, String>(0)?),
+                row.get::<_, i64>(1)? as usize,
+            ))
+        })?;
+        let churn_counts: HashMap<RepoPath, usize> = churn_rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect();
+        let git_available = churn_counts.values().any(|count| *count > 0);
+
+        let mut records = Vec::new();
+        for path in all_files {
+            let direct = direct_dependents.get(&path).copied().unwrap_or(0);
+            let transitive = transitive_dependents_count(&path, &reverse_adjacency);
+            let churn = churn_counts.get(&path).copied().unwrap_or(0);
+            let raw_score = if git_available {
+                ((transitive + 1) as f64).log2() * ((churn + 1) as f64).log2()
+            } else {
+                ((direct + 1) as f64).log2()
+            };
+            let reason = if git_available {
+                format!(
+                    "{} direct dependents, {} transitive dependents, {} churn commits in last {} days",
+                    direct, transitive, churn, days
+                )
+            } else {
+                format!(
+                    "git churn unavailable; score falls back to dependency-only blast radius ({} direct dependents, {} transitive dependents)",
+                    direct, transitive
+                )
+            };
+            records.push(RiskRecord {
+                path,
+                direct_dependents: direct,
+                transitive_dependents: transitive,
+                churn_commits: churn,
+                score: raw_score,
+                normalized_score: 0,
+                reason,
+            });
+        }
+
+        if let Some(path) = file {
+            if !records.iter().any(|record| &record.path == path) {
                 return Err(ScopeError::InvalidInput(format!("file not indexed: {}", path.0)));
             }
             records.retain(|record| &record.path == path);
-            Some(path.clone())
-        } else {
-            None
+        }
+        if let Some(threshold) = threshold {
+            records.retain(|record| record.score >= threshold);
+        }
+
+        let max_score = records.iter().map(|record| record.score).fold(0.0, f64::max);
+        for record in &mut records {
+            record.normalized_score = if max_score > 0.0 {
+                ((record.score / max_score) * 100.0).round() as u32
+            } else {
+                0
+            };
+        }
+
+        sort_risk_records(&mut records, sort.clone());
+
+        if let Some(limit) = top {
+            records.truncate(limit);
+        }
+
+        let summary = RiskSummary {
+            git_available,
+            scored_files: records.len(),
+            avg_score: if records.is_empty() {
+                0.0
+            } else {
+                records.iter().map(|record| record.score).sum::<f64>() / records.len() as f64
+            },
+            max_score,
         };
 
-        Ok(StabilityResult { file: target, files: records })
+        Ok(RiskResult {
+            file: file.cloned(),
+            top,
+            days,
+            sort,
+            files: records,
+            summary,
+        })
     }
 
     pub fn query_symbols(
@@ -551,7 +766,10 @@ impl Store {
 
         let mut changes = Vec::new();
         for identity in identities {
-            match (before_by_identity.get(&identity), after_by_identity.get(&identity)) {
+            match (
+                before_by_identity.get(&identity),
+                after_by_identity.get(&identity),
+            ) {
                 (Some(before_symbol), None) => changes.push(PublicSurfaceChange {
                     kind: PublicSurfaceChangeKind::Removed,
                     before: Some(before_symbol.clone()),
@@ -657,7 +875,12 @@ impl Store {
         };
 
         let file_depth = if change_type == "body" { 1 } else { max_depth };
-        Ok(self.traverse_reverse_importers(file_id, target, file_depth, change_type == "side-effect")?)
+        Ok(self.traverse_reverse_importers(
+            file_id,
+            target,
+            file_depth,
+            change_type == "side-effect",
+        )?)
     }
 
     pub fn query_why(
@@ -674,7 +897,9 @@ impl Store {
             .map(|value| value as u32)
             .unwrap_or(DEFAULT_TRANSITIVE_DEPTH);
 
-        if let (Some(from_symbol_id), Some(to_symbol_id)) = (self.symbol_id(from)?, self.symbol_id(to)?) {
+        if let (Some(from_symbol_id), Some(to_symbol_id)) =
+            (self.symbol_id(from)?, self.symbol_id(to)?)
+        {
             return self.shortest_symbol_path(from_symbol_id, from, to_symbol_id, to, max_depth);
         }
 
@@ -714,20 +939,23 @@ impl Store {
             traversals.extend(self.traverse_reverse_callers(symbol_id, target, max_depth)?);
             traversals.extend(self.traverse_forward_callees(symbol_id, target, max_depth)?);
             if let Some(file_id) = self.file_id_for_symbol(symbol_id)? {
-                traversals.extend(self.traverse_reverse_importers(file_id, target, max_depth, false)?);
+                traversals
+                    .extend(self.traverse_reverse_importers(file_id, target, max_depth, false)?);
             }
         } else if let Some(file_id) = self.file_id(&RepoPath::from(target.to_string()))? {
-            traversals.extend(self.query_deps(&RepoPath::from(target.to_string()))?.into_iter().map(
-                |dependency| TraversalRecord {
-                    kind: dependency.kind,
-                    path: Some(dependency.path),
-                    qualname: None,
-                    edge_kind: dependency.edge_kind,
-                    certainty: dependency.certainty,
-                    reason: format!("depends on {target}"),
-                    distance: 1,
-                },
-            ));
+            traversals.extend(
+                self.query_deps(&RepoPath::from(target.to_string()))?
+                    .into_iter()
+                    .map(|dependency| TraversalRecord {
+                        kind: dependency.kind,
+                        path: Some(dependency.path),
+                        qualname: None,
+                        edge_kind: dependency.edge_kind,
+                        certainty: dependency.certainty,
+                        reason: format!("depends on {target}"),
+                        distance: 1,
+                    }),
+            );
             traversals.extend(self.traverse_reverse_importers(file_id, target, max_depth, false)?);
         }
 
@@ -798,9 +1026,8 @@ impl Store {
 
             let goes_to_must = record.distance <= 1;
             if goes_to_must {
-                let would_exceed = budget.is_some_and(|limit| {
-                    !pinned && must_tokens + record.estimated_tokens > limit
-                });
+                let would_exceed = budget
+                    .is_some_and(|limit| !pinned && must_tokens + record.estimated_tokens > limit);
                 if would_exceed {
                     truncated = true;
                     should_tokens += record.estimated_tokens;
@@ -809,7 +1036,9 @@ impl Store {
                     must_tokens += record.estimated_tokens;
                     must_read.push(record);
                 }
-            } else if budget.is_some_and(|limit| must_tokens + should_tokens + record.estimated_tokens > limit) {
+            } else if budget
+                .is_some_and(|limit| must_tokens + should_tokens + record.estimated_tokens > limit)
+            {
                 truncated = true;
                 skipped_count += 1;
             } else {
@@ -876,12 +1105,22 @@ impl Store {
         if includes_callers(change_type) {
             let symbol_depth = if change_type == "body" { 1 } else { 2 };
             for traversal in self.traverse_reverse_callers(symbol_id, target, symbol_depth)? {
-                self.upsert_traversal_candidate(candidates, traversal, ContextFileRole::DirectCaller, 120)?;
+                self.upsert_traversal_candidate(
+                    candidates,
+                    traversal,
+                    ContextFileRole::DirectCaller,
+                    120,
+                )?;
             }
         }
 
         for traversal in self.traverse_forward_callees(symbol_id, target, 1)? {
-            self.upsert_traversal_candidate(candidates, traversal, ContextFileRole::DirectCallee, 100)?;
+            self.upsert_traversal_candidate(
+                candidates,
+                traversal,
+                ContextFileRole::DirectCallee,
+                100,
+            )?;
         }
 
         if includes_importers(change_type) {
@@ -892,7 +1131,12 @@ impl Store {
                 importer_depth,
                 change_type == "side-effect",
             )? {
-                self.upsert_traversal_candidate(candidates, traversal, ContextFileRole::Importer, 120)?;
+                self.upsert_traversal_candidate(
+                    candidates,
+                    traversal,
+                    ContextFileRole::Importer,
+                    120,
+                )?;
             }
         }
 
@@ -918,7 +1162,12 @@ impl Store {
         )?;
 
         for dependency in self.query_deps(path)? {
-            self.upsert_dependency_candidate(candidates, dependency, ContextFileRole::Dependency, 100)?;
+            self.upsert_dependency_candidate(
+                candidates,
+                dependency,
+                ContextFileRole::Dependency,
+                100,
+            )?;
         }
 
         let importer_depth = if change_type == "body" { 1 } else { 2 };
@@ -995,16 +1244,18 @@ impl Store {
         pinned: bool,
     ) -> ScopeResult<()> {
         let estimated_tokens = self.estimate_file_tokens(&path)?;
-        let candidate = candidates.entry(path.clone()).or_insert_with(|| ContextCandidate {
-            path,
-            score,
-            estimated_tokens,
-            distance,
-            certainty: certainty.clone(),
-            reasons: Vec::new(),
-            roles: Vec::new(),
-            pinned,
-        });
+        let candidate = candidates
+            .entry(path.clone())
+            .or_insert_with(|| ContextCandidate {
+                path,
+                score,
+                estimated_tokens,
+                distance,
+                certainty: certainty.clone(),
+                reasons: Vec::new(),
+                roles: Vec::new(),
+                pinned,
+            });
 
         candidate.score = candidate.score.max(score);
         candidate.distance = candidate.distance.min(distance);
@@ -1116,7 +1367,6 @@ impl Store {
             .map_err(Into::into)
     }
 
-
     fn insert_import(&self, file_id: i64, import: &crate::ImportRecord) -> ScopeResult<()> {
         let (kind, resolved_file_id, external_pkg) = match &import.import_path {
             ImportPath::Relative(path) => ("relative", self.file_id(path)?, None),
@@ -1205,12 +1455,15 @@ impl Store {
             }
 
             if let Some((module_name, symbol_name)) = callee_qualname.rsplit_once("::") {
-                let mut target_file_ids = self.imported_file_ids_for_module(file_id, imports, module_name)?;
+                let mut target_file_ids =
+                    self.imported_file_ids_for_module(file_id, imports, module_name)?;
                 if target_file_ids.is_empty() {
                     target_file_ids = self.file_ids_for_module_name(module_name)?;
                 }
 
-                if let Some(symbol_id) = self.unique_symbol_id_in_files(&target_file_ids, symbol_name)? {
+                if let Some(symbol_id) =
+                    self.unique_symbol_id_in_files(&target_file_ids, symbol_name)?
+                {
                     return Ok(Some((symbol_id, Certainty::Resolved)));
                 }
             }
@@ -1222,7 +1475,9 @@ impl Store {
             return Ok(Some((symbol_id, Certainty::Exact)));
         }
 
-        if let Some(symbol_id) = self.unique_imported_symbol_id(file_id, imports, &call_site.callee_name)? {
+        if let Some(symbol_id) =
+            self.unique_imported_symbol_id(file_id, imports, &call_site.callee_name)?
+        {
             return Ok(Some((symbol_id, Certainty::Resolved)));
         }
 
@@ -1296,7 +1551,10 @@ impl Store {
             "SELECT id, path FROM files WHERE path LIKE ?1 OR path LIKE ?2 ORDER BY path ASC",
         )?;
         let rows = statement.query_map(
-            params![format!("%/{module_name}.rs"), format!("%/{module_name}/mod.rs")],
+            params![
+                format!("%/{module_name}.rs"),
+                format!("%/{module_name}/mod.rs")
+            ],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )?;
 
@@ -1308,7 +1566,11 @@ impl Store {
         Ok(file_ids)
     }
 
-    fn unique_symbol_id_in_file(&self, file_id: i64, symbol_name: &str) -> ScopeResult<Option<i64>> {
+    fn unique_symbol_id_in_file(
+        &self,
+        file_id: i64,
+        symbol_name: &str,
+    ) -> ScopeResult<Option<i64>> {
         self.unique_symbol_id_in_files(&[file_id], symbol_name)
     }
 
@@ -1327,7 +1589,8 @@ impl Store {
             if let ImportPath::Relative(path) = &import.import_path {
                 if let Some(target_file_id) = self.file_id(path)? {
                     target_file_ids.push(target_file_id);
-                    target_file_ids.extend(self.reexport_target_file_ids(target_file_id, symbol_name)?);
+                    target_file_ids
+                        .extend(self.reexport_target_file_ids(target_file_id, symbol_name)?);
                 }
             }
         }
@@ -1367,7 +1630,11 @@ impl Store {
         Ok(targets)
     }
 
-    fn unique_symbol_id_in_files(&self, file_ids: &[i64], symbol_name: &str) -> ScopeResult<Option<i64>> {
+    fn unique_symbol_id_in_files(
+        &self,
+        file_ids: &[i64],
+        symbol_name: &str,
+    ) -> ScopeResult<Option<i64>> {
         let mut matches = Vec::new();
         for file_id in file_ids {
             let mut statement = self.connection.prepare(
@@ -1698,7 +1965,12 @@ impl Store {
                 if visited.insert(next_id) {
                     predecessors.insert(next_id, (file_id, next_path.clone(), certainty));
                     if next_id == goal_file_id {
-                        return self.reconstruct_file_path(predecessors, start_file_id, start_label, goal_file_id);
+                        return self.reconstruct_file_path(
+                            predecessors,
+                            start_file_id,
+                            start_label,
+                            goal_file_id,
+                        );
                     }
                     queue.push_back((next_id, distance + 1));
                 }
@@ -1722,7 +1994,8 @@ impl Store {
 
         let mut visited = HashSet::from([start_symbol_id]);
         let mut queue = VecDeque::from([(start_symbol_id, 0u32)]);
-        let mut predecessors = std::collections::HashMap::<i64, (i64, RepoPath, String, Certainty)>::new();
+        let mut predecessors =
+            std::collections::HashMap::<i64, (i64, RepoPath, String, Certainty)>::new();
 
         while let Some((symbol_id, distance)) = queue.pop_front() {
             if distance >= max_depth {
@@ -1751,7 +2024,12 @@ impl Store {
                 if visited.insert(next_id) {
                     predecessors.insert(
                         next_id,
-                        (symbol_id, next_path.clone(), next_qualname.clone(), certainty),
+                        (
+                            symbol_id,
+                            next_path.clone(),
+                            next_qualname.clone(),
+                            certainty,
+                        ),
                     );
                     if next_id == goal_symbol_id {
                         return self.reconstruct_symbol_path(
@@ -1791,7 +2069,9 @@ impl Store {
         let mut previous_label = start_label.to_string();
         let mut path = Vec::with_capacity(reversed.len());
 
-        for (index, (_current_id, _previous_id, next_path, certainty)) in reversed.into_iter().enumerate() {
+        for (index, (_current_id, _previous_id, next_path, certainty)) in
+            reversed.into_iter().enumerate()
+        {
             path.push(TraversalRecord {
                 kind: NodeKind::File,
                 path: Some(next_path.clone()),
@@ -1818,10 +2098,17 @@ impl Store {
         let mut reversed = Vec::new();
 
         while current_id != start_symbol_id {
-            let Some((previous_id, path, qualname, certainty)) = predecessors.get(&current_id) else {
+            let Some((previous_id, path, qualname, certainty)) = predecessors.get(&current_id)
+            else {
                 return Ok(Vec::new());
             };
-            reversed.push((current_id, *previous_id, path.clone(), qualname.clone(), certainty.clone()));
+            reversed.push((
+                current_id,
+                *previous_id,
+                path.clone(),
+                qualname.clone(),
+                certainty.clone(),
+            ));
             current_id = *previous_id;
         }
 
@@ -1923,6 +2210,11 @@ fn run_migrations(connection: &Connection) -> ScopeResult<()> {
     }
 
     if current_version < 4 {
+        connection.pragma_update(None, "user_version", 4)?;
+    }
+
+    if current_version < 5 {
+        connection.execute_batch(FILE_CHURN_MIGRATION)?;
         connection.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)?;
     }
 
@@ -1933,7 +2225,10 @@ fn run_migrations(connection: &Connection) -> ScopeResult<()> {
 }
 
 fn reconcile_schema(connection: &Connection) -> ScopeResult<()> {
-    if !has_required_tables(connection, &["index_meta", "files", "imports", "file_edges"])? {
+    if !has_required_tables(
+        connection,
+        &["index_meta", "files", "imports", "file_edges"],
+    )? {
         connection.execute_batch(INITIAL_MIGRATION)?;
     }
 
@@ -1943,6 +2238,10 @@ fn reconcile_schema(connection: &Connection) -> ScopeResult<()> {
 
     if !has_required_tables(connection, &["symbol_edges"])? {
         connection.execute_batch(SYMBOL_EDGES_MIGRATION)?;
+    }
+
+    if !has_required_tables(connection, &["file_churn"])? {
+        connection.execute_batch(FILE_CHURN_MIGRATION)?;
     }
 
     add_file_metadata_columns(connection)?;
@@ -2076,6 +2375,136 @@ fn all_files_set(records: &[StabilityRecord]) -> HashSet<RepoPath> {
     records.iter().map(|record| record.path.clone()).collect()
 }
 
+fn stability_category(fan_in: usize, fan_out: usize, instability: f64) -> StabilityCategory {
+    if fan_in == 0 && fan_out == 0 {
+        StabilityCategory::Isolated
+    } else if instability > 0.5 && fan_in > 10 {
+        StabilityCategory::UnstableAndCentral
+    } else if instability < 0.2 && fan_in > 5 {
+        StabilityCategory::StableAbstraction
+    } else if fan_in == 0 && instability >= 0.95 {
+        StabilityCategory::HealthyLeaf
+    } else if (0.35..=0.65).contains(&instability) {
+        StabilityCategory::Balanced
+    } else {
+        StabilityCategory::Stable
+    }
+}
+
+fn stability_reason(
+    fan_in: usize,
+    fan_out: usize,
+    instability: f64,
+    category: &StabilityCategory,
+    flagged: bool,
+) -> Option<String> {
+    if flagged {
+        Some(format!(
+            "high fan-in ({fan_in}) but also high instability ({instability:.2}) — structural liability"
+        ))
+    } else {
+        match category {
+            StabilityCategory::StableAbstraction => Some(format!(
+                "low instability ({instability:.2}) with high fan-in ({fan_in}) — shared stable abstraction"
+            )),
+            StabilityCategory::HealthyLeaf => Some(format!(
+                "no downstream dependents and fan-out {fan_out} — healthy leaf node"
+            )),
+            StabilityCategory::Isolated => Some("no direct imports and no dependents — isolated file".to_string()),
+            _ => None,
+        }
+    }
+}
+
+fn stability_summary(records: &[StabilityRecord]) -> StabilitySummary {
+    let avg_instability = if records.is_empty() {
+        0.0
+    } else {
+        records.iter().map(|record| record.instability).sum::<f64>() / records.len() as f64
+    };
+
+    let mut summary = StabilitySummary {
+        avg_instability,
+        flagged_count: 0,
+        stable_count: 0,
+        stable_abstraction_count: 0,
+        balanced_count: 0,
+        healthy_leaf_count: 0,
+        isolated_count: 0,
+    };
+
+    for record in records {
+        if record.flagged {
+            summary.flagged_count += 1;
+        }
+        match record.category {
+            StabilityCategory::Stable => summary.stable_count += 1,
+            StabilityCategory::StableAbstraction => summary.stable_abstraction_count += 1,
+            StabilityCategory::Balanced => summary.balanced_count += 1,
+            StabilityCategory::UnstableAndCentral => {}
+            StabilityCategory::HealthyLeaf => summary.healthy_leaf_count += 1,
+            StabilityCategory::Isolated => summary.isolated_count += 1,
+        }
+    }
+
+    summary
+}
+
+fn sort_stability_records(records: &mut [StabilityRecord], sort: StabilitySort) {
+    match sort {
+        StabilitySort::Instability => records.sort_by(|left, right| {
+            right
+                .instability
+                .total_cmp(&left.instability)
+                .then(right.fan_in.cmp(&left.fan_in))
+                .then(left.path.0.cmp(&right.path.0))
+        }),
+        StabilitySort::FanIn => records.sort_by(|left, right| {
+            right
+                .fan_in
+                .cmp(&left.fan_in)
+                .then(right.instability.total_cmp(&left.instability))
+                .then(left.path.0.cmp(&right.path.0))
+        }),
+        StabilitySort::FanOut => records.sort_by(|left, right| {
+            right
+                .fan_out
+                .cmp(&left.fan_out)
+                .then(right.instability.total_cmp(&left.instability))
+                .then(left.path.0.cmp(&right.path.0))
+        }),
+        StabilitySort::Path => records.sort_by(|left, right| left.path.0.cmp(&right.path.0)),
+    }
+}
+
+fn sort_risk_records(records: &mut [RiskRecord], sort: RiskSort) {
+    match sort {
+        RiskSort::Score => records.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then(right.transitive_dependents.cmp(&left.transitive_dependents))
+                .then(right.churn_commits.cmp(&left.churn_commits))
+                .then(left.path.0.cmp(&right.path.0))
+        }),
+        RiskSort::Churn => records.sort_by(|left, right| {
+            right
+                .churn_commits
+                .cmp(&left.churn_commits)
+                .then(right.score.total_cmp(&left.score))
+                .then(left.path.0.cmp(&right.path.0))
+        }),
+        RiskSort::Dependents => records.sort_by(|left, right| {
+            right
+                .transitive_dependents
+                .cmp(&left.transitive_dependents)
+                .then(right.score.total_cmp(&left.score))
+                .then(left.path.0.cmp(&right.path.0))
+        }),
+        RiskSort::Path => records.sort_by(|left, right| left.path.0.cmp(&right.path.0)),
+    }
+}
+
 fn visibility_from_db(value: &str) -> Visibility {
     match value {
         "module" => Visibility::Module,
@@ -2091,6 +2520,34 @@ fn edge_kind_from_db(value: &str) -> EdgeKind {
         "module" => EdgeKind::Contain,
         _ => EdgeKind::Import,
     }
+}
+
+fn transitive_dependents_count(
+    path: &RepoPath,
+    reverse_adjacency: &HashMap<RepoPath, Vec<RepoPath>>,
+) -> usize {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+
+    if let Some(initial) = reverse_adjacency.get(path) {
+        for dependent in initial {
+            if visited.insert(dependent.clone()) {
+                queue.push_back(dependent.clone());
+            }
+        }
+    }
+
+    while let Some(current) = queue.pop_front() {
+        if let Some(next) = reverse_adjacency.get(&current) {
+            for dependent in next {
+                if visited.insert(dependent.clone()) {
+                    queue.push_back(dependent.clone());
+                }
+            }
+        }
+    }
+
+    visited.len()
 }
 
 fn import_mentions_symbol(raw_text: &str, symbol_name: &str) -> bool {
@@ -2145,7 +2602,10 @@ fn certainty_rank(certainty: &Certainty) -> u8 {
     }
 }
 
-fn compare_context_candidates(left: &ContextCandidate, right: &ContextCandidate) -> std::cmp::Ordering {
+fn compare_context_candidates(
+    left: &ContextCandidate,
+    right: &ContextCandidate,
+) -> std::cmp::Ordering {
     right
         .pinned
         .cmp(&left.pinned)
@@ -2191,8 +2651,8 @@ fn unix_timestamp() -> i64 {
 mod tests {
     use super::*;
     use crate::{
-        CallSiteRecord, ImportRecord, ParseStatus, PublicSurfaceChangeKind, Span, SymbolRecord,
-        SymbolKind, Visibility,
+        CallSiteRecord, ImportRecord, ParseStatus, PublicSurfaceChangeKind, Span, SymbolKind,
+        SymbolRecord, Visibility,
     };
     use rusqlite::Connection;
     use std::path::PathBuf;
@@ -2227,11 +2687,19 @@ mod tests {
         }
     }
 
-    fn sample_symbol(file: &str, name: &str, kind: SymbolKind, visibility: Visibility) -> SymbolRecord {
+    fn sample_symbol(
+        file: &str,
+        name: &str,
+        kind: SymbolKind,
+        visibility: Visibility,
+    ) -> SymbolRecord {
         SymbolRecord {
             file: RepoPath::from(file),
             name: name.to_string(),
-            qualname: format!("{}::{name}", file.trim_start_matches("src/").trim_end_matches(".rs")),
+            qualname: format!(
+                "{}::{name}",
+                file.trim_start_matches("src/").trim_end_matches(".rs")
+            ),
             kind,
             visibility: visibility.clone(),
             exported: matches!(visibility, Visibility::Public | Visibility::Package),
@@ -2312,8 +2780,9 @@ mod tests {
 
         let connection = Connection::open(&db_path).unwrap();
         connection.pragma_update(None, "user_version", 3).unwrap();
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS index_meta (
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS index_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
@@ -2325,7 +2794,8 @@ mod tests {
                 is_barrel INTEGER NOT NULL DEFAULT 0,
                 indexed_at INTEGER NOT NULL
             );",
-        ).unwrap();
+            )
+            .unwrap();
         drop(connection);
 
         let store = Store::open(&db_path).unwrap();
@@ -2397,8 +2867,9 @@ mod tests {
 
         let connection = Connection::open(&db_path).unwrap();
         connection.pragma_update(None, "user_version", 4).unwrap();
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS index_meta (
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS index_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
@@ -2450,7 +2921,8 @@ mod tests {
                 certainty TEXT NOT NULL,
                 call_line INTEGER NOT NULL
             );",
-        ).unwrap();
+            )
+            .unwrap();
         drop(connection);
 
         let store = Store::open(&db_path).unwrap();
@@ -2665,7 +3137,10 @@ mod tests {
         store.persist_extract_results(&extracts).unwrap();
 
         let indexed = store.list_indexed_files().unwrap();
-        assert_eq!(indexed, vec![app.path.clone(), parser.path.clone(), resolver.path.clone()]);
+        assert_eq!(
+            indexed,
+            vec![app.path.clone(), parser.path.clone(), resolver.path.clone()]
+        );
 
         let closure = store
             .reverse_dependency_closure(std::slice::from_ref(&parser.path))
@@ -2675,7 +3150,10 @@ mod tests {
         assert!(store.delete_file(&parser.path).unwrap());
         assert!(!store.delete_file(&parser.path).unwrap());
         assert!(store.query_reverse_deps(&parser.path).unwrap().is_empty());
-        assert_eq!(store.list_indexed_files().unwrap(), vec![app.path.clone(), resolver.path.clone()]);
+        assert_eq!(
+            store.list_indexed_files().unwrap(),
+            vec![app.path.clone(), resolver.path.clone()]
+        );
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -2693,9 +3171,24 @@ mod tests {
             modules: Vec::new(),
             exports: Vec::new(),
             symbols: vec![
-                sample_symbol("src/lib.rs", "greet", SymbolKind::Function, Visibility::Public),
-                sample_symbol("src/lib.rs", "helper", SymbolKind::Function, Visibility::Local),
-                sample_symbol("src/lib.rs", "Parser", SymbolKind::Struct, Visibility::Package),
+                sample_symbol(
+                    "src/lib.rs",
+                    "greet",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
+                sample_symbol(
+                    "src/lib.rs",
+                    "helper",
+                    SymbolKind::Function,
+                    Visibility::Local,
+                ),
+                sample_symbol(
+                    "src/lib.rs",
+                    "Parser",
+                    SymbolKind::Struct,
+                    Visibility::Package,
+                ),
             ],
             call_sites: Vec::new(),
             parse_diagnostics: Vec::new(),
@@ -2717,7 +3210,9 @@ mod tests {
             .query_symbols(&source.path, false, Some(SymbolKind::Function))
             .unwrap();
         assert_eq!(functions.len(), 2);
-        assert!(functions.iter().all(|symbol| symbol.kind == SymbolKind::Function));
+        assert!(functions
+            .iter()
+            .all(|symbol| symbol.kind == SymbolKind::Function));
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -2735,9 +3230,24 @@ mod tests {
             modules: Vec::new(),
             exports: Vec::new(),
             symbols: vec![
-                sample_symbol("src/lib.rs", "greet", SymbolKind::Function, Visibility::Public),
-                sample_symbol("src/lib.rs", "Parser", SymbolKind::Struct, Visibility::Package),
-                sample_symbol("src/lib.rs", "helper", SymbolKind::Function, Visibility::Local),
+                sample_symbol(
+                    "src/lib.rs",
+                    "greet",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
+                sample_symbol(
+                    "src/lib.rs",
+                    "Parser",
+                    SymbolKind::Struct,
+                    Visibility::Package,
+                ),
+                sample_symbol(
+                    "src/lib.rs",
+                    "helper",
+                    SymbolKind::Function,
+                    Visibility::Local,
+                ),
             ],
             call_sites: Vec::new(),
             parse_diagnostics: Vec::new(),
@@ -2748,7 +3258,11 @@ mod tests {
         let surface = store.query_public_surface(&source.path).unwrap();
         assert_eq!(surface.file, source.path);
         assert_eq!(surface.symbols.len(), 2);
-        let names: Vec<_> = surface.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        let names: Vec<_> = surface
+            .symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect();
         assert_eq!(names, vec!["Parser", "greet"]);
         assert!(surface
             .symbols
@@ -2772,8 +3286,18 @@ mod tests {
             modules: Vec::new(),
             exports: Vec::new(),
             symbols: vec![
-                sample_symbol("snapshots/before.rs", "greet", SymbolKind::Function, Visibility::Public),
-                sample_symbol("snapshots/before.rs", "Parser", SymbolKind::Struct, Visibility::Public),
+                sample_symbol(
+                    "snapshots/before.rs",
+                    "greet",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
+                sample_symbol(
+                    "snapshots/before.rs",
+                    "Parser",
+                    SymbolKind::Struct,
+                    Visibility::Public,
+                ),
             ],
             call_sites: Vec::new(),
             parse_diagnostics: Vec::new(),
@@ -2792,7 +3316,12 @@ mod tests {
             exports: Vec::new(),
             symbols: vec![
                 renamed_parser,
-                sample_symbol("snapshots/after.rs", "format", SymbolKind::Function, Visibility::Public),
+                sample_symbol(
+                    "snapshots/after.rs",
+                    "format",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
             ],
             call_sites: Vec::new(),
             parse_diagnostics: Vec::new(),
@@ -2801,7 +3330,9 @@ mod tests {
         store.persist_extract_result(&before_extract).unwrap();
         store.persist_extract_result(&after_extract).unwrap();
 
-        let diff = store.diff_public_surface(&before.path, &after.path).unwrap();
+        let diff = store
+            .diff_public_surface(&before.path, &after.path)
+            .unwrap();
         assert_eq!(diff.before_file, before.path);
         assert_eq!(diff.after_file, after.path);
         assert_eq!(diff.summary.added_count, 1);
@@ -2812,17 +3343,26 @@ mod tests {
             .changes
             .iter()
             .any(|change| change.kind == PublicSurfaceChangeKind::Added
-                && change.after.as_ref().is_some_and(|symbol| symbol.name == "format")));
+                && change
+                    .after
+                    .as_ref()
+                    .is_some_and(|symbol| symbol.name == "format")));
         assert!(diff
             .changes
             .iter()
             .any(|change| change.kind == PublicSurfaceChangeKind::Removed
-                && change.before.as_ref().is_some_and(|symbol| symbol.name == "greet")));
+                && change
+                    .before
+                    .as_ref()
+                    .is_some_and(|symbol| symbol.name == "greet")));
         assert!(diff
             .changes
             .iter()
             .any(|change| change.kind == PublicSurfaceChangeKind::Modified
-                && change.before.as_ref().is_some_and(|symbol| symbol.name == "Parser")
+                && change
+                    .before
+                    .as_ref()
+                    .is_some_and(|symbol| symbol.name == "Parser")
                 && change.after.as_ref().is_some_and(|symbol| symbol.line == 8)));
 
         std::fs::remove_dir_all(dir).unwrap();
@@ -2841,8 +3381,18 @@ mod tests {
             modules: Vec::new(),
             exports: Vec::new(),
             symbols: vec![
-                sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public),
-                sample_symbol("src/parser.rs", "tokenize", SymbolKind::Function, Visibility::Local),
+                sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
+                sample_symbol(
+                    "src/parser.rs",
+                    "tokenize",
+                    SymbolKind::Function,
+                    Visibility::Local,
+                ),
             ],
             call_sites: vec![sample_call(
                 "src/parser.rs",
@@ -2877,15 +3427,22 @@ mod tests {
 
         let parser = sample_file("src/parser.rs");
         store.upsert_file(&parser).unwrap();
-        store.persist_extract_result(&ExtractResult {
-            file: parser.clone(),
-            imports: Vec::new(),
-            modules: Vec::new(),
-            exports: Vec::new(),
-            symbols: vec![sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public)],
-            call_sites: Vec::new(),
-            parse_diagnostics: Vec::new(),
-        }).unwrap();
+        store
+            .persist_extract_result(&ExtractResult {
+                file: parser.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            })
+            .unwrap();
 
         let resolver = sample_file("src/resolver.rs");
         let extract = ExtractResult {
@@ -2899,7 +3456,12 @@ mod tests {
             }],
             modules: Vec::new(),
             exports: Vec::new(),
-            symbols: vec![sample_symbol("src/resolver.rs", "resolve", SymbolKind::Function, Visibility::Public)],
+            symbols: vec![sample_symbol(
+                "src/resolver.rs",
+                "resolve",
+                SymbolKind::Function,
+                Visibility::Public,
+            )],
             call_sites: vec![sample_call(
                 "src/resolver.rs",
                 "resolver::resolve",
@@ -2937,8 +3499,20 @@ mod tests {
             imports: Vec::new(),
             modules: Vec::new(),
             exports: Vec::new(),
-            symbols: vec![sample_symbol("src/lib.rs", "greet", SymbolKind::Function, Visibility::Public)],
-            call_sites: vec![sample_call("src/lib.rs", "lib::greet", "join", None, true, 7)],
+            symbols: vec![sample_symbol(
+                "src/lib.rs",
+                "greet",
+                SymbolKind::Function,
+                Visibility::Public,
+            )],
+            call_sites: vec![sample_call(
+                "src/lib.rs",
+                "lib::greet",
+                "join",
+                None,
+                true,
+                7,
+            )],
             parse_diagnostics: Vec::new(),
         };
 
@@ -2963,8 +3537,18 @@ mod tests {
             modules: Vec::new(),
             exports: Vec::new(),
             symbols: vec![
-                sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public),
-                sample_symbol("src/parser.rs", "tokenize", SymbolKind::Function, Visibility::Local),
+                sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
+                sample_symbol(
+                    "src/parser.rs",
+                    "tokenize",
+                    SymbolKind::Function,
+                    Visibility::Local,
+                ),
             ],
             call_sites: vec![sample_call(
                 "src/parser.rs",
@@ -2977,7 +3561,10 @@ mod tests {
             parse_diagnostics: Vec::new(),
         };
         store.persist_extract_result(&initial).unwrap();
-        assert_eq!(store.query_callees("parser::parse", false).unwrap().len(), 1);
+        assert_eq!(
+            store.query_callees("parser::parse", false).unwrap().len(),
+            1
+        );
 
         let updated = ExtractResult {
             file: source,
@@ -2985,14 +3572,27 @@ mod tests {
             modules: Vec::new(),
             exports: Vec::new(),
             symbols: vec![
-                sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public),
-                sample_symbol("src/parser.rs", "tokenize", SymbolKind::Function, Visibility::Local),
+                sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
+                sample_symbol(
+                    "src/parser.rs",
+                    "tokenize",
+                    SymbolKind::Function,
+                    Visibility::Local,
+                ),
             ],
             call_sites: Vec::new(),
             parse_diagnostics: Vec::new(),
         };
         store.persist_extract_result(&updated).unwrap();
-        assert!(store.query_callees("parser::parse", false).unwrap().is_empty());
+        assert!(store
+            .query_callees("parser::parse", false)
+            .unwrap()
+            .is_empty());
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3013,7 +3613,12 @@ mod tests {
                 imports: Vec::new(),
                 modules: Vec::new(),
                 exports: Vec::new(),
-                symbols: vec![sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public)],
+                symbols: vec![sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
                 call_sites: Vec::new(),
                 parse_diagnostics: Vec::new(),
             },
@@ -3028,7 +3633,12 @@ mod tests {
                 }],
                 modules: Vec::new(),
                 exports: Vec::new(),
-                symbols: vec![sample_symbol("src/resolver.rs", "resolve", SymbolKind::Function, Visibility::Public)],
+                symbols: vec![sample_symbol(
+                    "src/resolver.rs",
+                    "resolve",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
                 call_sites: vec![sample_call(
                     "src/resolver.rs",
                     "resolver::resolve",
@@ -3050,7 +3660,12 @@ mod tests {
                 }],
                 modules: Vec::new(),
                 exports: Vec::new(),
-                symbols: vec![sample_symbol("src/main.rs", "run", SymbolKind::Function, Visibility::Public)],
+                symbols: vec![sample_symbol(
+                    "src/main.rs",
+                    "run",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
                 call_sites: vec![sample_call(
                     "src/main.rs",
                     "main::run",
@@ -3090,7 +3705,12 @@ mod tests {
                 imports: Vec::new(),
                 modules: Vec::new(),
                 exports: Vec::new(),
-                symbols: vec![sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public)],
+                symbols: vec![sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
                 call_sites: Vec::new(),
                 parse_diagnostics: Vec::new(),
             },
@@ -3105,7 +3725,12 @@ mod tests {
                 }],
                 modules: Vec::new(),
                 exports: Vec::new(),
-                symbols: vec![sample_symbol("src/resolver.rs", "resolve", SymbolKind::Function, Visibility::Public)],
+                symbols: vec![sample_symbol(
+                    "src/resolver.rs",
+                    "resolve",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
                 call_sites: vec![sample_call(
                     "src/resolver.rs",
                     "resolver::resolve",
@@ -3127,7 +3752,12 @@ mod tests {
                 }],
                 modules: Vec::new(),
                 exports: Vec::new(),
-                symbols: vec![sample_symbol("src/main.rs", "run", SymbolKind::Function, Visibility::Public)],
+                symbols: vec![sample_symbol(
+                    "src/main.rs",
+                    "run",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
                 call_sites: vec![sample_call(
                     "src/main.rs",
                     "main::run",
@@ -3141,11 +3771,21 @@ mod tests {
         ];
 
         store.persist_extract_results(&extracts).unwrap();
-        let impacted = store.query_impact("parser::parse", "signature", None).unwrap();
+        let impacted = store
+            .query_impact("parser::parse", "signature", None)
+            .unwrap();
 
-        assert!(impacted.iter().any(|record| record.qualname.as_deref() == Some("resolver::resolve") && record.distance == 1));
-        assert!(impacted.iter().any(|record| record.qualname.as_deref() == Some("main::run") && record.distance == 2));
-        assert!(impacted.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/resolver.rs") && record.edge_kind == EdgeKind::Import));
+        assert!(impacted.iter().any(|record| record.qualname.as_deref()
+            == Some("resolver::resolve")
+            && record.distance == 1));
+        assert!(impacted
+            .iter()
+            .any(|record| record.qualname.as_deref() == Some("main::run") && record.distance == 2));
+        assert!(impacted.iter().any(|record| record
+            .path
+            .as_ref()
+            .is_some_and(|path| path.0 == "src/resolver.rs")
+            && record.edge_kind == EdgeKind::Import));
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3204,12 +3844,28 @@ mod tests {
         store.persist_extract_results(&extracts).unwrap();
 
         let deleted = store.query_impact("src/parser.rs", "delete", None).unwrap();
-        assert!(deleted.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/resolver.rs") && record.distance == 1));
-        assert!(deleted.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/main.rs") && record.distance == 2));
+        assert!(deleted.iter().any(|record| record
+            .path
+            .as_ref()
+            .is_some_and(|path| path.0 == "src/resolver.rs")
+            && record.distance == 1));
+        assert!(deleted.iter().any(|record| record
+            .path
+            .as_ref()
+            .is_some_and(|path| path.0 == "src/main.rs")
+            && record.distance == 2));
 
-        let side_effect = store.query_impact("src/parser.rs", "side-effect", None).unwrap();
-        assert!(side_effect.iter().all(|record| record.edge_kind == EdgeKind::Import));
-        assert!(side_effect.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/main.rs") && record.distance == 2));
+        let side_effect = store
+            .query_impact("src/parser.rs", "side-effect", None)
+            .unwrap();
+        assert!(side_effect
+            .iter()
+            .all(|record| record.edge_kind == EdgeKind::Import));
+        assert!(side_effect.iter().any(|record| record
+            .path
+            .as_ref()
+            .is_some_and(|path| path.0 == "src/main.rs")
+            && record.distance == 2));
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3228,7 +3884,12 @@ mod tests {
                 imports: Vec::new(),
                 modules: Vec::new(),
                 exports: Vec::new(),
-                symbols: vec![sample_symbol("src/parser.rs", "parse", SymbolKind::Function, Visibility::Public)],
+                symbols: vec![sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
                 call_sites: Vec::new(),
                 parse_diagnostics: Vec::new(),
             },
@@ -3243,7 +3904,12 @@ mod tests {
                 }],
                 modules: Vec::new(),
                 exports: Vec::new(),
-                symbols: vec![sample_symbol("src/resolver.rs", "resolve", SymbolKind::Function, Visibility::Public)],
+                symbols: vec![sample_symbol(
+                    "src/resolver.rs",
+                    "resolve",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
                 call_sites: vec![sample_call(
                     "src/resolver.rs",
                     "resolver::resolve",
@@ -3259,8 +3925,14 @@ mod tests {
         store.persist_extract_results(&extracts).unwrap();
         let explain = store.query_explain("parser::parse", None, None).unwrap();
 
-        assert!(explain.iter().any(|record| record.qualname.as_deref() == Some("resolver::resolve") && record.edge_kind == EdgeKind::Call));
-        assert!(explain.iter().any(|record| record.path.as_ref().is_some_and(|path| path.0 == "src/resolver.rs") && record.edge_kind == EdgeKind::Import));
+        assert!(explain.iter().any(|record| record.qualname.as_deref()
+            == Some("resolver::resolve")
+            && record.edge_kind == EdgeKind::Call));
+        assert!(explain.iter().any(|record| record
+            .path
+            .as_ref()
+            .is_some_and(|path| path.0 == "src/resolver.rs")
+            && record.edge_kind == EdgeKind::Import));
 
         std::fs::remove_dir_all(dir).unwrap();
     }

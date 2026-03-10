@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "command": "risk",
+  "status": "ok",
+  "data": {
+    "result": {
+      "file": null,
+      "top": null,
+      "days": 30,
+      "sort": "score",
+      "files": [
+        {
+          "path": "src/parser.rs",
+          "direct_dependents": 1,
+          "transitive_dependents": 1,
+          "churn_commits": 0,
+          "score": 1.0,
+          "normalized_score": 100,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (1 direct dependents, 1 transitive dependents)"
+        },
+        {
+          "path": "src/lib.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (0 direct dependents, 0 transitive dependents)"
+        },
+        {
+          "path": "src/main.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (0 direct dependents, 0 transitive dependents)"
+        },
+        {
+          "path": "src/resolver.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (0 direct dependents, 0 transitive dependents)"
+        },
+        {
+          "path": "src/utils.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (0 direct dependents, 0 transitive dependents)"
+        }
+      ],
+      "summary": {
+        "git_available": false,
+        "scored_files": 5,
+        "avg_score": 0.2,
+        "max_score": 1.0
+      }
+    }
+  },
+  "warnings": []
+}

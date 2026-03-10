@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "command": "risk",
+  "status": "ok",
+  "data": {
+    "result": {
+      "file": null,
+      "top": null,
+      "days": 10000,
+      "sort": "score",
+      "files": [
+        {
+          "path": "src/parser.rs",
+          "direct_dependents": 1,
+          "transitive_dependents": 1,
+          "churn_commits": 2,
+          "score": 1.584962500721156,
+          "normalized_score": 100,
+          "reason": "1 direct dependents, 1 transitive dependents, 2 churn commits in last 10000 days"
+        },
+        {
+          "path": "src/utils.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 1,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "0 direct dependents, 0 transitive dependents, 1 churn commits in last 10000 days"
+        },
+        {
+          "path": "src/lib.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "0 direct dependents, 0 transitive dependents, 0 churn commits in last 10000 days"
+        },
+        {
+          "path": "src/main.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "0 direct dependents, 0 transitive dependents, 0 churn commits in last 10000 days"
+        },
+        {
+          "path": "src/resolver.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "0 direct dependents, 0 transitive dependents, 0 churn commits in last 10000 days"
+        }
+      ],
+      "summary": {
+        "git_available": true,
+        "scored_files": 5,
+        "avg_score": 0.3169925001442312,
+        "max_score": 1.584962500721156
+      }
+    }
+  },
+  "warnings": []
+}
