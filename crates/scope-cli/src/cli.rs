@@ -44,6 +44,8 @@ pub enum Commands {
     Pack(PackArgs),
     /// Check architecture rules against indexed file dependencies
     Arch(ArchArgs),
+    /// Report Martin instability scores from indexed file dependencies
+    Stability(StabilityArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Run benchmark scaffolding for future performance work
@@ -177,6 +179,12 @@ pub enum ArchCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct ArchCheckArgs {}
+
+#[derive(Debug, clap::Args)]
+pub struct StabilityArgs {
+    #[arg(long)]
+    pub file: Option<String>,
+}
 
 #[derive(Debug, clap::Args)]
 pub struct DoctorArgs {

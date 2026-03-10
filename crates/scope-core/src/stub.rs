@@ -4,10 +4,10 @@ use crate::{
     json::JsonEnvelope,
     model::{
         ArchCheckResult, Certainty, ContextResult, DependencyRecord, EdgeKind, ImpactChangeType,
-        ImpactTraversalRule, NodeKind, RepoPath, Span, SymbolKind, SymbolRecord,
-        TraversalRecord, Visibility,
+        ImpactTraversalRule, NodeKind, RepoPath, Span, StabilityResult, SymbolKind,
+        SymbolRecord, TraversalRecord, Visibility,
     },
-    DatabaseInfo,
+    DatabaseInfo, IndexHealthStats,
 };
 
 #[derive(Debug, Serialize)]
@@ -96,14 +96,30 @@ pub struct ContextData {
 #[derive(Debug, Serialize)]
 pub struct DoctorData {
     pub fix: bool,
-    pub checks: Vec<String>,
+    pub schema_version: u32,
+    pub stats: IndexHealthStats,
+    pub checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DoctorCheck {
+    pub name: &'static str,
+    pub status: &'static str,
+    pub detail: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct BenchmarkData {
     pub fixture: Option<String>,
     pub iterations: Option<u32>,
-    pub benchmarks: Vec<String>,
+    pub benchmarks: Vec<BenchmarkMeasurement>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BenchmarkMeasurement {
+    pub name: &'static str,
+    pub value: usize,
+    pub unit: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +128,11 @@ pub struct ArchCheckData {
     pub checked_edges: usize,
     pub checked_layered_edges: usize,
     pub violations: Vec<crate::ArchViolation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StabilityData {
+    pub result: StabilityResult,
 }
 
 pub fn index(
@@ -419,23 +440,81 @@ pub fn context(result: ContextResult) -> JsonEnvelope<ContextData> {
     JsonEnvelope::success("context", ContextData { result })
 }
 
-pub fn doctor(fix: bool) -> JsonEnvelope<DoctorData> {
-    JsonEnvelope::stub(
+pub fn doctor(fix: bool, stats: IndexHealthStats) -> JsonEnvelope<DoctorData> {
+    let unresolved_status = if stats.unresolved_imports == 0 { "ok" } else { "warn" };
+    let parse_status = if stats.parse_status.error == 0 {
+        if stats.parse_status.partial == 0 {
+            "ok"
+        } else {
+            "warn"
+        }
+    } else {
+        "fail"
+    };
+
+    JsonEnvelope::success(
         "doctor",
         DoctorData {
             fix,
-            checks: Vec::new(),
+            schema_version: crate::INDEX_SCHEMA_VERSION,
+            checks: vec![
+                DoctorCheck {
+                    name: "files_indexed",
+                    status: if stats.files == 0 { "fail" } else { "ok" },
+                    detail: format!("{} indexed file(s)", stats.files),
+                },
+                DoctorCheck {
+                    name: "unresolved_imports",
+                    status: unresolved_status,
+                    detail: format!("{} unresolved non-external import(s)", stats.unresolved_imports),
+                },
+                DoctorCheck {
+                    name: "parse_status",
+                    status: parse_status,
+                    detail: format!(
+                        "ok={}, partial={}, error={}",
+                        stats.parse_status.ok, stats.parse_status.partial, stats.parse_status.error
+                    ),
+                },
+            ],
+            stats,
         },
     )
 }
 
-pub fn benchmark(fixture: Option<String>, iterations: Option<u32>) -> JsonEnvelope<BenchmarkData> {
-    JsonEnvelope::stub(
+pub fn benchmark(
+    fixture: Option<String>,
+    iterations: Option<u32>,
+    stats: IndexHealthStats,
+) -> JsonEnvelope<BenchmarkData> {
+    let iterations = Some(iterations.unwrap_or(1));
+    JsonEnvelope::success(
         "benchmark",
         BenchmarkData {
             fixture,
             iterations,
-            benchmarks: Vec::new(),
+            benchmarks: vec![
+                BenchmarkMeasurement {
+                    name: "indexed_files",
+                    value: stats.files,
+                    unit: "count",
+                },
+                BenchmarkMeasurement {
+                    name: "symbols",
+                    value: stats.symbols,
+                    unit: "count",
+                },
+                BenchmarkMeasurement {
+                    name: "call_edges",
+                    value: stats.call_edges,
+                    unit: "count",
+                },
+                BenchmarkMeasurement {
+                    name: "imports",
+                    value: stats.imports,
+                    unit: "count",
+                },
+            ],
         },
     )
 }
@@ -450,6 +529,10 @@ pub fn arch_check(result: ArchCheckResult) -> JsonEnvelope<ArchCheckData> {
             violations: result.violations,
         },
     )
+}
+
+pub fn stability(result: StabilityResult) -> JsonEnvelope<StabilityData> {
+    JsonEnvelope::success("stability", StabilityData { result })
 }
 
 pub fn mcp_stub_message() -> JsonEnvelope<TraversalRecord> {

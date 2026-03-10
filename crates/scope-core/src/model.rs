@@ -366,3 +366,17 @@ pub struct ArchCheckResult {
     pub checked_layered_edges: usize,
     pub violations: Vec<ArchViolation>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StabilityRecord {
+    pub path: RepoPath,
+    pub fan_in: usize,
+    pub fan_out: usize,
+    pub instability: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StabilityResult {
+    pub file: Option<RepoPath>,
+    pub files: Vec<StabilityRecord>,
+}

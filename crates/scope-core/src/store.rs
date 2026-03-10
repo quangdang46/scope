@@ -11,8 +11,8 @@ use crate::{
     ArchFileEdge, Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary,
     DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind, PublicSurface,
     PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary,
-    PublicSurfaceSymbol, RepoPath, ScopeError, ScopeResult, SymbolKind, SymbolRecord,
-    TraversalRecord, Visibility,
+    PublicSurfaceSymbol, RepoPath, ScopeError, ScopeResult, StabilityRecord, StabilityResult,
+    SymbolKind, SymbolRecord, TraversalRecord, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
@@ -120,6 +120,23 @@ pub struct StoredFileState {
     pub content_hash: Option<String>,
     pub mtime_unix_seconds: Option<i64>,
     pub size_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ParseStatusCounts {
+    pub ok: usize,
+    pub partial: usize,
+    pub error: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IndexHealthStats {
+    pub files: usize,
+    pub imports: usize,
+    pub unresolved_imports: usize,
+    pub symbols: usize,
+    pub call_edges: usize,
+    pub parse_status: ParseStatusCounts,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +250,30 @@ impl Store {
         };
 
         Ok(Some(previous.content_hash != current.content_hash))
+    }
+
+    pub fn index_health_stats(&self) -> ScopeResult<IndexHealthStats> {
+        let files = self.count_rows("files")?;
+        let imports = self.count_rows("imports")?;
+        let unresolved_imports = self.count_query(
+            "SELECT COUNT(*) FROM imports WHERE resolved_file_id IS NULL AND import_path_kind != 'external'",
+        )?;
+        let symbols = self.count_rows("symbols")?;
+        let call_edges = self.count_rows("symbol_edges")?;
+        let parse_status = ParseStatusCounts {
+            ok: self.count_query("SELECT COUNT(*) FROM files WHERE parse_status = 'ok'")?,
+            partial: self.count_query("SELECT COUNT(*) FROM files WHERE parse_status = 'partial'")?,
+            error: self.count_query("SELECT COUNT(*) FROM files WHERE parse_status = 'error'")?,
+        };
+
+        Ok(IndexHealthStats {
+            files,
+            imports,
+            unresolved_imports,
+            symbols,
+            call_edges,
+            parse_status,
+        })
     }
 
     pub fn persist_extract_result(&self, result: &ExtractResult) -> ScopeResult<()> {
@@ -356,6 +397,59 @@ impl Store {
         })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn query_stability(&self, file: Option<&RepoPath>) -> ScopeResult<StabilityResult> {
+        let all_files = self.query_indexed_paths()?;
+        let edges = self.query_file_edges()?;
+        let mut fan_in: HashMap<RepoPath, usize> = HashMap::new();
+        let mut fan_out: HashMap<RepoPath, usize> = HashMap::new();
+
+        for edge in edges.into_iter().filter(|edge| edge.edge_kind == EdgeKind::Import) {
+            *fan_out.entry(edge.from_file.clone()).or_default() += 1;
+            *fan_in.entry(edge.to_file.clone()).or_default() += 1;
+        }
+
+        let mut records = all_files
+            .into_iter()
+            .map(|path| {
+                let incoming = fan_in.get(&path).copied().unwrap_or(0);
+                let outgoing = fan_out.get(&path).copied().unwrap_or(0);
+                let total = incoming + outgoing;
+                let instability = if total == 0 {
+                    0.0
+                } else {
+                    outgoing as f64 / total as f64
+                };
+
+                StabilityRecord {
+                    path,
+                    fan_in: incoming,
+                    fan_out: outgoing,
+                    instability,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        records.sort_by(|left, right| {
+            right
+                .instability
+                .total_cmp(&left.instability)
+                .then(right.fan_in.cmp(&left.fan_in))
+                .then(left.path.0.cmp(&right.path.0))
+        });
+
+        let target = if let Some(path) = file {
+            if !all_files_set(&records).contains(path) {
+                return Err(ScopeError::InvalidInput(format!("file not indexed: {}", path.0)));
+            }
+            records.retain(|record| &record.path == path);
+            Some(path.clone())
+        } else {
+            None
+        };
+
+        Ok(StabilityResult { file: target, files: records })
     }
 
     pub fn query_symbols(
@@ -935,6 +1029,14 @@ impl Store {
             .unwrap_or(64))
     }
 
+    fn query_indexed_paths(&self) -> ScopeResult<Vec<RepoPath>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path FROM files ORDER BY path ASC")?;
+        let rows = statement.query_map([], |row| Ok(RepoPath(row.get::<_, String>(0)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     fn path_for_file_id(&self, file_id: i64) -> ScopeResult<Option<RepoPath>> {
         self.connection
             .query_row("SELECT path FROM files WHERE id = ?1", [file_id], |row| {
@@ -1246,6 +1348,17 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(std::path::PathBuf::from(path))
+    }
+
+    fn count_rows(&self, table: &str) -> ScopeResult<usize> {
+        self.count_query(&format!("SELECT COUNT(*) FROM {table}"))
+    }
+
+    fn count_query(&self, query: &str) -> ScopeResult<usize> {
+        self.connection
+            .query_row(query, [], |row| row.get::<_, i64>(0))
+            .map(|count| count as usize)
+            .map_err(Into::into)
     }
 
     fn insert_symbol_edge(
@@ -1909,6 +2022,10 @@ fn visibility_name(visibility: &Visibility) -> &'static str {
         Visibility::Public => "public",
         Visibility::Unknown => "unknown",
     }
+}
+
+fn all_files_set(records: &[StabilityRecord]) -> HashSet<RepoPath> {
+    records.iter().map(|record| record.path.clone()).collect()
 }
 
 fn visibility_from_db(value: &str) -> Visibility {

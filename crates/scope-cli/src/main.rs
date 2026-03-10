@@ -29,10 +29,35 @@ fn render_cli_error(error: &scope_core::ScopeError) -> String {
 
 fn serialize_output<T: serde::Serialize>(value: &T, compact: bool) -> Result<String, serde_json::Error> {
     if compact {
-        serde_json::to_string(value)
+        let mut json = serde_json::to_value(value)?;
+        compact_json_value(&mut json);
+        serde_json::to_string(&json)
     } else {
         serde_json::to_string_pretty(value)
     }
+}
+
+fn compact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                compact_json_value(value);
+            }
+            map.retain(|_, value| !should_prune_compact_value(value));
+        }
+        serde_json::Value::Array(values) => {
+            for value in values.iter_mut() {
+                compact_json_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn should_prune_compact_value(value: &serde_json::Value) -> bool {
+    matches!(value, serde_json::Value::Null)
+        || matches!(value, serde_json::Value::Array(values) if values.is_empty())
+        || matches!(value, serde_json::Value::Object(map) if map.is_empty())
 }
 
 fn run() -> Result<i32, scope_core::ScopeError> {
@@ -219,11 +244,37 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 }
             }
         }
-        Commands::Doctor(args) => serialize_output(&scope_core::stub::doctor(args.fix), compact),
-        Commands::Benchmark(args) => serialize_output(
-            &scope_core::stub::benchmark(args.fixture, args.iterations),
-            compact,
-        ),
+        Commands::Stability(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let file = args.file.as_deref().map(RepoPath::from);
+            let result = context.store.query_stability(file.as_ref())?;
+            serialize_output(&scope_core::stub::stability(result), compact)
+        }
+        Commands::Doctor(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let stats = context.store.index_health_stats()?;
+            serialize_output(&scope_core::stub::doctor(args.fix, stats), compact)
+        }
+        Commands::Benchmark(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let stats = context.store.index_health_stats()?;
+            serialize_output(
+                &scope_core::stub::benchmark(args.fixture, args.iterations, stats),
+                compact,
+            )
+        }
     }
     .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
 
@@ -564,6 +615,7 @@ fn context_role_label(role: &ContextFileRole) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{build_context_pack, index_repo, render_cli_error, serialize_output};
+    use scope_core::{RepoPath, StabilityRecord, StabilityResult};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -650,23 +702,90 @@ mod tests {
 
     #[test]
     fn serialize_output_pretty_mode_matches_existing_json_layout() {
-        let output = serialize_output(&scope_core::stub::doctor(false), false).unwrap();
+        let output = serialize_output(
+            &scope_core::stub::doctor(
+                false,
+                scope_core::IndexHealthStats {
+                    files: 1,
+                    imports: 0,
+                    unresolved_imports: 0,
+                    symbols: 0,
+                    call_edges: 0,
+                    parse_status: scope_core::ParseStatusCounts {
+                        ok: 1,
+                        partial: 0,
+                        error: 0,
+                    },
+                },
+            ),
+            false,
+        )
+        .unwrap();
         assert!(output.contains("\n  \"schema_version\": 1,"));
-        assert!(output.contains("\n  \"warnings\": [\n"));
+        assert!(output.contains("\n  \"warnings\": []"));
     }
 
     #[test]
-    fn serialize_output_compact_mode_minifies_without_changing_fields() {
-        let envelope = scope_core::stub::doctor(false);
+    fn serialize_output_compact_mode_minifies_and_prunes_empty_fields() {
+        let envelope = scope_core::stub::doctor(
+            false,
+            scope_core::IndexHealthStats {
+                files: 1,
+                imports: 0,
+                unresolved_imports: 0,
+                symbols: 0,
+                call_edges: 0,
+                parse_status: scope_core::ParseStatusCounts {
+                    ok: 1,
+                    partial: 0,
+                    error: 0,
+                },
+            },
+        );
         let pretty = serialize_output(&envelope, false).unwrap();
         let compact = serialize_output(&envelope, true).unwrap();
 
         assert!(!compact.contains('\n'));
         assert!(compact.len() < pretty.len());
 
-        let pretty_value: serde_json::Value = serde_json::from_str(&pretty).unwrap();
         let compact_value: serde_json::Value = serde_json::from_str(&compact).unwrap();
-        assert_eq!(compact_value, pretty_value);
+        assert_eq!(compact_value["schema_version"], 1);
+        assert_eq!(compact_value["command"], "doctor");
+        assert_eq!(compact_value["status"], "ok");
+        assert_eq!(compact_value["data"]["fix"], false);
+        assert!(compact_value["data"].get("checks").is_some());
+        assert!(compact_value.get("warnings").is_none());
+    }
+
+    #[test]
+    fn serialize_output_compact_mode_prunes_null_fields_inside_data() {
+        let envelope = scope_core::stub::why("src/lib.rs".to_string(), "src/parser.rs".to_string(), None, Vec::new());
+        let compact = serialize_output(&envelope, true).unwrap();
+        let compact_value: serde_json::Value = serde_json::from_str(&compact).unwrap();
+
+        assert_eq!(compact_value["command"], "why");
+        assert!(compact_value["data"].get("depth").is_none());
+        assert!(compact_value["data"].get("path").is_none());
+    }
+
+    #[test]
+    fn serialize_output_stability_command_uses_expected_envelope_shape() {
+        let envelope = scope_core::stub::stability(StabilityResult {
+            file: None,
+            files: vec![StabilityRecord {
+                path: RepoPath::from("src/lib.rs"),
+                fan_in: 1,
+                fan_out: 2,
+                instability: 0.6666666666666666,
+            }],
+        });
+        let output = serialize_output(&envelope, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["command"], "stability");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["files"][0]["path"], "src/lib.rs");
+        assert!(value["data"]["result"].get("file").is_none());
     }
 
     #[test]

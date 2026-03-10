@@ -22,9 +22,11 @@ pub use model::{
     DependencyRecord, DiagnosticSeverity, EdgeKind, ExportRecord, ExtractResult, FileRecord,
     ImpactChangeType, ImpactTraversalRule, ImportPath, ImportRecord, ModuleRecord, NodeKind,
     ParseDiagnostic, ParseStatus, PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind,
-    PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol, RepoPath, Span, SymbolKind,
-    SymbolRecord, TraversalRecord, Visibility,
+    PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol, RepoPath, Span,
+    StabilityRecord, StabilityResult, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
 };
 pub use scanner::{scan_repo, ScanConfig, ScanEntry, SupportedLanguage};
-pub use store::{DatabaseInfo, Store, INDEX_SCHEMA_VERSION};
+pub use store::{
+    DatabaseInfo, IndexHealthStats, ParseStatusCounts, Store, INDEX_SCHEMA_VERSION,
+};
 pub use tracing::Verbosity;

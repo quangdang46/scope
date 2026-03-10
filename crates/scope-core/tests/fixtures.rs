@@ -542,6 +542,111 @@ fn fixture_indexing_persists_file_fingerprint_metadata() {
 }
 
 #[test]
+fn doctor_output_reports_index_health_counts() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let stats = store.index_health_stats().unwrap();
+    let envelope = stub::doctor(false, stats.clone());
+
+    assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
+    assert_eq!(envelope.data.schema_version, scope_core::INDEX_SCHEMA_VERSION);
+    assert_eq!(envelope.data.stats.files, 5);
+    assert_eq!(envelope.data.stats.imports, 1);
+    assert_eq!(envelope.data.stats.unresolved_imports, 0);
+    assert_eq!(envelope.data.stats.symbols, 10);
+    assert_eq!(envelope.data.stats.call_edges, 4);
+    assert_eq!(envelope.data.stats.parse_status.ok, 5);
+    assert_eq!(envelope.data.stats.parse_status.partial, 0);
+    assert_eq!(envelope.data.stats.parse_status.error, 0);
+    assert_eq!(envelope.data.checks.len(), 3);
+    assert_eq!(envelope.data.checks[0].name, "files_indexed");
+    assert_eq!(envelope.data.checks[0].status, "ok");
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn benchmark_output_reports_basic_index_measurements() {
+    let repo = prepare_fixture_copy("ts_small");
+    let store = index_fixture(&repo);
+
+    let stats = store.index_health_stats().unwrap();
+    let envelope = stub::benchmark(Some("ts_small".to_string()), Some(3), stats.clone());
+
+    assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
+    assert_eq!(envelope.data.fixture.as_deref(), Some("ts_small"));
+    assert_eq!(envelope.data.iterations, Some(3));
+    assert_eq!(envelope.data.benchmarks.len(), 4);
+    assert_eq!(envelope.data.benchmarks[0].name, "indexed_files");
+    assert_eq!(envelope.data.benchmarks[0].value, stats.files);
+    assert_eq!(envelope.data.benchmarks[0].unit, "count");
+    assert!(envelope.data.benchmarks.iter().any(|measurement| measurement.name == "symbols"));
+    assert!(envelope
+        .data
+        .benchmarks
+        .iter()
+        .any(|measurement| measurement.name == "call_edges"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn stability_query_reports_expected_scores_and_filtering() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let result = store.query_stability(None).unwrap();
+    assert_eq!(result.file, None);
+    assert_eq!(result.files.len(), 5);
+
+    let lib = result
+        .files
+        .iter()
+        .find(|record| record.path == RepoPath::from("src/lib.rs"))
+        .unwrap();
+    assert_eq!(lib.fan_in, 0);
+    assert_eq!(lib.fan_out, 0);
+    assert_eq!(lib.instability, 0.0);
+
+    let parser = result
+        .files
+        .iter()
+        .find(|record| record.path == RepoPath::from("src/parser.rs"))
+        .unwrap();
+    assert_eq!(parser.fan_in, 1);
+    assert_eq!(parser.fan_out, 0);
+    assert_eq!(parser.instability, 0.0);
+
+    let resolver = result
+        .files
+        .iter()
+        .find(|record| record.path == RepoPath::from("src/resolver.rs"))
+        .unwrap();
+    assert_eq!(resolver.fan_in, 0);
+    assert_eq!(resolver.fan_out, 1);
+    assert_eq!(resolver.instability, 1.0);
+
+    let filtered = store
+        .query_stability(Some(&RepoPath::from("src/parser.rs")))
+        .unwrap();
+    assert_eq!(filtered.file, Some(RepoPath::from("src/parser.rs")));
+    assert_eq!(filtered.files.len(), 1);
+    assert_eq!(filtered.files[0].path, RepoPath::from("src/parser.rs"));
+
+    assert!(matches!(
+        store.query_stability(Some(&RepoPath::from("src/missing.rs"))),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+
+    let envelope = stub::stability(filtered.clone());
+    assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
+    assert_eq!(envelope.data.result, filtered);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn why_queries_match_golden_json_and_handle_limits() {
     let rust_repo = prepare_fixture_copy("rust_small");
     let rust_store = index_fixture(&rust_repo);
