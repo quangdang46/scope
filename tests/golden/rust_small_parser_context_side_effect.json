@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "command": "context",
+  "status": "ok",
+  "data": {
+    "result": {
+      "targets": [
+        "src/parser.rs"
+      ],
+      "change_type": "side-effect",
+      "budget": null,
+      "must_read": [
+        {
+          "path": "src/parser.rs",
+          "score": 200,
+          "estimated_tokens": 42,
+          "distance": 0,
+          "certainty": "exact",
+          "reasons": [
+            "target file src/parser.rs"
+          ],
+          "roles": [
+            "target"
+          ]
+        },
+        {
+          "path": "src/resolver.rs",
+          "score": 120,
+          "estimated_tokens": 24,
+          "distance": 1,
+          "certainty": "exact",
+          "reasons": [
+            "imports src/parser.rs"
+          ],
+          "roles": [
+            "importer"
+          ]
+        }
+      ],
+      "should_read": [],
+      "summary": {
+        "targets_count": 1,
+        "must_read_count": 2,
+        "should_read_count": 0,
+        "skipped_count": 0,
+        "estimated_tokens": 66,
+        "budget": null,
+        "truncated": false
+      }
+    }
+  },
+  "warnings": []
+}

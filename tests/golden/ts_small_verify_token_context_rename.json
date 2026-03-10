@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "command": "context",
+  "status": "ok",
+  "data": {
+    "result": {
+      "targets": [
+        "auth::middleware::verifyToken"
+      ],
+      "change_type": "rename",
+      "budget": null,
+      "must_read": [
+        {
+          "path": "src/auth/middleware.ts",
+          "score": 200,
+          "estimated_tokens": 28,
+          "distance": 0,
+          "certainty": "exact",
+          "reasons": [
+            "defines or contains target auth::middleware::verifyToken",
+            "defines symbol auth::middleware::verifyToken"
+          ],
+          "roles": [
+            "target",
+            "defines_target_symbol"
+          ]
+        },
+        {
+          "path": "src/auth/index.ts",
+          "score": 120,
+          "estimated_tokens": 23,
+          "distance": 1,
+          "certainty": "exact",
+          "reasons": [
+            "imports auth::middleware::verifyToken"
+          ],
+          "roles": [
+            "importer"
+          ]
+        },
+        {
+          "path": "src/auth/jwt.ts",
+          "score": 85,
+          "estimated_tokens": 42,
+          "distance": 1,
+          "certainty": "resolved",
+          "reasons": [
+            "is called by auth::middleware::verifyToken"
+          ],
+          "roles": [
+            "direct_callee"
+          ]
+        }
+      ],
+      "should_read": [
+        {
+          "path": "src/index.ts",
+          "score": 60,
+          "estimated_tokens": 22,
+          "distance": 2,
+          "certainty": "exact",
+          "reasons": [
+            "imports a file that reaches auth::middleware::verifyToken"
+          ],
+          "roles": [
+            "nearby_context"
+          ]
+        }
+      ],
+      "summary": {
+        "targets_count": 1,
+        "must_read_count": 3,
+        "should_read_count": 1,
+        "skipped_count": 0,
+        "estimated_tokens": 115,
+        "budget": null,
+        "truncated": false
+      }
+    }
+  },
+  "warnings": []
+}

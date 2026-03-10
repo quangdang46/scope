@@ -549,6 +549,299 @@ impl Store {
         }
     }
 
+    pub fn query_context(
+        &self,
+        targets: &[String],
+        change_type: &str,
+        budget: Option<usize>,
+    ) -> ScopeResult<ContextResult> {
+        if targets.is_empty() {
+            return Err(ScopeError::InvalidInput(
+                "scope context requires at least one --target".to_string(),
+            ));
+        }
+
+        let mut candidates = HashMap::<RepoPath, ContextCandidate>::new();
+
+        for target in targets {
+            if let Some(symbol_id) = self.symbol_id(target)? {
+                self.add_symbol_target_context(&mut candidates, symbol_id, target, change_type)?;
+                continue;
+            }
+
+            let path = RepoPath::from(target.clone());
+            let Some(file_id) = self.file_id(&path)? else {
+                return Err(ScopeError::InvalidInput(format!(
+                    "scope context could not resolve target `{target}`; use an indexed file path or symbol qualname"
+                )));
+            };
+            self.add_file_target_context(&mut candidates, file_id, &path, change_type)?;
+        }
+
+        let mut ranked: Vec<_> = candidates.into_values().collect();
+        ranked.sort_by(|left, right| compare_context_candidates(left, right));
+
+        let mut must_read = Vec::new();
+        let mut should_read = Vec::new();
+        let mut must_tokens = 0usize;
+        let mut should_tokens = 0usize;
+        let mut skipped_count = 0usize;
+        let mut truncated = false;
+
+        for candidate in ranked {
+            let pinned = candidate.pinned;
+            let record = ContextFileRecord {
+                path: candidate.path,
+                score: candidate.score,
+                estimated_tokens: candidate.estimated_tokens,
+                distance: candidate.distance,
+                certainty: candidate.certainty,
+                reasons: candidate.reasons,
+                roles: candidate.roles,
+            };
+
+            let goes_to_must = record.distance <= 1;
+            if goes_to_must {
+                let would_exceed = budget.is_some_and(|limit| {
+                    !pinned && must_tokens + record.estimated_tokens > limit
+                });
+                if would_exceed {
+                    truncated = true;
+                    should_tokens += record.estimated_tokens;
+                    should_read.push(record);
+                } else {
+                    must_tokens += record.estimated_tokens;
+                    must_read.push(record);
+                }
+            } else if budget.is_some_and(|limit| must_tokens + should_tokens + record.estimated_tokens > limit) {
+                truncated = true;
+                skipped_count += 1;
+            } else {
+                should_tokens += record.estimated_tokens;
+                should_read.push(record);
+            }
+        }
+
+        let must_read_count = must_read.len();
+        let should_read_count = should_read.len();
+        Ok(ContextResult {
+            targets: targets.to_vec(),
+            change_type: change_type.to_string(),
+            budget,
+            must_read,
+            should_read,
+            summary: ContextSummary {
+                targets_count: targets.len(),
+                must_read_count,
+                should_read_count,
+                skipped_count,
+                estimated_tokens: must_tokens + should_tokens,
+                budget,
+                truncated,
+            },
+        })
+    }
+
+    fn add_symbol_target_context(
+        &self,
+        candidates: &mut HashMap<RepoPath, ContextCandidate>,
+        symbol_id: i64,
+        target: &str,
+        change_type: &str,
+    ) -> ScopeResult<()> {
+        let Some(file_id) = self.file_id_for_symbol(symbol_id)? else {
+            return Ok(());
+        };
+        let Some(path) = self.path_for_file_id(file_id)? else {
+            return Ok(());
+        };
+
+        self.upsert_context_candidate(
+            candidates,
+            path.clone(),
+            ContextFileRole::Target,
+            200,
+            0,
+            Certainty::Exact,
+            format!("defines or contains target {target}"),
+            true,
+        )?;
+        self.upsert_context_candidate(
+            candidates,
+            path.clone(),
+            ContextFileRole::DefinesTargetSymbol,
+            180,
+            0,
+            Certainty::Exact,
+            format!("defines symbol {target}"),
+            true,
+        )?;
+
+        if includes_callers(change_type) {
+            let symbol_depth = if change_type == "body" { 1 } else { 2 };
+            for traversal in self.traverse_reverse_callers(symbol_id, target, symbol_depth)? {
+                self.upsert_traversal_candidate(candidates, traversal, ContextFileRole::DirectCaller, 120)?;
+            }
+        }
+
+        for traversal in self.traverse_forward_callees(symbol_id, target, 1)? {
+            self.upsert_traversal_candidate(candidates, traversal, ContextFileRole::DirectCallee, 100)?;
+        }
+
+        if includes_importers(change_type) {
+            let importer_depth = if change_type == "body" { 1 } else { 2 };
+            for traversal in self.traverse_reverse_importers(
+                file_id,
+                target,
+                importer_depth,
+                change_type == "side-effect",
+            )? {
+                self.upsert_traversal_candidate(candidates, traversal, ContextFileRole::Importer, 120)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn add_file_target_context(
+        &self,
+        candidates: &mut HashMap<RepoPath, ContextCandidate>,
+        file_id: i64,
+        path: &RepoPath,
+        change_type: &str,
+    ) -> ScopeResult<()> {
+        self.upsert_context_candidate(
+            candidates,
+            path.clone(),
+            ContextFileRole::Target,
+            200,
+            0,
+            Certainty::Exact,
+            format!("target file {}", path.0),
+            true,
+        )?;
+
+        for dependency in self.query_deps(path)? {
+            self.upsert_dependency_candidate(candidates, dependency, ContextFileRole::Dependency, 100)?;
+        }
+
+        let importer_depth = if change_type == "body" { 1 } else { 2 };
+        for traversal in self.traverse_reverse_importers(
+            file_id,
+            &path.0,
+            importer_depth,
+            change_type == "side-effect",
+        )? {
+            self.upsert_traversal_candidate(candidates, traversal, ContextFileRole::Importer, 120)?;
+        }
+
+        Ok(())
+    }
+
+    fn upsert_traversal_candidate(
+        &self,
+        candidates: &mut HashMap<RepoPath, ContextCandidate>,
+        traversal: TraversalRecord,
+        role: ContextFileRole,
+        base_score: u32,
+    ) -> ScopeResult<()> {
+        let Some(path) = traversal.path else {
+            return Ok(());
+        };
+        let role = if traversal.distance <= 1 {
+            role
+        } else {
+            ContextFileRole::NearbyContext
+        };
+        self.upsert_context_candidate(
+            candidates,
+            path,
+            role,
+            score_for_candidate(base_score, traversal.distance, &traversal.certainty),
+            traversal.distance,
+            traversal.certainty,
+            traversal.reason,
+            false,
+        )
+    }
+
+    fn upsert_dependency_candidate(
+        &self,
+        candidates: &mut HashMap<RepoPath, ContextCandidate>,
+        dependency: DependencyRecord,
+        role: ContextFileRole,
+        base_score: u32,
+    ) -> ScopeResult<()> {
+        self.upsert_context_candidate(
+            candidates,
+            dependency.path,
+            role,
+            score_for_candidate(base_score, 1, &dependency.certainty),
+            1,
+            dependency.certainty,
+            dependency
+                .import_text
+                .map(|text| format!("imported via {text}"))
+                .unwrap_or_else(|| "direct dependency of target file".to_string()),
+            false,
+        )
+    }
+
+    fn upsert_context_candidate(
+        &self,
+        candidates: &mut HashMap<RepoPath, ContextCandidate>,
+        path: RepoPath,
+        role: ContextFileRole,
+        score: u32,
+        distance: u32,
+        certainty: Certainty,
+        reason: String,
+        pinned: bool,
+    ) -> ScopeResult<()> {
+        let estimated_tokens = self.estimate_file_tokens(&path)?;
+        let candidate = candidates.entry(path.clone()).or_insert_with(|| ContextCandidate {
+            path,
+            score,
+            estimated_tokens,
+            distance,
+            certainty: certainty.clone(),
+            reasons: Vec::new(),
+            roles: Vec::new(),
+            pinned,
+        });
+
+        candidate.score = candidate.score.max(score);
+        candidate.distance = candidate.distance.min(distance);
+        candidate.certainty = better_certainty(&candidate.certainty, &certainty);
+        candidate.pinned |= pinned;
+        if !candidate.reasons.iter().any(|existing| existing == &reason) {
+            candidate.reasons.push(reason);
+        }
+        if !candidate.roles.contains(&role) {
+            candidate.roles.push(role);
+            candidate.roles.sort();
+        }
+        candidate.reasons.sort();
+        Ok(())
+    }
+
+    fn estimate_file_tokens(&self, path: &RepoPath) -> ScopeResult<usize> {
+        Ok(self
+            .file_state(path)?
+            .and_then(|state| state.size_bytes)
+            .map(|bytes| ((bytes.max(1) as usize) / 4).max(1))
+            .unwrap_or(64))
+    }
+
+    fn path_for_file_id(&self, file_id: i64) -> ScopeResult<Option<RepoPath>> {
+        self.connection
+            .query_row("SELECT path FROM files WHERE id = ?1", [file_id], |row| {
+                Ok(RepoPath(row.get::<_, String>(0)?))
+            })
+            .optional()
+            .map_err(Into::into)
+    }
+
     fn file_id(&self, path: &RepoPath) -> ScopeResult<Option<i64>> {
         self.connection
             .query_row(
@@ -1551,6 +1844,43 @@ fn default_depth_for_change_type(change_type: &str) -> u32 {
     } else {
         DEFAULT_TRANSITIVE_DEPTH
     }
+}
+
+fn score_for_candidate(base_score: u32, distance: u32, certainty: &Certainty) -> u32 {
+    let certainty_weight = match certainty {
+        Certainty::Exact => 100u32,
+        Certainty::Resolved => 85,
+        Certainty::Heuristic => 50,
+        Certainty::Dynamic => 25,
+    };
+    let distance_penalty = distance.max(1);
+    ((base_score * certainty_weight) / 100) / distance_penalty
+}
+
+fn better_certainty(current: &Certainty, candidate: &Certainty) -> Certainty {
+    if certainty_rank(candidate) < certainty_rank(current) {
+        candidate.clone()
+    } else {
+        current.clone()
+    }
+}
+
+fn certainty_rank(certainty: &Certainty) -> u8 {
+    match certainty {
+        Certainty::Exact => 0,
+        Certainty::Resolved => 1,
+        Certainty::Heuristic => 2,
+        Certainty::Dynamic => 3,
+    }
+}
+
+fn compare_context_candidates(left: &ContextCandidate, right: &ContextCandidate) -> std::cmp::Ordering {
+    right
+        .pinned
+        .cmp(&left.pinned)
+        .then_with(|| right.score.cmp(&left.score))
+        .then_with(|| left.distance.cmp(&right.distance))
+        .then_with(|| left.path.cmp(&right.path))
 }
 
 fn dedup_traversals(traversals: Vec<TraversalRecord>) -> Vec<TraversalRecord> {

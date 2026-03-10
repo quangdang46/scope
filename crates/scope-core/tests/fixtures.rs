@@ -696,6 +696,78 @@ fn impact_output_groups_by_certainty_and_summarizes_counts() {
 }
 
 #[test]
+fn context_queries_match_golden_json_and_budget_behavior() {
+    let ts_repo = prepare_fixture_copy("ts_small");
+    let ts_store = index_fixture(&ts_repo);
+
+    let rename_result = ts_store
+        .query_context(&["auth::middleware::verifyToken".to_string()], "rename", None)
+        .unwrap();
+    let rename_envelope = stub::context(rename_result.clone());
+    let rename_actual = serde_json::to_string_pretty(&rename_envelope).unwrap();
+    let rename_expected = read_golden("ts_small_verify_token_context_rename.json");
+    assert_eq!(rename_actual, rename_expected);
+    assert_eq!(rename_result.must_read.len(), 3);
+    assert_eq!(rename_result.must_read[0].path.0, "src/auth/middleware.ts");
+    assert!(rename_result
+        .must_read
+        .iter()
+        .any(|record| record.path.0 == "src/auth/index.ts"));
+    assert!(rename_result
+        .must_read
+        .iter()
+        .any(|record| record.path.0 == "src/auth/jwt.ts"));
+    assert!(rename_result
+        .should_read
+        .iter()
+        .any(|record| record.path.0 == "src/index.ts"));
+
+    let budget_result = ts_store
+        .query_context(&["auth::middleware::verifyToken".to_string()], "rename", Some(90))
+        .unwrap();
+    let budget_envelope = stub::context(budget_result.clone());
+    let budget_actual = serde_json::to_string_pretty(&budget_envelope).unwrap();
+    let budget_expected = read_golden("ts_small_verify_token_context_rename_budget.json");
+    assert_eq!(budget_actual, budget_expected);
+    assert!(budget_result.summary.truncated);
+    assert_eq!(budget_result.must_read.len(), 2);
+    assert_eq!(budget_result.must_read[0].path.0, "src/auth/middleware.ts");
+    assert!(budget_result
+        .must_read
+        .iter()
+        .any(|record| record.path.0 == "src/auth/index.ts"));
+    assert!(budget_result
+        .should_read
+        .iter()
+        .any(|record| record.path.0 == "src/auth/jwt.ts"));
+
+    assert!(matches!(
+        ts_store.query_context(&["does::not::exist".to_string()], "rename", None),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+
+    fs::remove_dir_all(ts_repo).unwrap();
+
+    let rust_repo = prepare_fixture_copy("rust_small");
+    let rust_store = index_fixture(&rust_repo);
+    let file_result = rust_store
+        .query_context(&["src/parser.rs".to_string()], "side-effect", None)
+        .unwrap();
+    let file_envelope = stub::context(file_result.clone());
+    let file_actual = serde_json::to_string_pretty(&file_envelope).unwrap();
+    let file_expected = read_golden("rust_small_parser_context_side_effect.json");
+    assert_eq!(file_actual, file_expected);
+    assert_eq!(file_result.must_read[0].path.0, "src/parser.rs");
+    assert!(file_result
+        .must_read
+        .iter()
+        .any(|record| record.path.0 == "src/resolver.rs"));
+    assert!(file_result.should_read.is_empty());
+
+    fs::remove_dir_all(rust_repo).unwrap();
+}
+
+#[test]
 fn arch_violations_fixture_matches_expected_json() {
     let repo = prepare_fixture_copy("arch_violations");
     let store = index_fixture(&repo);
