@@ -80,7 +80,10 @@ fn index_fixture(repo_root: &Path) -> Store {
 }
 
 fn read_golden(name: &str) -> String {
-    fs::read_to_string(golden_root().join(name)).unwrap()
+    fs::read_to_string(golden_root().join(name))
+        .unwrap()
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 #[test]
@@ -325,6 +328,10 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
     let store = index_fixture(&repo);
 
     let greet_calls = store.query_callees("lib::greet", false).unwrap();
+    let greet_envelope = stub::calls("lib::greet".to_string(), false, greet_calls.clone());
+    let greet_actual = serde_json::to_string_pretty(&greet_envelope).unwrap();
+    let greet_expected = read_golden("rust_small_greet_calls.json");
+    assert_eq!(greet_actual, greet_expected);
     let greet_callees: Vec<_> = greet_calls
         .iter()
         .map(|traversal| {
@@ -352,11 +359,26 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
     );
 
     let parser_calls = store.query_callees("parser::parse", false).unwrap();
+    let parser_envelope = stub::calls("parser::parse".to_string(), false, parser_calls.clone());
+    let parser_actual = serde_json::to_string_pretty(&parser_envelope).unwrap();
+    let parser_expected = read_golden("rust_small_parse_calls.json");
+    assert_eq!(parser_actual, parser_expected);
     assert_eq!(parser_calls.len(), 1);
     assert_eq!(parser_calls[0].qualname.as_deref(), Some("parser::tokenize"));
     assert_eq!(parser_calls[0].certainty, scope_core::Certainty::Exact);
 
+    let farewell_calls = store.query_callees("lib::farewell", false).unwrap();
+    let farewell_envelope = stub::calls("lib::farewell".to_string(), false, farewell_calls.clone());
+    let farewell_actual = serde_json::to_string_pretty(&farewell_envelope).unwrap();
+    let farewell_expected = read_golden("rust_small_farewell_calls.json");
+    assert_eq!(farewell_actual, farewell_expected);
+    assert!(farewell_calls.is_empty(), "farewell should conservatively omit dynamic formatting internals");
+
     let parser_callers = store.query_callers("parser::parse", false).unwrap();
+    let callers_envelope = stub::callers("parser::parse".to_string(), false, parser_callers.clone());
+    let callers_actual = serde_json::to_string_pretty(&callers_envelope).unwrap();
+    let callers_expected = read_golden("rust_small_parse_callers.json");
+    assert_eq!(callers_actual, callers_expected);
     let parser_caller_names: Vec<_> = parser_callers
         .iter()
         .filter_map(|traversal| traversal.qualname.clone())
