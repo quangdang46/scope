@@ -187,7 +187,7 @@ fn index_repo(
         .collect();
 
     for extract in &extracts {
-        store.persist_extract_result(extract)?;
+        store.upsert_file(&extract.file)?;
     }
     for extract in &extracts {
         store.persist_extract_result(extract)?;

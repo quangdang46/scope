@@ -75,7 +75,7 @@ fn index_fixture(repo_root: &Path) -> Store {
         .collect();
 
     for extract in &extracts {
-        store.persist_extract_result(extract).unwrap();
+        store.upsert_file(&extract.file).unwrap();
     }
     for extract in &extracts {
         store.persist_extract_result(extract).unwrap();
@@ -131,6 +131,7 @@ fn ts_small_fixture_has_expected_files() {
         "package.json",
         "src/index.ts",
         "src/auth/index.ts",
+        "src/auth/aliases.ts",
         "src/auth/middleware.ts",
         "src/auth/jwt.ts",
         "src/utils/logger.ts",
@@ -263,6 +264,10 @@ fn ts_small_forward_deps_match_expected_paths() {
 
     assert_eq!(dep_paths, vec!["src/auth/index.ts", "src/utils/formatter.ts"]);
 
+    let auth_deps = store.query_deps(&RepoPath::from("src/auth/index.ts")).unwrap();
+    let auth_dep_paths: Vec<_> = auth_deps.iter().map(|dep| dep.path.0.clone()).collect();
+    assert_eq!(auth_dep_paths, vec!["src/auth/aliases.ts", "src/auth/middleware.ts"]);
+
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -273,7 +278,7 @@ fn ts_small_reverse_deps_and_symbols_and_calls_work_conservatively() {
 
     let reverse = store.query_reverse_deps(&RepoPath::from("src/auth/jwt.ts")).unwrap();
     let reverse_paths: Vec<_> = reverse.iter().map(|dep| dep.path.0.clone()).collect();
-    assert_eq!(reverse_paths, vec!["src/auth/middleware.ts"]);
+    assert_eq!(reverse_paths, vec!["src/auth/aliases.ts", "src/auth/middleware.ts"]);
 
     let jwt_symbols = store
         .query_symbols(&RepoPath::from("src/auth/jwt.ts"), false, None)
@@ -289,6 +294,21 @@ fn ts_small_reverse_deps_and_symbols_and_calls_work_conservatively() {
         .map(|symbol| symbol.name.clone())
         .collect();
     assert_eq!(middleware_symbol_names, vec!["verifyToken"]);
+
+    let alias_symbols = store
+        .query_symbols(&RepoPath::from("src/auth/aliases.ts"), false, None)
+        .unwrap();
+    let alias_symbol_names: Vec<_> = alias_symbols.iter().map(|symbol| symbol.name.clone()).collect();
+    assert_eq!(alias_symbol_names, vec!["verifyJwt"]);
+
+    let auth_index_symbols = store
+        .query_symbols(&RepoPath::from("src/auth/index.ts"), true, None)
+        .unwrap();
+    let auth_index_symbol_names: Vec<_> = auth_index_symbols
+        .iter()
+        .map(|symbol| symbol.name.clone())
+        .collect();
+    assert_eq!(auth_index_symbol_names, vec!["verifyToken", "verifyJwt"]);
 
     let verify_token_calls = store.query_callees("auth::middleware::verifyToken", false).unwrap();
     let verify_token_callees: Vec<_> = verify_token_calls

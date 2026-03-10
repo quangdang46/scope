@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    Certainty, ExportRecord, ExtractResult, FileRecord, ImportPath, ImportRecord, ModuleRecord,
-    ParseStatus, RepoPath, ScanEntry, Span, SupportedLanguage, SymbolKind, SymbolRecord,
-    Visibility,
+    Certainty, DiagnosticSeverity, ExportRecord, ExtractResult, FileRecord, ImportPath,
+    ImportRecord, ModuleRecord, ParseDiagnostic, ParseStatus, RepoPath, ScanEntry, Span,
+    SupportedLanguage, SymbolKind, SymbolRecord, Visibility,
 };
 use crate::model::CallSiteRecord;
 
@@ -187,6 +187,7 @@ impl Adapter for TsJsAdapter {
         let mut exports = Vec::new();
         let mut symbols = Vec::new();
         let mut call_sites = Vec::new();
+        let mut parse_diagnostics = Vec::new();
         let mut byte_offset = 0usize;
         let mut brace_depth = 0i32;
         let mut current_function_qualname: Option<String> = None;
@@ -205,6 +206,9 @@ impl Adapter for TsJsAdapter {
 
             if let Some(import_record) = parse_ts_js_import(trimmed, &entry.path, &repo_root, &span) {
                 imports.push(import_record);
+            }
+            if let Some(diagnostic) = parse_ts_js_dynamic_pattern(trimmed, &entry.path, &span) {
+                parse_diagnostics.push(diagnostic);
             }
 
             if let Some(export_record) = parse_ts_js_named_export(trimmed, &entry.path, &span) {
@@ -271,11 +275,17 @@ impl Adapter for TsJsAdapter {
             })
             .all(|line| line.trim().starts_with("export "));
 
+        let parse_status = if parse_diagnostics.is_empty() {
+            ParseStatus::Ok
+        } else {
+            ParseStatus::Partial
+        };
+
         ExtractResult {
             file: FileRecord {
                 path: entry.path.clone(),
                 language: self.language_id().to_string(),
-                parse_status: ParseStatus::Ok,
+                parse_status,
                 is_barrel: export_lines && !saw_non_export_statement,
             },
             imports,
@@ -283,7 +293,7 @@ impl Adapter for TsJsAdapter {
             exports,
             symbols,
             call_sites,
-            parse_diagnostics: Vec::new(),
+            parse_diagnostics,
         }
     }
 }
@@ -439,10 +449,7 @@ fn parse_ts_js_import(
 }
 
 fn parse_ts_js_named_export(trimmed: &str, file: &RepoPath, span: &Span) -> Option<ExportRecord> {
-    let remainder = trimmed.strip_prefix("export {")?;
-    let names = remainder.split('}').next()?.trim();
-    let first = names.split(',').next()?.trim();
-    let name = first.split_whitespace().next()?.trim().to_string();
+    let name = ts_js_exported_name(trimmed)?;
 
     Some(ExportRecord {
         file: file.clone(),
@@ -468,6 +475,49 @@ fn parse_ts_js_reexport_function_binding(
         visibility: Visibility::Public,
         exported: true,
         span: span.clone(),
+    })
+}
+
+fn ts_js_exported_name(trimmed: &str) -> Option<String> {
+    let remainder = trimmed.strip_prefix("export {")?;
+    let names = remainder.split('}').next()?.trim();
+    let first = names.split(',').next()?.trim();
+    let alias_target = first.split(" as ").nth(1).unwrap_or(first).trim();
+    let name = alias_target
+        .split_whitespace()
+        .next()?
+        .trim()
+        .trim_end_matches(',')
+        .to_string();
+
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn parse_ts_js_dynamic_pattern(
+    trimmed: &str,
+    file: &RepoPath,
+    span: &Span,
+) -> Option<ParseDiagnostic> {
+    let message = if trimmed.contains("import(") {
+        Some("dynamic import is not resolved yet")
+    } else if trimmed.contains("require(")
+        && !trimmed.contains("require(\"")
+        && !trimmed.contains("require('")
+    {
+        Some("computed require is not resolved yet")
+    } else {
+        None
+    }?;
+
+    Some(ParseDiagnostic {
+        path: file.clone(),
+        message: message.to_string(),
+        span: Some(span.clone()),
+        severity: DiagnosticSeverity::Warning,
     })
 }
 
@@ -1090,6 +1140,25 @@ mod tests {
                 ImportPath::Relative(RepoPath::from("src/utils/formatter.ts")),
             ]
         );
+
+        let alias_entry = fixture_entry_in("ts_small", "src/auth/aliases.ts", SupportedLanguage::TypeScript);
+        let alias_source = std::fs::read_to_string(&alias_entry.absolute_path).unwrap();
+        let alias_result = adapter.extract(&alias_entry, &alias_source);
+
+        assert!(alias_result.file.is_barrel);
+        assert_eq!(alias_result.imports.len(), 1);
+        assert_eq!(
+            alias_result.imports[0].import_path,
+            ImportPath::Relative(RepoPath::from("src/auth/jwt.ts"))
+        );
+        assert_eq!(
+            alias_result
+                .symbols
+                .iter()
+                .map(|symbol| symbol.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["verifyJwt"]
+        );
     }
 
     #[test]
@@ -1293,6 +1362,22 @@ mod tests {
             .map(|call| call.callee_name)
             .eq(vec!["condition".to_string(), "foo".to_string()]));
         assert!(extract_call_sites_from_line("// ignored_call()", 0, 0, &file, None).is_empty());
+    }
+
+    #[test]
+    fn ts_js_dynamic_patterns_surface_partial_diagnostics() {
+        let adapter = TsJsAdapter;
+        let entry = fixture_entry_in("ts_small", "src/auth/middleware.ts", SupportedLanguage::TypeScript);
+        let source = "const auth = await import(path);\nconst plugin = require(factoryName);\n";
+
+        let result = adapter.extract(&entry, source);
+
+        assert_eq!(result.file.parse_status, ParseStatus::Partial);
+        assert_eq!(result.parse_diagnostics.len(), 2);
+        assert_eq!(result.parse_diagnostics[0].severity, DiagnosticSeverity::Warning);
+        assert_eq!(result.parse_diagnostics[0].message, "dynamic import is not resolved yet");
+        assert_eq!(result.parse_diagnostics[1].message, "computed require is not resolved yet");
+        assert!(result.imports.is_empty());
     }
 
     #[test]
