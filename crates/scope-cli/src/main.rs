@@ -186,15 +186,7 @@ fn index_repo(
         })
         .collect();
 
-    for extract in &extracts {
-        store.upsert_file(&extract.file)?;
-    }
-    for extract in &extracts {
-        store.persist_extract_result(extract)?;
-    }
-    for extract in &extracts {
-        store.refresh_call_edges(extract)?;
-    }
+    store.persist_extract_results(&extracts)?;
 
     Ok(extracts.len())
 }

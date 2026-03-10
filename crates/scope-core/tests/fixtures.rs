@@ -74,15 +74,7 @@ fn index_fixture(repo_root: &Path) -> Store {
         })
         .collect();
 
-    for extract in &extracts {
-        store.upsert_file(&extract.file).unwrap();
-    }
-    for extract in &extracts {
-        store.persist_extract_result(extract).unwrap();
-    }
-    for extract in &extracts {
-        store.refresh_call_edges(extract).unwrap();
-    }
+    store.persist_extract_results(&extracts).unwrap();
 
     store
 }

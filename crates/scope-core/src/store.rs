@@ -143,6 +143,19 @@ impl Store {
         })
     }
 
+    pub fn persist_extract_results(&self, results: &[ExtractResult]) -> ScopeResult<()> {
+        for result in results {
+            self.upsert_file(&result.file)?;
+        }
+        for result in results {
+            self.persist_extract_result(result)?;
+        }
+        for result in results {
+            self.refresh_call_edges(result)?;
+        }
+        Ok(())
+    }
+
     pub fn persist_extract_result(&self, result: &ExtractResult) -> ScopeResult<()> {
         let file_id = self.upsert_file(&result.file)?;
         self.delete_symbol_edges_for_file(file_id)?;
@@ -1107,6 +1120,54 @@ mod tests {
         };
 
         store.persist_extract_result(&extract).unwrap();
+        let deps = store.query_deps(&source.path).unwrap();
+
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].path, target.path);
+        assert_eq!(deps[0].edge_kind, EdgeKind::Import);
+        assert_eq!(deps[0].certainty, Certainty::Exact);
+        assert_eq!(deps[0].import_text.as_deref(), Some("use crate::parser;"));
+        assert_eq!(deps[0].line, Some(1));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn batch_persistence_resolves_cross_file_dependencies_without_manual_upserts() {
+        let dir = unique_temp_dir("db-batch-deps");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let target = sample_file("src/parser.rs");
+        let source = sample_file("src/resolver.rs");
+        let extracts = vec![
+            ExtractResult {
+                file: target.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: source.clone(),
+                imports: vec![ImportRecord {
+                    file: source.path.clone(),
+                    raw_text: "use crate::parser;".to_string(),
+                    import_path: ImportPath::Relative(target.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
         let deps = store.query_deps(&source.path).unwrap();
 
         assert_eq!(deps.len(), 1);
