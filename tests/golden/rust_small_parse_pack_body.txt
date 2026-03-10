@@ -1,0 +1,23 @@
+=== SCOPE CONTEXT PACK ===
+Target:      parser::parse
+Change type: body
+Budget:      400 tokens (approx)
+Used:        203 tokens (approx)
+Schema:      1
+
+
+--- PUBLIC SURFACE (src/parser.rs) ---
+parser::parse | function | public | line 1
+
+--- DIRECT CALLERS ---
+src/lib.rs | lib::greet | certainty: resolved | distance: 1 | called directly by parser::parse
+src/resolver.rs | resolver::resolve | certainty: resolved | distance: 1 | called directly by parser::parse
+
+--- DIRECT CALLEES ---
+src/parser.rs | parser::tokenize | certainty: exact | distance: 1 | calls parser::parse
+
+--- BODY IMPACT ---
+src/lib.rs | lib::greet | certainty: resolved | distance: 1 | calls parser::parse directly
+src/resolver.rs | resolver::resolve | certainty: resolved | distance: 1 | calls parser::parse directly
+
+END SCOPE PACK | schema: 1 | truncated: no

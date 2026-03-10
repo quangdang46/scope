@@ -1,0 +1,22 @@
+=== SCOPE CONTEXT PACK ===
+Target:      auth::middleware::verifyToken
+Change type: rename
+Budget:      400 tokens (approx)
+Used:        205 tokens (approx)
+Schema:      1
+
+
+--- PUBLIC SURFACE (src/auth/middleware.ts) ---
+auth::middleware::verifyToken | function | public | line 3
+
+--- DIRECT CALLEES ---
+src/auth/jwt.ts | auth::jwt::verify | certainty: resolved | distance: 1 | calls auth::middleware::verifyToken
+
+--- TRANSITIVE CALLERS / NEARBY CONTEXT ---
+src/index.ts | tokens: 22 | distance: 2 | certainty: exact | roles: nearby_context
+
+--- RENAME IMPACT ---
+src/auth/index.ts | src/auth/index.ts | certainty: exact | distance: 1 | imports auth::middleware::verifyToken
+src/index.ts | src/index.ts | certainty: exact | distance: 2 | imports a file that reaches auth::middleware::verifyToken
+
+END SCOPE PACK | schema: 1 | truncated: no

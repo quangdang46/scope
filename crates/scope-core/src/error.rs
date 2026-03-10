@@ -34,6 +34,23 @@ pub enum ScopeError {
 }
 
 impl ScopeError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::InvalidInput(_) => "invalid_input",
+            Self::IndexNotFound => "index_not_found",
+            Self::NotFound { .. } => "not_found",
+            Self::UnsupportedLanguage { .. } => "unsupported_language",
+            Self::ParseFailed { .. } => "parse_failed",
+            Self::Io { .. } => "io",
+            Self::Database { .. } => "database",
+            Self::Migration(_) => "migration",
+            Self::Tracing(_) => "tracing",
+            Self::Serialization(_) => "serialization",
+            Self::Sqlite(_) => "sqlite",
+            Self::Internal(_) => "internal",
+        }
+    }
+
     pub fn io(path: impl Into<PathBuf>, error: impl std::fmt::Display) -> Self {
         Self::Io {
             path: path.into(),

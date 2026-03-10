@@ -1,0 +1,15 @@
+=== SCOPE CONTEXT PACK ===
+Target:      auth::middleware::verifyToken
+Change type: rename
+Budget:      120 tokens (approx)
+Used:        111 tokens (approx)
+Schema:      1
+
+
+--- PUBLIC SURFACE (src/auth/middleware.ts) ---
+auth::middleware::verifyToken | function | public | line 3
+
+--- DIRECT CALLEES ---
+src/auth/jwt.ts | auth::jwt::verify | certainty: resolved | distance: 1 | calls auth::middleware::verifyToken
+
+END SCOPE PACK | schema: 1 | truncated: yes

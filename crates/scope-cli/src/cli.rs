@@ -38,6 +38,8 @@ pub enum Commands {
     Why(WhyArgs),
     /// Recommend the minimum file set to read before making a change
     Context(ContextArgs),
+    /// Generate a budgeted plain-text context pack for an agent
+    Pack(PackArgs),
     /// Check architecture rules against indexed file dependencies
     Arch(ArchArgs),
     /// Inspect repository and index health
@@ -110,8 +112,9 @@ pub struct ImpactArgs {
     pub depth: Option<usize>,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, ValueEnum, Default)]
 pub enum ChangeType {
+    #[default]
     Body,
     Signature,
     Rename,
@@ -145,6 +148,17 @@ pub struct ContextArgs {
     pub change_type: ChangeType,
     #[arg(long)]
     pub budget: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct PackArgs {
+    pub target: String,
+    #[arg(long, value_enum, default_value_t = ChangeType::Body)]
+    pub change_type: ChangeType,
+    #[arg(long)]
+    pub budget: usize,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
