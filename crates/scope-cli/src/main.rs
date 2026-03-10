@@ -1,6 +1,6 @@
 mod cli;
 
-use std::env;
+use std::{env, fs, time::UNIX_EPOCH};
 
 use clap::Parser;
 use cli::{ArchCommand, ChangeType, Cli, Commands};
@@ -163,6 +163,18 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 path,
             ))
         }
+        Commands::Context(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let change_type = change_type_name(args.change_type);
+            let result = context
+                .store
+                .query_context(&args.targets, &change_type, args.budget)?;
+            serde_json::to_string_pretty(&scope_core::stub::context(result))
+        }
         Commands::Arch(args) => {
             let bootstrap_options = BootstrapOptions {
                 repo_root_override: cli.repo_root.clone(),
@@ -239,8 +251,18 @@ fn index_repo(
             if !scope_core::adapters::supports_path(adapter, &entry.absolute_path) {
                 return None;
             }
-            let source = std::fs::read_to_string(&entry.absolute_path).ok()?;
-            Some(adapter.extract(&entry, &source))
+            let source = fs::read_to_string(&entry.absolute_path).ok()?;
+            let mut extract = adapter.extract(&entry, &source);
+            let metadata = fs::metadata(&entry.absolute_path).ok()?;
+            let modified = metadata.modified().ok()?;
+            let modified_seconds = modified
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs() as i64);
+            extract.file.content_hash = Some(blake3::hash(source.as_bytes()).to_hex().to_string());
+            extract.file.mtime_unix_seconds = modified_seconds;
+            extract.file.size_bytes = Some(metadata.len() as i64);
+            Some(extract)
         })
         .collect();
 

@@ -100,6 +100,9 @@ pub struct FileRecord {
     pub language: String,
     pub parse_status: ParseStatus,
     pub is_barrel: bool,
+    pub content_hash: Option<String>,
+    pub mtime_unix_seconds: Option<i64>,
+    pub size_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -199,6 +202,50 @@ pub struct TraversalRecord {
     pub certainty: Certainty,
     pub reason: String,
     pub distance: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextFileRole {
+    Target,
+    DefinesTargetSymbol,
+    DirectCaller,
+    DirectCallee,
+    Importer,
+    Dependency,
+    NearbyContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextFileRecord {
+    pub path: RepoPath,
+    pub score: u32,
+    pub estimated_tokens: usize,
+    pub distance: u32,
+    pub certainty: Certainty,
+    pub reasons: Vec<String>,
+    pub roles: Vec<ContextFileRole>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextSummary {
+    pub targets_count: usize,
+    pub must_read_count: usize,
+    pub should_read_count: usize,
+    pub skipped_count: usize,
+    pub estimated_tokens: usize,
+    pub budget: Option<usize>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextResult {
+    pub targets: Vec<String>,
+    pub change_type: String,
+    pub budget: Option<usize>,
+    pub must_read: Vec<ContextFileRecord>,
+    pub should_read: Vec<ContextFileRecord>,
+    pub summary: ContextSummary,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

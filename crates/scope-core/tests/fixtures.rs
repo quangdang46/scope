@@ -75,7 +75,16 @@ fn index_fixture(repo_root: &Path) -> Store {
                 return None;
             }
             let source = fs::read_to_string(&entry.absolute_path).unwrap();
-            Some(adapter.extract(&entry, &source))
+            let metadata = fs::metadata(&entry.absolute_path).unwrap();
+            let mut extract = adapter.extract(&entry, &source);
+            extract.file.content_hash = Some(blake3::hash(source.as_bytes()).to_hex().to_string());
+            extract.file.mtime_unix_seconds = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs() as i64);
+            extract.file.size_bytes = Some(metadata.len() as i64);
+            Some(extract)
         })
         .collect();
 
@@ -462,6 +471,22 @@ fn rust_small_explain_query_matches_golden_json() {
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].qualname.as_deref(), Some("resolver::resolve"));
     assert_eq!(filtered[0].distance, 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn fixture_indexing_persists_file_fingerprint_metadata() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let state = store
+        .file_state(&RepoPath::from("src/lib.rs"))
+        .unwrap()
+        .unwrap();
+    assert!(state.content_hash.as_ref().is_some_and(|hash| !hash.is_empty()));
+    assert!(state.mtime_unix_seconds.is_some());
+    assert!(state.size_bytes.is_some_and(|size| size > 0));
 
     fs::remove_dir_all(repo).unwrap();
 }

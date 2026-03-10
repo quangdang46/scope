@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -8,14 +8,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::{
-    ArchFileEdge, Certainty, DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath,
-    NodeKind, RepoPath, ScopeError, ScopeResult, SymbolKind, SymbolRecord, TraversalRecord,
-    Visibility,
+    ArchFileEdge, Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary,
+    DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind, RepoPath,
+    ScopeError, ScopeResult, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
 
-pub const INDEX_SCHEMA_VERSION: u32 = 3;
+pub const INDEX_SCHEMA_VERSION: u32 = 4;
 
 const INITIAL_MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS index_meta (
@@ -92,6 +92,15 @@ CREATE TABLE IF NOT EXISTS symbol_edges (
 );
 "#;
 
+const FILE_METADATA_MIGRATION_COLUMNS: &[(&str, &str)] = &[
+    ("content_hash", "ALTER TABLE files ADD COLUMN content_hash TEXT"),
+    (
+        "mtime_unix_seconds",
+        "ALTER TABLE files ADD COLUMN mtime_unix_seconds INTEGER",
+    ),
+    ("size_bytes", "ALTER TABLE files ADD COLUMN size_bytes INTEGER"),
+];
+
 #[derive(Debug)]
 pub struct Store {
     connection: Connection,
@@ -101,6 +110,26 @@ pub struct Store {
 pub struct DatabaseInfo {
     pub path: String,
     pub schema_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFileState {
+    pub path: RepoPath,
+    pub content_hash: Option<String>,
+    pub mtime_unix_seconds: Option<i64>,
+    pub size_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ContextCandidate {
+    path: RepoPath,
+    score: u32,
+    estimated_tokens: usize,
+    distance: u32,
+    certainty: Certainty,
+    reasons: Vec<String>,
+    roles: Vec<ContextFileRole>,
+    pinned: bool,
 }
 
 impl Store {
@@ -126,19 +155,34 @@ impl Store {
     pub fn upsert_file(&self, file: &FileRecord) -> ScopeResult<i64> {
         let indexed_at = unix_timestamp();
         self.connection.execute(
-            "INSERT INTO files (path, language, parse_status, is_barrel, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO files (
+                path,
+                language,
+                parse_status,
+                is_barrel,
+                indexed_at,
+                content_hash,
+                mtime_unix_seconds,
+                size_bytes
+            )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(path) DO UPDATE SET
                  language = excluded.language,
                  parse_status = excluded.parse_status,
                  is_barrel = excluded.is_barrel,
-                 indexed_at = excluded.indexed_at",
+                 indexed_at = excluded.indexed_at,
+                 content_hash = excluded.content_hash,
+                 mtime_unix_seconds = excluded.mtime_unix_seconds,
+                 size_bytes = excluded.size_bytes",
             params![
                 file.path.0,
                 file.language,
                 parse_status_name(&file.parse_status),
                 file.is_barrel as i64,
                 indexed_at,
+                file.content_hash,
+                file.mtime_unix_seconds,
+                file.size_bytes,
             ],
         )?;
 
@@ -158,6 +202,35 @@ impl Store {
             self.refresh_call_edges(result)?;
         }
         Ok(())
+    }
+
+    pub fn file_state(&self, path: &RepoPath) -> ScopeResult<Option<StoredFileState>> {
+        self.connection
+            .query_row(
+                "SELECT path, content_hash, mtime_unix_seconds, size_bytes FROM files WHERE path = ?1",
+                [path.0.as_str()],
+                |row| {
+                    Ok(StoredFileState {
+                        path: RepoPath(row.get::<_, String>(0)?),
+                        content_hash: row.get(1)?,
+                        mtime_unix_seconds: row.get(2)?,
+                        size_bytes: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn classify_file_change(
+        &self,
+        current: &FileRecord,
+    ) -> ScopeResult<Option<bool>> {
+        let Some(previous) = self.file_state(&current.path)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(previous.content_hash != current.content_hash))
     }
 
     pub fn persist_extract_result(&self, result: &ExtractResult) -> ScopeResult<()> {
@@ -1290,6 +1363,10 @@ fn run_migrations(connection: &Connection) -> ScopeResult<()> {
 
     if current_version < 3 {
         connection.execute_batch(SYMBOL_EDGES_MIGRATION)?;
+        connection.pragma_update(None, "user_version", 3)?;
+    }
+
+    if current_version < 4 {
         connection.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)?;
     }
 
@@ -1312,6 +1389,8 @@ fn reconcile_schema(connection: &Connection) -> ScopeResult<()> {
         connection.execute_batch(SYMBOL_EDGES_MIGRATION)?;
     }
 
+    add_file_metadata_columns(connection)?;
+
     Ok(())
 }
 
@@ -1332,6 +1411,29 @@ fn table_exists(connection: &Connection, table: &str) -> ScopeResult<bool> {
         |row| row.get::<_, i64>(0),
     )?;
     Ok(exists != 0)
+}
+
+fn add_file_metadata_columns(connection: &Connection) -> ScopeResult<()> {
+    for (column, statement) in FILE_METADATA_MIGRATION_COLUMNS {
+        if !table_has_column(connection, "files", column)? {
+            connection.execute(statement, [])?;
+        }
+    }
+
+    Ok(())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> ScopeResult<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn bootstrap_meta(connection: &Connection) -> ScopeResult<()> {
@@ -1506,6 +1608,9 @@ mod tests {
             language: "rust".to_string(),
             parse_status: ParseStatus::Ok,
             is_barrel: false,
+            content_hash: Some(format!("hash:{path}")),
+            mtime_unix_seconds: Some(1),
+            size_bytes: Some(10),
         }
     }
 
@@ -1646,6 +1751,112 @@ mod tests {
         let deps = store.query_deps(&source.path).unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].path, target.path);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persists_file_metadata_and_classifies_content_changes() {
+        let dir = unique_temp_dir("db-file-metadata");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let file = sample_file("src/lib.rs");
+        store.upsert_file(&file).unwrap();
+
+        let persisted = store.file_state(&file.path).unwrap().unwrap();
+        assert_eq!(persisted.path, file.path);
+        assert_eq!(persisted.content_hash, file.content_hash);
+        assert_eq!(persisted.mtime_unix_seconds, file.mtime_unix_seconds);
+        assert_eq!(persisted.size_bytes, file.size_bytes);
+
+        let unchanged = store.classify_file_change(&file).unwrap();
+        assert_eq!(unchanged, Some(false));
+
+        let mut changed = file.clone();
+        changed.content_hash = Some("different-hash".to_string());
+        let changed_state = store.classify_file_change(&changed).unwrap();
+        assert_eq!(changed_state, Some(true));
+
+        let new_file = sample_file("src/new.rs");
+        let new_state = store.classify_file_change(&new_file).unwrap();
+        assert_eq!(new_state, None);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repairs_missing_file_metadata_columns() {
+        let dir = unique_temp_dir("db-repair-file-metadata");
+        let db_path = dir.join("index.db");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        connection.pragma_update(None, "user_version", 4).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS index_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                language TEXT NOT NULL,
+                parse_status TEXT NOT NULL,
+                is_barrel INTEGER NOT NULL DEFAULT 0,
+                indexed_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS imports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL,
+                raw_text TEXT NOT NULL,
+                resolved_file_id INTEGER,
+                import_path_kind TEXT NOT NULL,
+                external_pkg TEXT,
+                span_start INTEGER,
+                span_end INTEGER,
+                start_line INTEGER,
+                certainty TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS file_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_file_id INTEGER NOT NULL,
+                to_file_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                certainty TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS symbols (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                qualname TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                exported INTEGER NOT NULL,
+                span_start INTEGER NOT NULL,
+                span_end INTEGER NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS symbol_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_symbol_id INTEGER NOT NULL,
+                to_symbol_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                certainty TEXT NOT NULL,
+                call_line INTEGER NOT NULL
+            );",
+        ).unwrap();
+        drop(connection);
+
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), INDEX_SCHEMA_VERSION);
+        assert!(store.upsert_file(&sample_file("src/lib.rs")).is_ok());
+        let persisted = store
+            .file_state(&RepoPath::from("src/lib.rs"))
+            .unwrap()
+            .unwrap();
+        assert!(persisted.content_hash.is_some());
 
         std::fs::remove_dir_all(dir).unwrap();
     }

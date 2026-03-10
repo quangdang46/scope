@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::{
     json::JsonEnvelope,
     model::{
-        ArchCheckResult, Certainty, DependencyRecord, EdgeKind, ImpactChangeType,
+        ArchCheckResult, Certainty, ContextResult, DependencyRecord, EdgeKind, ImpactChangeType,
         ImpactTraversalRule, NodeKind, RepoPath, Span, SymbolKind, SymbolRecord,
         TraversalRecord, Visibility,
     },
@@ -86,6 +86,11 @@ pub struct WhyData {
     pub to: String,
     pub depth: Option<usize>,
     pub path: Vec<TraversalRecord>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContextData {
+    pub result: ContextResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -408,6 +413,10 @@ pub fn why(
             path,
         },
     )
+}
+
+pub fn context(result: ContextResult) -> JsonEnvelope<ContextData> {
+    JsonEnvelope::success("context", ContextData { result })
 }
 
 pub fn doctor(fix: bool) -> JsonEnvelope<DoctorData> {

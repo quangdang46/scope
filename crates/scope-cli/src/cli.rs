@@ -36,6 +36,8 @@ pub enum Commands {
     Explain(ExplainArgs),
     /// Explain the shortest path connecting two files or symbols
     Why(WhyArgs),
+    /// Recommend the minimum file set to read before making a change
+    Context(ContextArgs),
     /// Check architecture rules against indexed file dependencies
     Arch(ArchArgs),
     /// Inspect repository and index health
@@ -133,6 +135,16 @@ pub struct WhyArgs {
     pub to: String,
     #[arg(long)]
     pub depth: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ContextArgs {
+    #[arg(long = "target", required = true)]
+    pub targets: Vec<String>,
+    #[arg(long, value_enum)]
+    pub change_type: ChangeType,
+    #[arg(long)]
+    pub budget: Option<usize>,
 }
 
 #[derive(Debug, clap::Args)]

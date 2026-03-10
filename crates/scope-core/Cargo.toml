@@ -7,6 +7,7 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
+blake3.workspace = true
 glob.workspace = true
 ignore.workspace = true
 rusqlite.workspace = true
