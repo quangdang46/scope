@@ -577,8 +577,32 @@ fn benchmark_output_reports_full_and_incremental_timing_summary() {
         Some(3),
         stub::BenchmarkSummary {
             indexed_files: stats.files,
-            full_index_ms: 42,
-            incremental_index_ms: 7,
+            mutation: stub::BenchmarkMutationSummary {
+                target_file: RepoPath::from("src/auth/jwt.ts"),
+                change_kind: "append_comment",
+            },
+            full: stub::BenchmarkPhaseSummary {
+                avg_ms: 42,
+                min_ms: 40,
+                max_ms: 45,
+                files_processed_avg: stats.files,
+                changed_files_avg: stats.files,
+                deleted_files_avg: 0,
+                affected_files_avg: stats.files,
+            },
+            incremental: stub::BenchmarkPhaseSummary {
+                avg_ms: 7,
+                min_ms: 6,
+                max_ms: 9,
+                files_processed_avg: 2,
+                changed_files_avg: 1,
+                deleted_files_avg: 0,
+                affected_files_avg: 2,
+            },
+            comparison: stub::BenchmarkComparisonSummary {
+                saved_ms: 35,
+                incremental_pct_of_full: 16,
+            },
         },
     );
 
@@ -586,8 +610,10 @@ fn benchmark_output_reports_full_and_incremental_timing_summary() {
     assert_eq!(envelope.data.fixture.as_deref(), Some("ts_small"));
     assert_eq!(envelope.data.iterations, Some(3));
     assert_eq!(envelope.data.summary.indexed_files, stats.files);
-    assert_eq!(envelope.data.summary.full_index_ms, 42);
-    assert_eq!(envelope.data.summary.incremental_index_ms, 7);
+    assert_eq!(envelope.data.summary.mutation.target_file, RepoPath::from("src/auth/jwt.ts"));
+    assert_eq!(envelope.data.summary.full.avg_ms, 42);
+    assert_eq!(envelope.data.summary.incremental.avg_ms, 7);
+    assert_eq!(envelope.data.summary.comparison.saved_ms, 35);
 
     fs::remove_dir_all(repo).unwrap();
 }

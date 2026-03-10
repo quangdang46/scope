@@ -79,7 +79,7 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let indexed_files = index_repo(&context.paths.repo_root, &context.store)?;
+            let indexed = index_repo(&context.paths.repo_root, &context.store)?;
             let database = DatabaseInfo {
                 path: context.paths.db_path.display().to_string(),
                 schema_version: context.store.schema_version()?,
@@ -91,7 +91,7 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     args.no_git,
                     args.watch,
                     database,
-                    indexed_files,
+                    indexed.affected_files,
                 ),
                 compact,
             )
@@ -621,6 +621,24 @@ fn context_role_label(role: &ContextFileRole) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexRunStats {
+    indexed_files: usize,
+    changed_files: usize,
+    deleted_files: usize,
+    affected_files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BenchmarkIterationResult {
+    indexed_files: usize,
+    mutation_target: RepoPath,
+    full_ms: u128,
+    incremental_ms: u128,
+    full_stats: IndexRunStats,
+    incremental_stats: IndexRunStats,
+}
+
 fn run_benchmark(
     repo_root: &Path,
     fixture: Option<&str>,
@@ -632,49 +650,108 @@ fn run_benchmark(
         .transpose()?
         .unwrap_or_else(|| repo_root.to_path_buf());
 
-    let mut full_runs = Vec::with_capacity(iterations as usize);
-    let mut incremental_runs = Vec::with_capacity(iterations as usize);
-    let mut indexed_files = 0usize;
+    let mut runs = Vec::with_capacity(iterations as usize);
 
     for iteration in 0..iterations {
         let benchmark_root = prepare_benchmark_copy(&source_root, &format!("benchmark-{iteration}"))?;
-        let summary = benchmark_iteration(&benchmark_root)?;
-        indexed_files = summary.indexed_files;
-        full_runs.push(summary.full_index_ms);
-        incremental_runs.push(summary.incremental_index_ms);
+        let summary = benchmark_iteration(&benchmark_root, fixture)?;
+        runs.push(summary);
         fs::remove_dir_all(&benchmark_root)
             .map_err(|error| scope_core::ScopeError::io(&benchmark_root, error))?;
     }
 
+    let indexed_files = runs.first().map(|run| run.indexed_files).unwrap_or(0);
+    let mutation = scope_core::stub::BenchmarkMutationSummary {
+        target_file: runs
+            .first()
+            .map(|run| run.mutation_target.clone())
+            .unwrap_or_else(|| RepoPath::from("")),
+        change_kind: "append_comment",
+    };
+    let full = summarize_phase(
+        &runs,
+        |run| run.full_ms,
+        |run| &run.full_stats,
+    );
+    let incremental = summarize_phase(
+        &runs,
+        |run| run.incremental_ms,
+        |run| &run.incremental_stats,
+    );
+    let comparison = scope_core::stub::BenchmarkComparisonSummary {
+        saved_ms: full.avg_ms as i128 - incremental.avg_ms as i128,
+        incremental_pct_of_full: if full.avg_ms == 0 {
+            0
+        } else {
+            ((incremental.avg_ms * 100) / full.avg_ms) as u32
+        },
+    };
+
     Ok(scope_core::stub::BenchmarkSummary {
         indexed_files,
-        full_index_ms: average_duration_ms(&full_runs),
-        incremental_index_ms: average_duration_ms(&incremental_runs),
+        mutation,
+        full,
+        incremental,
+        comparison,
     })
 }
 
 fn benchmark_iteration(
     benchmark_root: &Path,
-) -> Result<scope_core::stub::BenchmarkSummary, scope_core::ScopeError> {
+    fixture: Option<&str>,
+) -> Result<BenchmarkIterationResult, scope_core::ScopeError> {
     let db_path = benchmark_root.join(".scope/index.db");
     let store = scope_core::Store::open(&db_path)?;
 
     let started = Instant::now();
-    let indexed_files = index_repo(benchmark_root, &store)?;
-    let full_index_ms = started.elapsed().as_millis();
+    let full_stats = index_repo(benchmark_root, &store)?;
+    let full_ms = started.elapsed().as_millis();
 
-    let target = select_benchmark_mutation_target(benchmark_root)?;
+    let target = select_benchmark_mutation_target(benchmark_root, fixture)?;
     apply_benchmark_edit(&target)?;
 
     let started = Instant::now();
-    let _ = index_repo(benchmark_root, &store)?;
-    let incremental_index_ms = started.elapsed().as_millis();
+    let incremental_stats = index_repo(benchmark_root, &store)?;
+    let incremental_ms = started.elapsed().as_millis();
 
-    Ok(scope_core::stub::BenchmarkSummary {
-        indexed_files,
-        full_index_ms,
-        incremental_index_ms,
+    Ok(BenchmarkIterationResult {
+        indexed_files: full_stats.indexed_files,
+        mutation_target: repo_relative_path(benchmark_root, &target),
+        full_ms,
+        incremental_ms,
+        full_stats,
+        incremental_stats,
     })
+}
+
+fn summarize_phase(
+    runs: &[BenchmarkIterationResult],
+    duration: impl Fn(&BenchmarkIterationResult) -> u128,
+    stats: impl Fn(&BenchmarkIterationResult) -> &IndexRunStats,
+) -> scope_core::stub::BenchmarkPhaseSummary {
+    let durations: Vec<_> = runs.iter().map(duration).collect();
+    let files_processed_avg = average_usize(
+        &runs.iter().map(|run| stats(run).affected_files).collect::<Vec<_>>(),
+    );
+    let changed_files_avg = average_usize(
+        &runs.iter().map(|run| stats(run).changed_files).collect::<Vec<_>>(),
+    );
+    let deleted_files_avg = average_usize(
+        &runs.iter().map(|run| stats(run).deleted_files).collect::<Vec<_>>(),
+    );
+    let affected_files_avg = average_usize(
+        &runs.iter().map(|run| stats(run).affected_files).collect::<Vec<_>>(),
+    );
+
+    scope_core::stub::BenchmarkPhaseSummary {
+        avg_ms: average_duration_ms(&durations),
+        min_ms: durations.iter().copied().min().unwrap_or(0),
+        max_ms: durations.iter().copied().max().unwrap_or(0),
+        files_processed_avg,
+        changed_files_avg,
+        deleted_files_avg,
+        affected_files_avg,
+    }
 }
 
 fn average_duration_ms(values: &[u128]) -> u128 {
@@ -682,6 +759,13 @@ fn average_duration_ms(values: &[u128]) -> u128 {
         return 0;
     }
     values.iter().sum::<u128>() / values.len() as u128
+}
+
+fn average_usize(values: &[usize]) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+    values.iter().sum::<usize>() / values.len()
 }
 
 fn fixture_root(name: &str) -> Result<PathBuf, scope_core::ScopeError> {
@@ -737,7 +821,18 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), scope_core::ScopeErr
     Ok(())
 }
 
-fn select_benchmark_mutation_target(repo_root: &Path) -> Result<PathBuf, scope_core::ScopeError> {
+fn select_benchmark_mutation_target(
+    repo_root: &Path,
+    fixture: Option<&str>,
+) -> Result<PathBuf, scope_core::ScopeError> {
+    if let Some(relative) = match fixture {
+        Some("rust_small") => Some("src/parser.rs"),
+        Some("ts_small") => Some("src/auth/jwt.ts"),
+        _ => None,
+    } {
+        return Ok(repo_root.join(relative));
+    }
+
     let entries = scan_repo(repo_root, &ScanConfig::default())?;
     let Some(path) = entries
         .into_iter()
@@ -758,6 +853,11 @@ fn select_benchmark_mutation_target(repo_root: &Path) -> Result<PathBuf, scope_c
     };
 
     Ok(path)
+}
+
+fn repo_relative_path(repo_root: &Path, path: &Path) -> RepoPath {
+    let relative = path.strip_prefix(repo_root).unwrap_or(path);
+    RepoPath::from(relative.to_string_lossy().to_string())
 }
 
 fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
@@ -1005,8 +1105,16 @@ mod tests {
         let summary = run_benchmark(&repo, Some("rust_small"), 1).unwrap();
 
         assert!(summary.indexed_files > 0);
-        assert!(summary.full_index_ms <= u128::MAX);
-        assert!(summary.incremental_index_ms <= u128::MAX);
+        assert_eq!(summary.mutation.target_file, RepoPath::from("src/parser.rs"));
+        assert_eq!(summary.mutation.change_kind, "append_comment");
+        assert_eq!(summary.full.files_processed_avg, summary.indexed_files);
+        assert!(summary.incremental.changed_files_avg >= 1);
+        assert!(summary.incremental.affected_files_avg >= summary.incremental.changed_files_avg);
+        assert!(summary.incremental.affected_files_avg <= summary.indexed_files);
+        assert!(summary.full.min_ms <= summary.full.avg_ms);
+        assert!(summary.full.avg_ms <= summary.full.max_ms);
+        assert!(summary.incremental.min_ms <= summary.incremental.avg_ms);
+        assert!(summary.incremental.avg_ms <= summary.incremental.max_ms);
     }
 
     #[test]
@@ -1014,14 +1122,14 @@ mod tests {
         let repo = prepare_fixture_copy("rust_small");
         let _ = fs::remove_file(repo.join(".scope/index.db"));
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
-        let initial_count = index_repo(&repo, &store).unwrap();
-        assert_eq!(initial_count, 5);
+        let initial = index_repo(&repo, &store).unwrap();
+        assert_eq!(initial.affected_files, 5);
         assert_eq!(store.query_reverse_deps(&RepoPath::from("src/parser.rs")).unwrap().len(), 2);
 
         fs::remove_file(repo.join("src/parser.rs")).unwrap();
 
         let rebuilt = index_repo(&repo, &store).unwrap();
-        assert_eq!(rebuilt, 2);
+        assert_eq!(rebuilt.affected_files, 2);
         assert!(store.list_indexed_files().unwrap().iter().all(|path| path != &RepoPath::from("src/parser.rs")));
         assert!(store.query_symbols(&RepoPath::from("src/parser.rs"), false, None).unwrap().is_empty());
         assert!(store.query_reverse_deps(&RepoPath::from("src/parser.rs")).unwrap().is_empty());
@@ -1036,7 +1144,7 @@ mod tests {
 fn index_repo(
     repo_root: &std::path::Path,
     store: &scope_core::Store,
-) -> Result<usize, scope_core::ScopeError> {
+) -> Result<IndexRunStats, scope_core::ScopeError> {
     let entries = scan_repo(repo_root, &ScanConfig::default())?;
     let extracts: Vec<_> = entries
         .into_iter()
@@ -1069,8 +1177,14 @@ fn index_repo(
     if indexed_paths.is_empty() {
         let mut all_extracts: Vec<_> = extract_map.into_values().collect();
         all_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
+        let indexed_files = all_extracts.len();
         store.persist_extract_results(&all_extracts)?;
-        return Ok(all_extracts.len());
+        return Ok(IndexRunStats {
+            indexed_files,
+            changed_files: indexed_files,
+            deleted_files: 0,
+            affected_files: indexed_files,
+        });
     }
 
     let mut changed_or_new = Vec::new();
@@ -1114,5 +1228,10 @@ fn index_repo(
         store.refresh_call_edges(extract)?;
     }
 
-    Ok(affected_extracts.len())
+    Ok(IndexRunStats {
+        indexed_files: extract_map.len(),
+        changed_files: closure_seeds.len().saturating_sub(deleted_paths.len()),
+        deleted_files: deleted_paths.len(),
+        affected_files: affected_extracts.len(),
+    })
 }
