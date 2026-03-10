@@ -1,6 +1,10 @@
 mod cli;
 
-use std::{env, fs, time::UNIX_EPOCH};
+use std::{
+    collections::{HashMap, HashSet},
+    env, fs,
+    time::UNIX_EPOCH,
+};
 
 use clap::Parser;
 use cli::{ArchCommand, ChangeType, Cli, Commands};
@@ -838,6 +842,29 @@ mod tests {
 
         fs::remove_dir_all(repo).unwrap();
     }
+
+    #[test]
+    fn incremental_index_removes_deleted_files_and_rebuilds_dependents() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = fs::remove_file(repo.join(".scope/index.db"));
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let initial_count = index_repo(&repo, &store).unwrap();
+        assert_eq!(initial_count, 5);
+        assert_eq!(store.query_reverse_deps(&RepoPath::from("src/parser.rs")).unwrap().len(), 2);
+
+        fs::remove_file(repo.join("src/parser.rs")).unwrap();
+
+        let rebuilt = index_repo(&repo, &store).unwrap();
+        assert_eq!(rebuilt, 2);
+        assert!(store.list_indexed_files().unwrap().iter().all(|path| path != &RepoPath::from("src/parser.rs")));
+        assert!(store.query_symbols(&RepoPath::from("src/parser.rs"), false, None).unwrap().is_empty());
+        assert!(store.query_reverse_deps(&RepoPath::from("src/parser.rs")).unwrap().is_empty());
+        let lib_deps = store.query_deps(&RepoPath::from("src/lib.rs")).unwrap();
+        assert!(lib_deps.iter().all(|dep| dep.path != RepoPath::from("src/parser.rs")));
+        assert!(store.query_deps(&RepoPath::from("src/resolver.rs")).unwrap().is_empty());
+
+        fs::remove_dir_all(repo).unwrap();
+    }
 }
 
 fn index_repo(
@@ -867,7 +894,59 @@ fn index_repo(
         })
         .collect();
 
-    store.persist_extract_results(&extracts)?;
+    let extract_map: HashMap<RepoPath, scope_core::ExtractResult> = extracts
+        .into_iter()
+        .map(|extract| (extract.file.path.clone(), extract))
+        .collect();
+    let scanned_paths: HashSet<_> = extract_map.keys().cloned().collect();
+    let indexed_paths = store.list_indexed_files()?;
+    if indexed_paths.is_empty() {
+        let mut all_extracts: Vec<_> = extract_map.into_values().collect();
+        all_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
+        store.persist_extract_results(&all_extracts)?;
+        return Ok(all_extracts.len());
+    }
 
-    Ok(extracts.len())
+    let mut changed_or_new = Vec::new();
+    for extract in extract_map.values() {
+        match store.classify_file_change(&extract.file)? {
+            None | Some(true) => changed_or_new.push(extract.file.path.clone()),
+            Some(false) => {}
+        }
+    }
+
+    let deleted_paths: Vec<_> = indexed_paths
+        .into_iter()
+        .filter(|path| !scanned_paths.contains(path))
+        .collect();
+
+    let mut affected_paths: HashSet<_> = changed_or_new.iter().cloned().collect();
+    let mut closure_seeds = changed_or_new;
+    closure_seeds.extend(deleted_paths.iter().cloned());
+
+    for dependent in store.reverse_dependency_closure(&closure_seeds)? {
+        affected_paths.insert(dependent);
+    }
+
+    for path in &deleted_paths {
+        let _ = store.delete_file(path)?;
+    }
+
+    let mut affected_extracts: Vec<_> = affected_paths
+        .into_iter()
+        .filter_map(|path| extract_map.get(&path).cloned())
+        .collect();
+    affected_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
+
+    for extract in &affected_extracts {
+        store.upsert_file(&extract.file)?;
+    }
+    for extract in &affected_extracts {
+        store.persist_extract_result(extract)?;
+    }
+    for extract in &affected_extracts {
+        store.refresh_call_edges(extract)?;
+    }
+
+    Ok(affected_extracts.len())
 }

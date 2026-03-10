@@ -400,7 +400,7 @@ impl Store {
     }
 
     pub fn query_stability(&self, file: Option<&RepoPath>) -> ScopeResult<StabilityResult> {
-        let all_files = self.query_indexed_paths()?;
+        let all_files = self.list_indexed_files()?;
         let edges = self.query_file_edges()?;
         let mut fan_in: HashMap<RepoPath, usize> = HashMap::new();
         let mut fan_out: HashMap<RepoPath, usize> = HashMap::new();
@@ -1029,12 +1029,60 @@ impl Store {
             .unwrap_or(64))
     }
 
-    fn query_indexed_paths(&self) -> ScopeResult<Vec<RepoPath>> {
+    pub fn list_indexed_files(&self) -> ScopeResult<Vec<RepoPath>> {
         let mut statement = self
             .connection
             .prepare("SELECT path FROM files ORDER BY path ASC")?;
         let rows = statement.query_map([], |row| Ok(RepoPath(row.get::<_, String>(0)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn delete_file(&self, path: &RepoPath) -> ScopeResult<bool> {
+        let deleted = self
+            .connection
+            .execute("DELETE FROM files WHERE path = ?1", [path.0.as_str()])?;
+        Ok(deleted > 0)
+    }
+
+    pub fn reverse_dependency_closure(&self, paths: &[RepoPath]) -> ScopeResult<Vec<RepoPath>> {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        for path in paths {
+            let Some(file_id) = self.file_id(path)? else {
+                continue;
+            };
+            visited.insert(file_id);
+            queue.push_back(file_id);
+        }
+
+        let mut dependents = Vec::new();
+
+        while let Some(file_id) = queue.pop_front() {
+            let mut statement = self.connection.prepare(
+                "SELECT DISTINCT importer_files.id, importer_files.path
+                 FROM file_edges
+                 JOIN files AS importer_files ON importer_files.id = file_edges.from_file_id
+                 WHERE file_edges.to_file_id = ?1
+                   AND file_edges.kind IN ('import', 'module')
+                 ORDER BY importer_files.path ASC",
+            )?;
+            let rows = statement.query_map([file_id], |row| {
+                Ok((row.get::<_, i64>(0)?, RepoPath(row.get::<_, String>(1)?)))
+            })?;
+
+            for row in rows {
+                let (dependent_id, dependent_path) = row?;
+                if visited.insert(dependent_id) {
+                    dependents.push(dependent_path.clone());
+                    queue.push_back(dependent_id);
+                }
+            }
+        }
+
+        dependents.sort();
+        dependents.dedup();
+        Ok(dependents)
     }
 
     fn path_for_file_id(&self, file_id: i64) -> ScopeResult<Option<RepoPath>> {
@@ -2558,6 +2606,76 @@ mod tests {
             reverse[0].import_text.as_deref(),
             Some("use crate::parser;")
         );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lists_indexed_files_deletes_files_and_computes_reverse_dependency_closure() {
+        let dir = unique_temp_dir("db-incremental-helpers");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let parser = sample_file("src/parser.rs");
+        let resolver = sample_file("src/resolver.rs");
+        let app = sample_file("src/app.rs");
+
+        let extracts = vec![
+            ExtractResult {
+                file: parser.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: resolver.clone(),
+                imports: vec![ImportRecord {
+                    file: resolver.path.clone(),
+                    raw_text: "use crate::parser;".to_string(),
+                    import_path: ImportPath::Relative(parser.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: app.clone(),
+                imports: vec![ImportRecord {
+                    file: app.path.clone(),
+                    raw_text: "use crate::resolver;".to_string(),
+                    import_path: ImportPath::Relative(resolver.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
+
+        let indexed = store.list_indexed_files().unwrap();
+        assert_eq!(indexed, vec![app.path.clone(), parser.path.clone(), resolver.path.clone()]);
+
+        let closure = store
+            .reverse_dependency_closure(std::slice::from_ref(&parser.path))
+            .unwrap();
+        assert_eq!(closure, vec![app.path.clone(), resolver.path.clone()]);
+
+        assert!(store.delete_file(&parser.path).unwrap());
+        assert!(!store.delete_file(&parser.path).unwrap());
+        assert!(store.query_reverse_deps(&parser.path).unwrap().is_empty());
+        assert_eq!(store.list_indexed_files().unwrap(), vec![app.path.clone(), resolver.path.clone()]);
 
         std::fs::remove_dir_all(dir).unwrap();
     }
