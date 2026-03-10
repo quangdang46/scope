@@ -4,8 +4,8 @@ use crate::{
     json::JsonEnvelope,
     model::{
         ArchCheckResult, Certainty, ContextResult, DependencyRecord, EdgeKind, ImpactChangeType,
-        ImpactTraversalRule, NodeKind, RepoPath, RiskResult, Span, StabilityResult, SymbolKind,
-        SymbolRecord, TraversalRecord, Visibility,
+        ImpactTraversalRule, NodeKind, PublicSurface, PublicSurfaceDiff, RepoPath, RiskResult,
+        Span, StabilityResult, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
     },
     DatabaseInfo, IndexHealthStats,
 };
@@ -163,6 +163,19 @@ pub struct StabilityData {
 #[derive(Debug, Serialize)]
 pub struct RiskData {
     pub result: RiskResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SurfaceData {
+    pub target: RepoPath,
+    pub surface: PublicSurface,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SurfaceDiffData {
+    pub before: RepoPath,
+    pub after: RepoPath,
+    pub diff: PublicSurfaceDiff,
 }
 
 pub fn index(
@@ -559,6 +572,25 @@ pub fn stability(result: StabilityResult) -> JsonEnvelope<StabilityData> {
 
 pub fn risk(result: RiskResult) -> JsonEnvelope<RiskData> {
     JsonEnvelope::success("risk", RiskData { result })
+}
+
+pub fn surface(target: RepoPath, surface: PublicSurface) -> JsonEnvelope<SurfaceData> {
+    JsonEnvelope::success("surface", SurfaceData { target, surface })
+}
+
+pub fn surface_diff(
+    before: RepoPath,
+    after: RepoPath,
+    diff: PublicSurfaceDiff,
+) -> JsonEnvelope<SurfaceDiffData> {
+    JsonEnvelope::success(
+        "surface-diff",
+        SurfaceDiffData {
+            before,
+            after,
+            diff,
+        },
+    )
 }
 
 pub fn mcp_stub_message() -> JsonEnvelope<TraversalRecord> {

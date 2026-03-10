@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use crate::model::CallSiteRecord;
 use crate::{
     Certainty, DiagnosticSeverity, ExportRecord, ExtractResult, FileRecord, ImportPath,
     ImportRecord, ModuleRecord, ParseDiagnostic, ParseStatus, RepoPath, ScanEntry, Span,
     SupportedLanguage, SymbolKind, SymbolRecord, Visibility,
 };
-use crate::model::CallSiteRecord;
 
 pub trait Adapter: Send + Sync {
     /// File extensions handled by this adapter, without leading dots.
@@ -113,15 +113,17 @@ impl Adapter for RustAdapter {
                 function_qualname_for_line,
             ));
 
-            let declared_function_qualname = parse_top_level_symbol(trimmed, &entry.path, &span).map(|symbol| {
-                let qualname = if symbol.kind == SymbolKind::Function {
-                    Some(symbol.qualname.clone())
-                } else {
-                    None
-                };
-                symbols.push(symbol);
-                qualname
-            }).flatten();
+            let declared_function_qualname = parse_top_level_symbol(trimmed, &entry.path, &span)
+                .map(|symbol| {
+                    let qualname = if symbol.kind == SymbolKind::Function {
+                        Some(symbol.qualname.clone())
+                    } else {
+                        None
+                    };
+                    symbols.push(symbol);
+                    qualname
+                })
+                .flatten();
 
             if let Some(import_record) =
                 parse_use_declaration(trimmed, &entry.path, &crate_root, &module_dir, &span)
@@ -143,7 +145,10 @@ impl Adapter for RustAdapter {
             let previous_brace_depth = brace_depth;
             brace_depth += line_open_braces - line_close_braces;
 
-            if previous_brace_depth == 0 && current_function_qualname.is_none() && line_open_braces > line_close_braces {
+            if previous_brace_depth == 0
+                && current_function_qualname.is_none()
+                && line_open_braces > line_close_braces
+            {
                 current_function_qualname = declared_function_qualname;
             }
 
@@ -207,7 +212,8 @@ impl Adapter for TsJsAdapter {
                 saw_non_export_statement = true;
             }
 
-            if let Some(import_record) = parse_ts_js_import(trimmed, &entry.path, &repo_root, &span) {
+            if let Some(import_record) = parse_ts_js_import(trimmed, &entry.path, &repo_root, &span)
+            {
                 imports.push(import_record);
             }
             if let Some(diagnostic) = parse_ts_js_dynamic_pattern(trimmed, &entry.path, &span) {
@@ -217,7 +223,8 @@ impl Adapter for TsJsAdapter {
             if let Some(export_record) = parse_ts_js_named_export(trimmed, &entry.path, &span) {
                 exports.push(export_record);
             }
-            if let Some(symbol) = parse_ts_js_reexport_function_binding(trimmed, &entry.path, &span) {
+            if let Some(symbol) = parse_ts_js_reexport_function_binding(trimmed, &entry.path, &span)
+            {
                 symbols.push(symbol);
             }
 
@@ -230,27 +237,28 @@ impl Adapter for TsJsAdapter {
                 function_qualname_for_line,
             ));
 
-            let declared_function_qualname = parse_ts_js_top_level_symbol(trimmed, &entry.path, &span)
-                .map(|symbol| {
-                    let qualname = if symbol.kind == SymbolKind::Function {
-                        Some(symbol.qualname.clone())
-                    } else {
-                        None
-                    };
-                    if symbol.exported {
-                        exports.push(ExportRecord {
-                            file: entry.path.clone(),
-                            name: symbol.name.clone(),
-                            qualname: Some(symbol.qualname.clone()),
-                            kind: symbol.kind.clone(),
-                            visibility: symbol.visibility.clone(),
-                            span: symbol.span.clone(),
-                        });
-                    }
-                    symbols.push(symbol);
-                    qualname
-                })
-                .flatten();
+            let declared_function_qualname =
+                parse_ts_js_top_level_symbol(trimmed, &entry.path, &span)
+                    .map(|symbol| {
+                        let qualname = if symbol.kind == SymbolKind::Function {
+                            Some(symbol.qualname.clone())
+                        } else {
+                            None
+                        };
+                        if symbol.exported {
+                            exports.push(ExportRecord {
+                                file: entry.path.clone(),
+                                name: symbol.name.clone(),
+                                qualname: Some(symbol.qualname.clone()),
+                                kind: symbol.kind.clone(),
+                                visibility: symbol.visibility.clone(),
+                                span: symbol.span.clone(),
+                            });
+                        }
+                        symbols.push(symbol);
+                        qualname
+                    })
+                    .flatten();
 
             let previous_brace_depth = brace_depth;
             brace_depth += line_open_braces - line_close_braces;
@@ -527,7 +535,11 @@ fn parse_ts_js_dynamic_pattern(
     })
 }
 
-fn parse_ts_js_top_level_symbol(trimmed: &str, file: &RepoPath, span: &Span) -> Option<SymbolRecord> {
+fn parse_ts_js_top_level_symbol(
+    trimmed: &str,
+    file: &RepoPath,
+    span: &Span,
+) -> Option<SymbolRecord> {
     let (body, exported) = if let Some(remainder) = trimmed.strip_prefix("export ") {
         (remainder.trim_start(), true)
     } else {
@@ -595,7 +607,10 @@ fn normalize_ts_js_import_path(file: &RepoPath, repo_root: &Path, specifier: &st
             let normalized_repo_root = repo_root
                 .canonicalize()
                 .unwrap_or_else(|_| repo_root.to_path_buf());
-            return ImportPath::Relative(path_under_explicit_repo(&normalized, &normalized_repo_root));
+            return ImportPath::Relative(path_under_explicit_repo(
+                &normalized,
+                &normalized_repo_root,
+            ));
         }
     }
 
@@ -945,7 +960,10 @@ fn callable_candidate_before_paren(line: &str, paren_index: usize) -> Option<Cal
     }
 
     let candidate = &line[start..end];
-    if !candidate.chars().any(|character| character.is_ascii_alphabetic() || character == '_') {
+    if !candidate
+        .chars()
+        .any(|character| character.is_ascii_alphabetic() || character == '_')
+    {
         return None;
     }
 
@@ -995,7 +1013,10 @@ fn declared_function_name_on_line(trimmed: &str) -> Option<String> {
         return Some(name);
     }
 
-    let body = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim_start();
+    let body = trimmed
+        .strip_prefix("export ")
+        .unwrap_or(trimmed)
+        .trim_start();
     if let Some(name) = if body.starts_with("async function ") {
         identifier_after_prefix(body, "async function ")
     } else if body.starts_with("function ") {
@@ -1020,8 +1041,7 @@ fn looks_like_macro_invocation(line: &str, candidate_start: usize) -> bool {
 fn is_non_call_keyword(candidate: &str) -> bool {
     matches!(
         candidate,
-        "if"
-            | "match"
+        "if" | "match"
             | "while"
             | "loop"
             | "for"
@@ -1115,13 +1135,19 @@ mod tests {
         let middleware_result = adapter.extract(&middleware_entry, &middleware_source);
 
         assert_eq!(middleware_result.imports.len(), 1);
-        assert_eq!(middleware_result.imports[0].raw_text, "import { verify } from \"./jwt\";");
+        assert_eq!(
+            middleware_result.imports[0].raw_text,
+            "import { verify } from \"./jwt\";"
+        );
         assert_eq!(
             middleware_result.imports[0].import_path,
             ImportPath::Relative(RepoPath::from("src/auth/jwt.ts"))
         );
         assert_eq!(middleware_result.symbols[0].name, "verifyToken");
-        assert_eq!(middleware_result.symbols[0].qualname, "auth::middleware::verifyToken");
+        assert_eq!(
+            middleware_result.symbols[0].qualname,
+            "auth::middleware::verifyToken"
+        );
         assert_eq!(middleware_result.call_sites[0].callee_name, "verify");
         assert_eq!(
             middleware_result.call_sites[0].caller_qualname,
@@ -1129,7 +1155,8 @@ mod tests {
         );
         assert!(!middleware_result.file.is_barrel);
 
-        let index_entry = fixture_entry_in("ts_small", "src/index.ts", SupportedLanguage::TypeScript);
+        let index_entry =
+            fixture_entry_in("ts_small", "src/index.ts", SupportedLanguage::TypeScript);
         let index_source = std::fs::read_to_string(&index_entry.absolute_path).unwrap();
         let index_result = adapter.extract(&index_entry, &index_source);
 
@@ -1147,7 +1174,11 @@ mod tests {
             ]
         );
 
-        let alias_entry = fixture_entry_in("ts_small", "src/auth/aliases.ts", SupportedLanguage::TypeScript);
+        let alias_entry = fixture_entry_in(
+            "ts_small",
+            "src/auth/aliases.ts",
+            SupportedLanguage::TypeScript,
+        );
         let alias_source = std::fs::read_to_string(&alias_entry.absolute_path).unwrap();
         let alias_result = adapter.extract(&alias_entry, &alias_source);
 
@@ -1216,17 +1247,35 @@ mod tests {
         let names_and_kinds: Vec<_> = result
             .symbols
             .iter()
-            .map(|symbol| (symbol.name.clone(), symbol.kind.clone(), symbol.visibility.clone()))
+            .map(|symbol| {
+                (
+                    symbol.name.clone(),
+                    symbol.kind.clone(),
+                    symbol.visibility.clone(),
+                )
+            })
             .collect();
 
         assert_eq!(
             names_and_kinds,
             vec![
                 ("parser".to_string(), SymbolKind::Module, Visibility::Public),
-                ("resolver".to_string(), SymbolKind::Module, Visibility::Public),
+                (
+                    "resolver".to_string(),
+                    SymbolKind::Module,
+                    Visibility::Public
+                ),
                 ("utils".to_string(), SymbolKind::Module, Visibility::Public),
-                ("greet".to_string(), SymbolKind::Function, Visibility::Public),
-                ("farewell".to_string(), SymbolKind::Function, Visibility::Public),
+                (
+                    "greet".to_string(),
+                    SymbolKind::Function,
+                    Visibility::Public
+                ),
+                (
+                    "farewell".to_string(),
+                    SymbolKind::Function,
+                    Visibility::Public
+                ),
             ]
         );
         assert_eq!(result.symbols[0].qualname, "lib::parser");
@@ -1242,7 +1291,11 @@ mod tests {
         let source = std::fs::read_to_string(&entry.absolute_path).unwrap();
 
         let result = adapter.extract(&entry, &source);
-        let names: Vec<_> = result.symbols.iter().map(|symbol| symbol.name.clone()).collect();
+        let names: Vec<_> = result
+            .symbols
+            .iter()
+            .map(|symbol| symbol.name.clone())
+            .collect();
         let visibilities: Vec<_> = result
             .symbols
             .iter()
@@ -1324,9 +1377,30 @@ mod tests {
         assert_eq!(
             extracted,
             vec![
-                (Some("example::caller".to_string()), "outer".to_string(), None, false, 4, 9),
-                (Some("example::caller".to_string()), "inner".to_string(), None, false, 10, 15),
-                (Some("example::caller".to_string()), "join".to_string(), None, true, 25, 29),
+                (
+                    Some("example::caller".to_string()),
+                    "outer".to_string(),
+                    None,
+                    false,
+                    4,
+                    9
+                ),
+                (
+                    Some("example::caller".to_string()),
+                    "inner".to_string(),
+                    None,
+                    false,
+                    10,
+                    15
+                ),
+                (
+                    Some("example::caller".to_string()),
+                    "join".to_string(),
+                    None,
+                    true,
+                    25,
+                    29
+                ),
             ]
         );
     }
@@ -1348,7 +1422,10 @@ mod tests {
             calls,
             vec![
                 (Some("parser::parse".to_string()), "tokenize".to_string()),
-                (Some("parser::tokenize".to_string()), "split_whitespace".to_string()),
+                (
+                    Some("parser::tokenize".to_string()),
+                    "split_whitespace".to_string()
+                ),
                 (Some("parser::tokenize".to_string()), "map".to_string()),
                 (Some("parser::tokenize".to_string()), "collect".to_string()),
             ]
@@ -1359,36 +1436,56 @@ mod tests {
     fn skips_macros_comments_and_control_flow_keywords() {
         let file = RepoPath::from("src/example.rs");
 
-        assert!(extract_call_sites_from_line("println!(\"{}\", foo());", 0, 0, &file, None)
-            .into_iter()
-            .map(|call| call.callee_name)
-            .eq(vec!["foo".to_string()]));
-        assert!(extract_call_sites_from_line("if condition(foo()) {}", 0, 0, &file, None)
-            .into_iter()
-            .map(|call| call.callee_name)
-            .eq(vec!["condition".to_string(), "foo".to_string()]));
+        assert!(
+            extract_call_sites_from_line("println!(\"{}\", foo());", 0, 0, &file, None)
+                .into_iter()
+                .map(|call| call.callee_name)
+                .eq(vec!["foo".to_string()])
+        );
+        assert!(
+            extract_call_sites_from_line("if condition(foo()) {}", 0, 0, &file, None)
+                .into_iter()
+                .map(|call| call.callee_name)
+                .eq(vec!["condition".to_string(), "foo".to_string()])
+        );
         assert!(extract_call_sites_from_line("// ignored_call()", 0, 0, &file, None).is_empty());
     }
 
     #[test]
     fn ts_js_dynamic_patterns_surface_partial_diagnostics() {
         let adapter = TsJsAdapter;
-        let entry = fixture_entry_in("ts_small", "src/auth/middleware.ts", SupportedLanguage::TypeScript);
+        let entry = fixture_entry_in(
+            "ts_small",
+            "src/auth/middleware.ts",
+            SupportedLanguage::TypeScript,
+        );
         let source = "const auth = await import(path);\nconst plugin = require(factoryName);\n";
 
         let result = adapter.extract(&entry, source);
 
         assert_eq!(result.file.parse_status, ParseStatus::Partial);
         assert_eq!(result.parse_diagnostics.len(), 2);
-        assert_eq!(result.parse_diagnostics[0].severity, DiagnosticSeverity::Warning);
-        assert_eq!(result.parse_diagnostics[0].message, "dynamic import is not resolved yet");
-        assert_eq!(result.parse_diagnostics[1].message, "computed require is not resolved yet");
+        assert_eq!(
+            result.parse_diagnostics[0].severity,
+            DiagnosticSeverity::Warning
+        );
+        assert_eq!(
+            result.parse_diagnostics[0].message,
+            "dynamic import is not resolved yet"
+        );
+        assert_eq!(
+            result.parse_diagnostics[1].message,
+            "computed require is not resolved yet"
+        );
         assert!(result.imports.is_empty());
     }
 
     #[test]
     fn normalizes_rust_visibility_semantics_conservatively() {
-        assert_eq!(visibility_semantics("pub fn greet() {} ").visibility, Visibility::Public);
+        assert_eq!(
+            visibility_semantics("pub fn greet() {} ").visibility,
+            Visibility::Public
+        );
         assert!(visibility_semantics("pub fn greet() {} ").exported);
 
         assert_eq!(
@@ -1415,7 +1512,10 @@ mod tests {
         );
         assert!(!visibility_semantics("pub(in crate::internal) fn greet() {}").exported);
 
-        assert_eq!(visibility_semantics("fn greet() {}").visibility, Visibility::Local);
+        assert_eq!(
+            visibility_semantics("fn greet() {}").visibility,
+            Visibility::Local
+        );
         assert!(!visibility_semantics("fn greet() {}").exported);
     }
 
@@ -1439,12 +1539,9 @@ mod tests {
         assert_eq!(module_symbol.visibility, Visibility::Module);
         assert!(!module_symbol.exported);
 
-        let unknown_symbol = parse_top_level_symbol(
-            "pub(in crate::internal) type Alias = u32;",
-            &file,
-            &span,
-        )
-        .unwrap();
+        let unknown_symbol =
+            parse_top_level_symbol("pub(in crate::internal) type Alias = u32;", &file, &span)
+                .unwrap();
         assert_eq!(unknown_symbol.visibility, Visibility::Unknown);
         assert!(!unknown_symbol.exported);
     }

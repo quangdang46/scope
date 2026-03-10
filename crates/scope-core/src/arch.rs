@@ -2,11 +2,15 @@ use std::{collections::HashSet, fs, path::Path};
 
 use glob::Pattern;
 
-use crate::{ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation, RepoPath, ScopeError, ScopeResult, Store};
+use crate::{
+    ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation, RepoPath,
+    ScopeError, ScopeResult, Store,
+};
 
 pub fn load_arch_config(repo_root: &Path) -> ScopeResult<ArchConfig> {
     let config_path = repo_root.join(".scope/arch.toml");
-    let source = fs::read_to_string(&config_path).map_err(|error| ScopeError::io(&config_path, error))?;
+    let source =
+        fs::read_to_string(&config_path).map_err(|error| ScopeError::io(&config_path, error))?;
     let config: ArchConfig = toml::from_str(&source)
         .map_err(|error| ScopeError::InvalidInput(format!("invalid arch config: {error}")))?;
     validate_arch_config(&config)?;
@@ -27,17 +31,24 @@ pub fn arch_check(store: &Store, config: &ArchConfig) -> ScopeResult<ArchCheckRe
         };
         checked_layered_edges += 1;
 
-        for rule in config.rules.iter().filter(|rule| rule.from == from_layer.name) {
-            if rule.may_not_import.iter().any(|target| target == &to_layer.name) {
+        for rule in config
+            .rules
+            .iter()
+            .filter(|rule| rule.from == from_layer.name)
+        {
+            if rule
+                .may_not_import
+                .iter()
+                .any(|target| target == &to_layer.name)
+            {
                 violations.push(ArchViolation {
                     from_file: edge.from_file.clone(),
                     to_file: edge.to_file.clone(),
                     from_layer: from_layer.name.clone(),
                     to_layer: to_layer.name.clone(),
-                    message: rule
-                        .message
-                        .clone()
-                        .unwrap_or_else(|| format!("{} may not import {}", rule.from, to_layer.name)),
+                    message: rule.message.clone().unwrap_or_else(|| {
+                        format!("{} may not import {}", rule.from, to_layer.name)
+                    }),
                 });
             }
         }
@@ -77,7 +88,10 @@ fn validate_arch_config(config: &ArchConfig) -> ScopeResult<()> {
             )));
         }
         Pattern::new(&layer.pattern).map_err(|error| {
-            ScopeError::InvalidInput(format!("invalid layer pattern '{}': {error}", layer.pattern))
+            ScopeError::InvalidInput(format!(
+                "invalid layer pattern '{}': {error}",
+                layer.pattern
+            ))
         })?;
     }
 
@@ -101,10 +115,16 @@ fn validate_arch_config(config: &ArchConfig) -> ScopeResult<()> {
     Ok(())
 }
 
-fn resolve_layer<'a>(layers: &'a [ArchLayer], path: &RepoPath) -> ScopeResult<Option<&'a ArchLayer>> {
+fn resolve_layer<'a>(
+    layers: &'a [ArchLayer],
+    path: &RepoPath,
+) -> ScopeResult<Option<&'a ArchLayer>> {
     for layer in layers {
         let pattern = Pattern::new(&layer.pattern).map_err(|error| {
-            ScopeError::InvalidInput(format!("invalid layer pattern '{}': {error}", layer.pattern))
+            ScopeError::InvalidInput(format!(
+                "invalid layer pattern '{}': {error}",
+                layer.pattern
+            ))
         })?;
         if pattern.matches(&path.0) {
             return Ok(Some(layer));

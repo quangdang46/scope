@@ -46,7 +46,7 @@ fn risk_invalid_days_emits_json_error_on_stderr() {
 #[test]
 fn risk_invalid_threshold_emits_json_error_on_stderr() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
-        .args(["risk", "--threshold", "-1"])
+        .args(["risk", "--threshold=-1"])
         .output()
         .expect("scope binary should run");
 

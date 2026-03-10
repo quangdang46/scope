@@ -9,7 +9,9 @@ use std::{
 };
 
 use clap::Parser;
-use cli::{ArchCommand, ChangeType, Cli, Commands, RiskSortArg, StabilitySortArg};
+use cli::{
+    ArchCommand, ChangeType, Cli, Commands, RiskSortArg, StabilitySortArg, SurfaceCommand,
+};
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, DatabaseInfo,
     RiskSort, ScanConfig, SymbolKind, Verbosity,
@@ -257,6 +259,36 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                         exit_code = 1;
                     }
                     serialize_output(&scope_core::stub::arch_check(result), compact)
+                }
+            }
+        }
+        Commands::Surface(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            match (args.command, args.target) {
+                (Some(SurfaceCommand::Diff(diff_args)), None) => {
+                    let before = resolve_surface_target(&context.store, &diff_args.before)?;
+                    let after = resolve_surface_target(&context.store, &diff_args.after)?;
+                    let diff = context.store.diff_public_surface(&before, &after)?;
+                    serialize_output(&scope_core::stub::surface_diff(before, after, diff), compact)
+                }
+                (None, Some(target)) => {
+                    let path = resolve_surface_target(&context.store, &target)?;
+                    let surface = context.store.query_public_surface(&path)?;
+                    serialize_output(&scope_core::stub::surface(path, surface), compact)
+                }
+                (None, None) => {
+                    return Err(scope_core::ScopeError::InvalidInput(
+                        "surface requires a target or diff subcommand".to_string(),
+                    ));
+                }
+                (Some(_), Some(_)) => {
+                    return Err(scope_core::ScopeError::InvalidInput(
+                        "surface target cannot be combined with a subcommand".to_string(),
+                    ));
                 }
             }
         }
@@ -670,6 +702,15 @@ fn target_file_for_target(
     }
 }
 
+fn resolve_surface_target(
+    store: &scope_core::Store,
+    target: &str,
+) -> Result<RepoPath, scope_core::ScopeError> {
+    target_file_for_target(store, target)?.ok_or_else(|| {
+        scope_core::ScopeError::InvalidInput(format!("missing indexed file for target: {target}"))
+    })
+}
+
 fn looks_like_symbol(target: &str) -> bool {
     target.contains("::")
         && !target.ends_with(".rs")
@@ -998,9 +1039,13 @@ fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_context_pack, index_repo, render_cli_error, run_benchmark, serialize_output,
+        build_context_pack, index_repo, render_cli_error, resolve_surface_target, run_benchmark,
+        serialize_output,
     };
-    use scope_core::{RepoPath, RiskRecord, RiskResult, StabilityRecord, StabilityResult};
+    use scope_core::{
+        PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol, RepoPath,
+        RiskRecord, RiskResult, StabilityRecord, StabilityResult, SymbolKind, Visibility,
+    };
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1237,6 +1282,55 @@ mod tests {
     }
 
     #[test]
+    fn serialize_output_surface_command_uses_expected_envelope_shape() {
+        let surface = PublicSurface {
+            file: RepoPath::from("src/parser.rs"),
+            symbols: vec![PublicSurfaceSymbol {
+                file: RepoPath::from("src/parser.rs"),
+                name: "parse".to_string(),
+                qualname: "parser::parse".to_string(),
+                kind: SymbolKind::Function,
+                visibility: Visibility::Public,
+                line: 3,
+            }],
+        };
+        let envelope = scope_core::stub::surface(RepoPath::from("src/parser.rs"), surface);
+        let output = serialize_output(&envelope, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["command"], "surface");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "src/parser.rs");
+        assert_eq!(value["data"]["surface"]["symbols"][0]["qualname"], "parser::parse");
+        assert_eq!(value["data"]["surface"]["symbols"][0]["kind"], "function");
+    }
+
+    #[test]
+    fn serialize_output_surface_diff_command_uses_expected_envelope_shape() {
+        let diff = PublicSurfaceDiff {
+            before_file: RepoPath::from("src/before.rs"),
+            after_file: RepoPath::from("src/after.rs"),
+            changes: Vec::new(),
+            summary: PublicSurfaceDiffSummary {
+                added_count: 1,
+                removed_count: 0,
+                modified_count: 2,
+            },
+        };
+        let envelope =
+            scope_core::stub::surface_diff(RepoPath::from("src/before.rs"), RepoPath::from("src/after.rs"), diff);
+        let output = serialize_output(&envelope, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["command"], "surface-diff");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["before"], "src/before.rs");
+        assert_eq!(value["data"]["after"], "src/after.rs");
+        assert_eq!(value["data"]["diff"]["summary"]["added_count"], 1);
+        assert_eq!(value["data"]["diff"]["summary"]["modified_count"], 2);
+    }
+
+    #[test]
     fn rust_small_parse_pack_body_matches_golden() {
         let repo = prepare_fixture_copy("rust_small");
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
@@ -1285,6 +1379,30 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert!(actual.contains("truncated: yes"));
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn surface_target_helper_resolves_symbol_to_file() {
+        let repo = prepare_fixture_copy("ts_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let resolved = resolve_surface_target(&store, "auth::middleware::verifyToken").unwrap();
+        assert_eq!(resolved, RepoPath::from("src/auth/middleware.ts"));
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn surface_target_helper_errors_for_unknown_symbol() {
+        let repo = prepare_fixture_copy("rust_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let error = resolve_surface_target(&store, "missing::symbol").unwrap_err();
+        assert!(error.to_string().contains("missing indexed file for target"));
 
         fs::remove_dir_all(repo).unwrap();
     }

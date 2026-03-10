@@ -77,7 +77,10 @@ mod tests {
         assert_eq!(envelope.command, "cli");
         assert!(matches!(envelope.status, JsonStatus::Error));
         assert_eq!(envelope.data.kind, "invalid_input");
-        assert_eq!(envelope.data.message, "invalid command input: missing target");
+        assert_eq!(
+            envelope.data.message,
+            "invalid command input: missing target"
+        );
         assert!(envelope.warnings.is_empty());
     }
 }

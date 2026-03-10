@@ -44,6 +44,8 @@ pub enum Commands {
     Pack(PackArgs),
     /// Check architecture rules against indexed file dependencies
     Arch(ArchArgs),
+    /// Query the public API surface for a file or symbol target
+    Surface(SurfaceArgs),
     /// Report Martin instability scores from indexed file dependencies
     Stability(StabilityArgs),
     /// Report churn-weighted risk scores from indexed file dependencies
@@ -181,6 +183,25 @@ pub enum ArchCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct ArchCheckArgs {}
+
+#[derive(Debug, clap::Args)]
+pub struct SurfaceArgs {
+    #[command(subcommand)]
+    pub command: Option<SurfaceCommand>,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SurfaceCommand {
+    /// Compare public API surface between two indexed files or symbol targets
+    Diff(SurfaceDiffArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SurfaceDiffArgs {
+    pub before: String,
+    pub after: String,
+}
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum StabilitySortArg {
