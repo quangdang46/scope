@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "command": "impact",
+  "status": "ok",
+  "data": {
+    "target": "parser::parse",
+    "change_type": "signature",
+    "depth": null,
+    "impacted": [
+      {
+        "kind": "symbol",
+        "path": "src/lib.rs",
+        "qualname": "lib::greet",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      },
+      {
+        "kind": "file",
+        "path": "src/resolver.rs",
+        "qualname": null,
+        "edge_kind": "import",
+        "certainty": "exact",
+        "reason": "imports parser::parse",
+        "distance": 1
+      },
+      {
+        "kind": "symbol",
+        "path": "src/resolver.rs",
+        "qualname": "resolver::resolve",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      }
+    ],
+    "grouped": {
+      "exact": [
+        {
+          "kind": "file",
+          "path": "src/resolver.rs",
+          "qualname": null,
+          "edge_kind": "import",
+          "certainty": "exact",
+          "reason": "imports parser::parse",
+          "distance": 1
+        }
+      ],
+      "resolved": [
+        {
+          "kind": "symbol",
+          "path": "src/lib.rs",
+          "qualname": "lib::greet",
+          "edge_kind": "call",
+          "certainty": "resolved",
+          "reason": "calls parser::parse directly",
+          "distance": 1
+        },
+        {
+          "kind": "symbol",
+          "path": "src/resolver.rs",
+          "qualname": "resolver::resolve",
+          "edge_kind": "call",
+          "certainty": "resolved",
+          "reason": "calls parser::parse directly",
+          "distance": 1
+        }
+      ],
+      "heuristic": [],
+      "dynamic": []
+    },
+    "summary": {
+      "total": 3,
+      "exact": 1,
+      "resolved": 2,
+      "heuristic": 0,
+      "dynamic": 0
+    },
+    "risk": "low",
+    "traversal_rule": {
+      "change_type": "signature",
+      "summary": "Parameters, return type, or callable contract changed",
+      "traversal_strategy": "Reverse call graph plus importer/re-export expansion",
+      "primary_blast_radius": "All callers, transitive wrappers, and exported API consumers",
+      "allowed_edge_kinds": [
+        "call",
+        "import",
+        "export"
+      ],
+      "include_transitive": true,
+      "default_max_distance": null,
+      "include_re_exports": true,
+      "include_importers": true,
+      "include_callers": true,
+      "include_visibility_boundary": false
+    }
+  },
+  "warnings": []
+}

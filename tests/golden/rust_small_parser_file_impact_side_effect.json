@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "command": "impact",
+  "status": "ok",
+  "data": {
+    "target": "src/parser.rs",
+    "change_type": "side-effect",
+    "depth": null,
+    "impacted": [
+      {
+        "kind": "file",
+        "path": "src/resolver.rs",
+        "qualname": null,
+        "edge_kind": "import",
+        "certainty": "exact",
+        "reason": "imports src/parser.rs",
+        "distance": 1
+      }
+    ],
+    "grouped": {
+      "exact": [
+        {
+          "kind": "file",
+          "path": "src/resolver.rs",
+          "qualname": null,
+          "edge_kind": "import",
+          "certainty": "exact",
+          "reason": "imports src/parser.rs",
+          "distance": 1
+        }
+      ],
+      "resolved": [],
+      "heuristic": [],
+      "dynamic": []
+    },
+    "summary": {
+      "total": 1,
+      "exact": 1,
+      "resolved": 0,
+      "heuristic": 0,
+      "dynamic": 0
+    },
+    "risk": "low",
+    "traversal_rule": {
+      "change_type": "side-effect",
+      "summary": "File-level initialization or execution behavior changed",
+      "traversal_strategy": "Reverse file-import graph only",
+      "primary_blast_radius": "Importers and transitive importers affected by init order",
+      "allowed_edge_kinds": [
+        "import"
+      ],
+      "include_transitive": true,
+      "default_max_distance": null,
+      "include_re_exports": false,
+      "include_importers": true,
+      "include_callers": false,
+      "include_visibility_boundary": false
+    }
+  },
+  "warnings": []
+}

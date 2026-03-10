@@ -5,8 +5,8 @@ use std::{
 };
 
 use scope_core::{
-    adapter_for_language, arch_check, load_arch_config, scan_repo, stub, EdgeKind, RepoPath,
-    ScanConfig, Store, SupportedLanguage, SymbolKind,
+    adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty, EdgeKind,
+    NodeKind, RepoPath, ScanConfig, Store, SupportedLanguage, SymbolKind, TraversalRecord,
 };
 
 fn repo_root() -> PathBuf {
@@ -390,6 +390,15 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
     assert_eq!(parser_calls[0].qualname.as_deref(), Some("parser::tokenize"));
     assert_eq!(parser_calls[0].certainty, scope_core::Certainty::Exact);
 
+    let parser_calls_transitive = store.query_callees("parser::parse", true).unwrap();
+    let parser_calls_transitive_envelope =
+        stub::calls("parser::parse".to_string(), true, parser_calls_transitive.clone());
+    let parser_calls_transitive_actual =
+        serde_json::to_string_pretty(&parser_calls_transitive_envelope).unwrap();
+    let parser_calls_transitive_expected = read_golden("rust_small_parse_calls_transitive_stub.json");
+    assert_eq!(parser_calls_transitive_actual, parser_calls_transitive_expected);
+    assert!(parser_calls_transitive.is_empty());
+
     let farewell_calls = store.query_callees("lib::farewell", false).unwrap();
     let farewell_envelope = stub::calls("lib::farewell".to_string(), false, farewell_calls.clone());
     let farewell_actual = serde_json::to_string_pretty(&farewell_envelope).unwrap();
@@ -408,7 +417,196 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
         .collect();
     assert_eq!(parser_caller_names, vec!["lib::greet".to_string(), "resolver::resolve".to_string()]);
 
+    let parser_callers_transitive = store.query_callers("parser::parse", true).unwrap();
+    let parser_callers_transitive_envelope =
+        stub::callers("parser::parse".to_string(), true, parser_callers_transitive.clone());
+    let parser_callers_transitive_actual =
+        serde_json::to_string_pretty(&parser_callers_transitive_envelope).unwrap();
+    let parser_callers_transitive_expected =
+        read_golden("rust_small_parse_callers_transitive_stub.json");
+    assert_eq!(parser_callers_transitive_actual, parser_callers_transitive_expected);
+    assert!(parser_callers_transitive.is_empty());
+
     fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_explain_query_matches_golden_json() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let traversals = store.query_explain("parser::parse", None, None).unwrap();
+    let envelope = stub::explain("parser::parse".to_string(), None, None, traversals.clone());
+    let actual = serde_json::to_string_pretty(&envelope).unwrap();
+    let expected = read_golden("rust_small_parse_explain.json");
+
+    assert_eq!(actual, expected);
+    assert_eq!(traversals.len(), 4);
+    assert!(traversals.iter().any(|record| record.qualname.as_deref() == Some("lib::greet")));
+    assert!(traversals.iter().any(|record| record.qualname.as_deref() == Some("parser::tokenize")));
+    assert!(traversals.iter().any(|record| record.path.as_ref().map(|path| path.0.as_str()) == Some("src/resolver.rs")));
+
+    let filtered = store
+        .query_explain("parser::parse", Some("resolver::resolve"), None)
+        .unwrap();
+    let filtered_envelope = stub::explain(
+        "parser::parse".to_string(),
+        Some("resolver::resolve".to_string()),
+        None,
+        filtered.clone(),
+    );
+    let filtered_actual = serde_json::to_string_pretty(&filtered_envelope).unwrap();
+    let filtered_expected = read_golden("rust_small_parse_explain_to_resolver.json");
+
+    assert_eq!(filtered_actual, filtered_expected);
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].qualname.as_deref(), Some("resolver::resolve"));
+    assert_eq!(filtered[0].distance, 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_impact_queries_match_golden_json() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    for (target, change_type, depth, golden_name, expected_total) in [
+        (
+            "parser::parse",
+            "body",
+            None,
+            "rust_small_parse_impact_body.json",
+            2usize,
+        ),
+        (
+            "parser::parse",
+            "signature",
+            None,
+            "rust_small_parse_impact_signature.json",
+            3usize,
+        ),
+        (
+            "parser::parse",
+            "rename",
+            None,
+            "rust_small_parse_impact_rename.json",
+            3usize,
+        ),
+        (
+            "parser::parse",
+            "visibility",
+            None,
+            "rust_small_parse_impact_visibility.json",
+            3usize,
+        ),
+        (
+            "src/parser.rs",
+            "delete",
+            None,
+            "rust_small_parser_file_impact_delete.json",
+            1usize,
+        ),
+        (
+            "src/parser.rs",
+            "side-effect",
+            None,
+            "rust_small_parser_file_impact_side_effect.json",
+            1usize,
+        ),
+    ] {
+        let impacted = store.query_impact(target, change_type, depth).unwrap();
+        let envelope = stub::impact(
+            target.to_string(),
+            change_type.to_string(),
+            depth,
+            impacted.clone(),
+        );
+        let actual = serde_json::to_string_pretty(&envelope).unwrap();
+        let expected = read_golden(golden_name);
+
+        assert_eq!(actual, expected, "golden mismatch for {change_type}");
+        assert_eq!(envelope.data.summary.total, expected_total);
+        assert_eq!(envelope.data.impacted.len(), expected_total);
+        assert_eq!(
+            envelope.data.grouped.exact.len()
+                + envelope.data.grouped.resolved.len()
+                + envelope.data.grouped.heuristic.len()
+                + envelope.data.grouped.dynamic.len(),
+            expected_total
+        );
+        assert!(
+            impacted
+                .iter()
+                .all(|record| !record.reason.is_empty() && record.distance >= 1),
+            "impact records should preserve reason and distance for {change_type}"
+        );
+    }
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn impact_output_groups_by_certainty_and_summarizes_counts() {
+    let traversals = vec![
+        TraversalRecord {
+            kind: NodeKind::Symbol,
+            path: Some(RepoPath::from("src/parser.rs")),
+            qualname: Some("parser::parse".to_string()),
+            edge_kind: EdgeKind::Call,
+            certainty: Certainty::Exact,
+            reason: "calls parser::parse directly".to_string(),
+            distance: 1,
+        },
+        TraversalRecord {
+            kind: NodeKind::Symbol,
+            path: Some(RepoPath::from("src/resolver.rs")),
+            qualname: Some("resolver::resolve".to_string()),
+            edge_kind: EdgeKind::Call,
+            certainty: Certainty::Resolved,
+            reason: "calls a symbol that reaches parser::parse".to_string(),
+            distance: 2,
+        },
+        TraversalRecord {
+            kind: NodeKind::File,
+            path: Some(RepoPath::from("src/main.rs")),
+            qualname: None,
+            edge_kind: EdgeKind::Import,
+            certainty: Certainty::Heuristic,
+            reason: "imports a file that reaches parser::parse".to_string(),
+            distance: 3,
+        },
+        TraversalRecord {
+            kind: NodeKind::File,
+            path: Some(RepoPath::from("src/bootstrap.rs")),
+            qualname: None,
+            edge_kind: EdgeKind::Dynamic,
+            certainty: Certainty::Dynamic,
+            reason: "dynamic import path may reach parser::parse".to_string(),
+            distance: 1,
+        },
+    ];
+
+    let envelope = stub::impact(
+        "parser::parse".to_string(),
+        "signature".to_string(),
+        Some(3),
+        traversals,
+    );
+    let actual = serde_json::to_string_pretty(&envelope).unwrap();
+    let expected = read_golden("rust_small_parse_impact.json");
+
+    assert_eq!(actual, expected);
+    assert_eq!(envelope.data.summary.total, 4);
+    assert_eq!(envelope.data.summary.exact, 1);
+    assert_eq!(envelope.data.summary.resolved, 1);
+    assert_eq!(envelope.data.summary.heuristic, 1);
+    assert_eq!(envelope.data.summary.dynamic, 1);
+    assert_eq!(envelope.data.grouped.exact.len(), 1);
+    assert_eq!(envelope.data.grouped.resolved.len(), 1);
+    assert_eq!(envelope.data.grouped.heuristic.len(), 1);
+    assert_eq!(envelope.data.grouped.dynamic.len(), 1);
+    assert_eq!(envelope.data.risk, "high");
 }
 
 #[test]

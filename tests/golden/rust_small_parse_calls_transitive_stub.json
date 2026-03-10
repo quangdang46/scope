@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "command": "calls",
+  "status": "stub",
+  "data": {
+    "symbol": "parser::parse",
+    "transitive": true,
+    "traversals": []
+  },
+  "warnings": [
+    "Command is scaffolded but not implemented yet"
+  ]
+}

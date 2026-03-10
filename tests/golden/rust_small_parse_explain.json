@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "command": "explain",
+  "status": "ok",
+  "data": {
+    "target": "parser::parse",
+    "to": null,
+    "depth": null,
+    "traversals": [
+      {
+        "kind": "symbol",
+        "path": "src/lib.rs",
+        "qualname": "lib::greet",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      },
+      {
+        "kind": "symbol",
+        "path": "src/parser.rs",
+        "qualname": "parser::tokenize",
+        "edge_kind": "call",
+        "certainty": "exact",
+        "reason": "is called by parser::parse",
+        "distance": 1
+      },
+      {
+        "kind": "file",
+        "path": "src/resolver.rs",
+        "qualname": null,
+        "edge_kind": "import",
+        "certainty": "exact",
+        "reason": "imports parser::parse",
+        "distance": 1
+      },
+      {
+        "kind": "symbol",
+        "path": "src/resolver.rs",
+        "qualname": "resolver::resolve",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      }
+    ]
+  },
+  "warnings": []
+}

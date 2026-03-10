@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "command": "explain",
+  "status": "ok",
+  "data": {
+    "target": "parser::parse",
+    "to": "resolver::resolve",
+    "depth": null,
+    "traversals": [
+      {
+        "kind": "symbol",
+        "path": "src/resolver.rs",
+        "qualname": "resolver::resolve",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      }
+    ]
+  },
+  "warnings": []
+}

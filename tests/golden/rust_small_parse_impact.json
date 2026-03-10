@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "command": "impact",
+  "status": "ok",
+  "data": {
+    "target": "parser::parse",
+    "change_type": "signature",
+    "depth": 3,
+    "impacted": [
+      {
+        "kind": "symbol",
+        "path": "src/parser.rs",
+        "qualname": "parser::parse",
+        "edge_kind": "call",
+        "certainty": "exact",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      },
+      {
+        "kind": "symbol",
+        "path": "src/resolver.rs",
+        "qualname": "resolver::resolve",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls a symbol that reaches parser::parse",
+        "distance": 2
+      },
+      {
+        "kind": "file",
+        "path": "src/main.rs",
+        "qualname": null,
+        "edge_kind": "import",
+        "certainty": "heuristic",
+        "reason": "imports a file that reaches parser::parse",
+        "distance": 3
+      },
+      {
+        "kind": "file",
+        "path": "src/bootstrap.rs",
+        "qualname": null,
+        "edge_kind": "dynamic",
+        "certainty": "dynamic",
+        "reason": "dynamic import path may reach parser::parse",
+        "distance": 1
+      }
+    ],
+    "grouped": {
+      "exact": [
+        {
+          "kind": "symbol",
+          "path": "src/parser.rs",
+          "qualname": "parser::parse",
+          "edge_kind": "call",
+          "certainty": "exact",
+          "reason": "calls parser::parse directly",
+          "distance": 1
+        }
+      ],
+      "resolved": [
+        {
+          "kind": "symbol",
+          "path": "src/resolver.rs",
+          "qualname": "resolver::resolve",
+          "edge_kind": "call",
+          "certainty": "resolved",
+          "reason": "calls a symbol that reaches parser::parse",
+          "distance": 2
+        }
+      ],
+      "heuristic": [
+        {
+          "kind": "file",
+          "path": "src/main.rs",
+          "qualname": null,
+          "edge_kind": "import",
+          "certainty": "heuristic",
+          "reason": "imports a file that reaches parser::parse",
+          "distance": 3
+        }
+      ],
+      "dynamic": [
+        {
+          "kind": "file",
+          "path": "src/bootstrap.rs",
+          "qualname": null,
+          "edge_kind": "dynamic",
+          "certainty": "dynamic",
+          "reason": "dynamic import path may reach parser::parse",
+          "distance": 1
+        }
+      ]
+    },
+    "summary": {
+      "total": 4,
+      "exact": 1,
+      "resolved": 1,
+      "heuristic": 1,
+      "dynamic": 1
+    },
+    "risk": "high",
+    "traversal_rule": {
+      "change_type": "signature",
+      "summary": "Parameters, return type, or callable contract changed",
+      "traversal_strategy": "Reverse call graph plus importer/re-export expansion",
+      "primary_blast_radius": "All callers, transitive wrappers, and exported API consumers",
+      "allowed_edge_kinds": [
+        "call",
+        "import",
+        "export"
+      ],
+      "include_transitive": true,
+      "default_max_distance": null,
+      "include_re_exports": true,
+      "include_importers": true,
+      "include_callers": true,
+      "include_visibility_boundary": false
+    }
+  },
+  "warnings": []
+}

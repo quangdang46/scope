@@ -44,11 +44,30 @@ pub struct CallsData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ImpactSummary {
+    pub total: usize,
+    pub exact: usize,
+    pub resolved: usize,
+    pub heuristic: usize,
+    pub dynamic: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImpactGroups {
+    pub exact: Vec<TraversalRecord>,
+    pub resolved: Vec<TraversalRecord>,
+    pub heuristic: Vec<TraversalRecord>,
+    pub dynamic: Vec<TraversalRecord>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ImpactData {
     pub target: String,
     pub change_type: String,
     pub depth: Option<usize>,
     pub impacted: Vec<TraversalRecord>,
+    pub grouped: ImpactGroups,
+    pub summary: ImpactSummary,
     pub risk: &'static str,
     pub traversal_rule: ImpactTraversalRule,
 }
@@ -180,6 +199,8 @@ pub fn impact(
     impacted: Vec<TraversalRecord>,
 ) -> JsonEnvelope<ImpactData> {
     let traversal_rule = impact_rule(&change_type);
+    let grouped = impact_groups(&impacted);
+    let summary = impact_summary(&impacted);
     JsonEnvelope::success(
         "impact",
         ImpactData {
@@ -188,9 +209,50 @@ pub fn impact(
             depth,
             risk: impact_risk_label(&impacted),
             impacted,
+            grouped,
+            summary,
             traversal_rule,
         },
     )
+}
+
+fn impact_summary(impacted: &[TraversalRecord]) -> ImpactSummary {
+    ImpactSummary {
+        total: impacted.len(),
+        exact: impacted
+            .iter()
+            .filter(|record| matches!(record.certainty, Certainty::Exact))
+            .count(),
+        resolved: impacted
+            .iter()
+            .filter(|record| matches!(record.certainty, Certainty::Resolved))
+            .count(),
+        heuristic: impacted
+            .iter()
+            .filter(|record| matches!(record.certainty, Certainty::Heuristic))
+            .count(),
+        dynamic: impacted
+            .iter()
+            .filter(|record| matches!(record.certainty, Certainty::Dynamic))
+            .count(),
+    }
+}
+
+fn impact_groups(impacted: &[TraversalRecord]) -> ImpactGroups {
+    let by_certainty = |certainty| {
+        impacted
+            .iter()
+            .filter(|record| record.certainty == certainty)
+            .cloned()
+            .collect()
+    };
+
+    ImpactGroups {
+        exact: by_certainty(Certainty::Exact),
+        resolved: by_certainty(Certainty::Resolved),
+        heuristic: by_certainty(Certainty::Heuristic),
+        dynamic: by_certainty(Certainty::Dynamic),
+    }
 }
 
 fn impact_risk_label(impacted: &[TraversalRecord]) -> &'static str {
@@ -462,6 +524,15 @@ mod tests {
         assert_eq!(envelope.data.change_type, "signature");
         assert_eq!(envelope.data.depth, Some(3));
         assert_eq!(envelope.data.risk, "low");
+        assert_eq!(envelope.data.summary.total, 1);
+        assert_eq!(envelope.data.summary.resolved, 1);
+        assert_eq!(envelope.data.summary.exact, 0);
+        assert_eq!(envelope.data.summary.heuristic, 0);
+        assert_eq!(envelope.data.summary.dynamic, 0);
+        assert_eq!(envelope.data.grouped.resolved.len(), 1);
+        assert_eq!(envelope.data.grouped.exact.len(), 0);
+        assert_eq!(envelope.data.grouped.heuristic.len(), 0);
+        assert_eq!(envelope.data.grouped.dynamic.len(), 0);
         assert_eq!(envelope.data.traversal_rule.change_type, ImpactChangeType::Signature);
         assert!(envelope.data.traversal_rule.include_re_exports);
         assert!(envelope.data.traversal_rule.include_importers);

@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "command": "impact",
+  "status": "ok",
+  "data": {
+    "target": "parser::parse",
+    "change_type": "body",
+    "depth": null,
+    "impacted": [
+      {
+        "kind": "symbol",
+        "path": "src/lib.rs",
+        "qualname": "lib::greet",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      },
+      {
+        "kind": "symbol",
+        "path": "src/resolver.rs",
+        "qualname": "resolver::resolve",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      }
+    ],
+    "grouped": {
+      "exact": [],
+      "resolved": [
+        {
+          "kind": "symbol",
+          "path": "src/lib.rs",
+          "qualname": "lib::greet",
+          "edge_kind": "call",
+          "certainty": "resolved",
+          "reason": "calls parser::parse directly",
+          "distance": 1
+        },
+        {
+          "kind": "symbol",
+          "path": "src/resolver.rs",
+          "qualname": "resolver::resolve",
+          "edge_kind": "call",
+          "certainty": "resolved",
+          "reason": "calls parser::parse directly",
+          "distance": 1
+        }
+      ],
+      "heuristic": [],
+      "dynamic": []
+    },
+    "summary": {
+      "total": 2,
+      "exact": 0,
+      "resolved": 2,
+      "heuristic": 0,
+      "dynamic": 0
+    },
+    "risk": "low",
+    "traversal_rule": {
+      "change_type": "body",
+      "summary": "Implementation changed without changing the public shape",
+      "traversal_strategy": "Reverse call graph only",
+      "primary_blast_radius": "Direct callers and behavioral tests",
+      "allowed_edge_kinds": [
+        "call"
+      ],
+      "include_transitive": false,
+      "default_max_distance": 1,
+      "include_re_exports": false,
+      "include_importers": false,
+      "include_callers": true,
+      "include_visibility_boundary": false
+    }
+  },
+  "warnings": []
+}
