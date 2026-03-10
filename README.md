@@ -2,7 +2,7 @@
 
 > Local static-analysis workspace for dependency and impact queries.
 >
-> Today, `scope` is an early Rust scaffold: it can bootstrap a local SQLite index and expose a machine-readable CLI surface, but the parser, graph builder, and real query engine are still in progress.
+> Today, `scope` is an early Rust-first prototype: it can scan a repository, build a local SQLite index for supported Rust files, and answer machine-readable `deps`, `symbols`, `calls`, and `callers` queries. Transitive traversal, impact analysis, richer parsing, and a real MCP server are still in progress.
 
 ---
 
@@ -12,17 +12,19 @@ The repository currently implements:
 
 - a Rust workspace with `scope-core`, `scope-cli`, and `scope-mcp`
 - bootstrap logic for discovering the repo root and creating `.scope/index.db`
-- SQLite initialization and schema version tracking
-- a JSON-first CLI surface for planned query commands
-- stub responses for query commands while the analysis engine is being built
+- SQLite initialization, schema version tracking, and persisted file/symbol/call-edge records
+- ignore-aware repository scanning for supported source file types
+- heuristic Rust extraction for modules, imports, symbols, visibility, and direct call sites
+- machine-readable CLI queries for direct file dependencies, symbol inventory, and direct callers/callees
+- fixture-based golden tests for current query behavior
 
 The repository does **not** yet implement:
 
-- source walking / `.gitignore`-aware indexing
-- tree-sitter parsing
-- dependency graph construction
-- symbol or call resolution
-- impact traversal
+- tree-sitter or other AST-backed parsing
+- transitive call traversal
+- impact or explain traversal
+- non-Rust indexing adapters in the CLI path
+- persisted parse diagnostics / export records for queries
 - a working MCP server
 
 ## The Goal
@@ -47,17 +49,18 @@ The intended architecture is:
    └── create .scope/
    └── open SQLite index
 
-2. Index source files   (planned)
-   └── walk source files
-   └── parse files into imports / symbols / call sites
-   └── persist file and symbol graph data
+2. Index source files
+   └── walk source files with ignore-aware scanning
+   └── extract imports / symbols / call sites from supported Rust files
+   └── persist file, symbol, and direct call-edge data
 
-3. Query the graph      (planned)
-   └── deps / symbols / calls / callers / impact
+3. Query the graph
+   └── deps / symbols / direct calls / direct callers work today
+   └── impact / explain / transitive traversal remain planned
    └── return structured JSON for agents and tooling
 ```
 
-The current codebase is mostly stage 1 plus command scaffolding for stages 2 and 3.
+The current codebase has working stage-2 and early stage-3 slices for Rust, but larger graph traversal and explanation features are still scaffolded.
 
 ## Current Tech Stack
 
@@ -75,9 +78,9 @@ The current codebase is mostly stage 1 plus command scaffolding for stages 2 and
 
 | Crate / capability | Intended purpose |
 |---|---|
-| `tree-sitter` + grammars | Parse imports / exports / call sites |
-| graph traversal library | Dependency and impact traversal |
-| ignore-aware walking | Respect project boundaries during indexing |
+| `tree-sitter` + grammars | Replace heuristic parsing with stronger syntax-backed extraction |
+| graph traversal library | Power transitive dependency, impact, and explain queries |
+| multi-language adapters | Extend indexing beyond the current Rust-first implementation |
 
 ## Workspace Layout
 
@@ -106,8 +109,11 @@ scope impact <target> --change-type <body|signature|rename|delete|visibility|sid
 
 Right now:
 
-- `scope index` bootstraps `.scope/index.db`
-- query commands return structured stub JSON so downstream tooling can integrate before the engine is complete
+- `scope index` scans the repo, indexes supported Rust files, and refreshes direct call edges in `.scope/index.db`
+- `scope deps` returns direct forward and reverse file dependencies from the SQLite index
+- `scope symbols` returns indexed symbols, with `--public-only` and `--kind` filtering
+- `scope calls` and `scope callers` return direct, conservative call edges for supported Rust cases
+- `scope impact`, `scope explain`, `scope doctor`, and `scope benchmark` still return scaffolded stub JSON
 
 ## Example Current Output
 
@@ -137,17 +143,26 @@ Right now:
 {
   "schema_version": 1,
   "command": "deps",
-  "status": "stub",
+  "status": "ok",
   "data": {
     "target": "src/lib.rs",
     "reverse": false,
     "transitive": false,
     "depth": null,
-    "dependencies": []
+    "dependencies": [
+      {
+        "path": "src/parser.rs",
+        "kind": "import",
+        "certainty": "exact"
+      },
+      {
+        "path": "src/resolver.rs",
+        "kind": "import",
+        "certainty": "exact"
+      }
+    ]
   },
-  "warnings": [
-    "Command is scaffolded but not implemented yet"
-  ]
+  "warnings": []
 }
 ```
 
@@ -177,11 +192,10 @@ cargo run -p scope-cli -- index .
 
 ## Near-Term Roadmap
 
-- implement file walking and indexing
-- persist file nodes and dependency edges to SQLite
-- implement symbol inventory queries
-- implement calls / callers queries
-- implement impact traversal
+- strengthen Rust extraction with parser-backed logic instead of line heuristics
+- implement transitive traversal for calls / callers / impact / explain
+- persist additional analysis data such as exports and parse diagnostics
+- add non-Rust adapters and wire them into the indexing pipeline
 - replace stub MCP output with a real MCP integration
 - keep JSON contracts stable for agent consumption
 
