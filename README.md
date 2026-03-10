@@ -115,6 +115,63 @@ Right now:
 - `scope calls` and `scope callers` return direct, conservative call edges for supported Rust cases
 - `scope impact`, `scope explain`, `scope doctor`, and `scope benchmark` still return scaffolded stub JSON
 
+## Agent Usage Patterns
+
+`scope` is intended to answer repository-structure questions before an agent starts editing code.
+
+### Recommended workflow for coding agents
+
+1. Run `scope index .` once for the repository snapshot you are working against.
+2. Ask the narrowest query that answers the immediate planning question.
+3. Prefer `--compact` for machine consumption when the result will be fed back into an agent loop.
+4. Treat the result as static evidence, not as proof that a change is safe.
+5. Use tests, builds, and human review to validate changes after editing.
+
+### Typical pre-edit questions
+
+```bash
+scope deps src/lib.rs
+scope --compact symbols src/parser.rs --public-only
+scope --compact callers parser::parse
+scope --compact context --target parser::parse --change-type body --budget 400
+scope pack parser::parse --change-type body --budget 400
+```
+
+Use them like this:
+
+- `deps` / `--reverse` to understand direct file-level coupling
+- `symbols` to see what a file defines before editing it
+- `calls` / `callers` to understand direct symbol-level interactions
+- `impact` / `explain` / `why` / `context` when you need structured change-planning evidence
+- `pack` when you want a lean plain-text handoff for an agent prompt
+
+### Output expectations
+
+Machine-readable commands return a stable JSON envelope:
+
+- `schema_version` — contract version for downstream tooling
+- `command` — command name that produced the result
+- `status` — `ok`, `stub`, or `error`
+- `data` — command-specific payload
+- `warnings` — non-fatal notes
+
+Default output is pretty-printed JSON for readability.
+
+`--compact` keeps the same top-level JSON contract while reducing token cost:
+
+- emits minified JSON instead of pretty JSON
+- prunes null and empty nested fields from the payload where possible
+- keeps essential graph facts such as paths, reasons, certainty, and command metadata
+
+Compact mode is intended for agent loops and transport efficiency, not for humans reading terminal output.
+
+### Current limitations for agents
+
+- `scope` is currently Rust-first in the main CLI path
+- several traversal-oriented commands still return stub JSON while implementation is in progress
+- results are static approximations and may omit dynamic behavior
+- `scope-mcp` is still a stub, so the supported integration surface today is the CLI
+
 ## Example Current Output
 
 ### `scope index .`
@@ -199,7 +256,7 @@ cargo run -p scope-cli -- --compact deps src/lib.rs
 - add non-Rust adapters and wire them into the indexing pipeline
 - replace stub MCP output with a real MCP integration
 - keep JSON contracts stable for agent consumption
-- add compact/minified JSON mode for token-sensitive agent workflows
+- add compact JSON response shaping for token-sensitive agent workflows
 
 ## Scope Boundaries
 
