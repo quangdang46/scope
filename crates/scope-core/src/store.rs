@@ -685,7 +685,45 @@ fn run_migrations(connection: &Connection) -> ScopeResult<()> {
         connection.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)?;
     }
 
+    reconcile_schema(connection)?;
+    connection.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)?;
+
     Ok(())
+}
+
+fn reconcile_schema(connection: &Connection) -> ScopeResult<()> {
+    if !has_required_tables(connection, &["index_meta", "files", "imports", "file_edges"])? {
+        connection.execute_batch(INITIAL_MIGRATION)?;
+    }
+
+    if !has_required_tables(connection, &["symbols"])? {
+        connection.execute_batch(SYMBOLS_MIGRATION)?;
+    }
+
+    if !has_required_tables(connection, &["symbol_edges"])? {
+        connection.execute_batch(SYMBOL_EDGES_MIGRATION)?;
+    }
+
+    Ok(())
+}
+
+fn has_required_tables(connection: &Connection, tables: &[&str]) -> ScopeResult<bool> {
+    for table in tables {
+        if !table_exists(connection, table)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn table_exists(connection: &Connection, table: &str) -> ScopeResult<bool> {
+    let exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(exists != 0)
 }
 
 fn bootstrap_meta(connection: &Connection) -> ScopeResult<()> {
@@ -796,6 +834,7 @@ fn unix_timestamp() -> i64 {
 mod tests {
     use super::*;
     use crate::{CallSiteRecord, ImportRecord, ParseStatus, Span, SymbolRecord, SymbolKind, Visibility};
+    use rusqlite::Connection;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -879,6 +918,98 @@ mod tests {
 
         let second = Store::open(&db_path).unwrap();
         assert_eq!(second.schema_version().unwrap(), INDEX_SCHEMA_VERSION);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repairs_version_three_database_missing_base_tables() {
+        let dir = unique_temp_dir("db-repair-base");
+        let db_path = dir.join("index.db");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection.execute_batch(SYMBOLS_MIGRATION).unwrap();
+        connection.execute_batch(SYMBOL_EDGES_MIGRATION).unwrap();
+        drop(connection);
+
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), INDEX_SCHEMA_VERSION);
+        assert!(store.upsert_file(&sample_file("src/lib.rs")).is_ok());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repairs_partial_schema_without_requiring_version_downgrade() {
+        let dir = unique_temp_dir("db-repair-partial");
+        let db_path = dir.join("index.db");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS index_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                language TEXT NOT NULL,
+                parse_status TEXT NOT NULL,
+                is_barrel INTEGER NOT NULL DEFAULT 0,
+                indexed_at INTEGER NOT NULL
+            );",
+        ).unwrap();
+        drop(connection);
+
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), INDEX_SCHEMA_VERSION);
+
+        let target = sample_file("src/parser.rs");
+        store.upsert_file(&target).unwrap();
+
+        let source = sample_file("src/resolver.rs");
+        let extract = ExtractResult {
+            file: source.clone(),
+            imports: vec![ImportRecord {
+                file: source.path.clone(),
+                raw_text: "use crate::parser;".to_string(),
+                import_path: ImportPath::Relative(target.path.clone()),
+                span: sample_span(1),
+                certainty: Certainty::Exact,
+            }],
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: Vec::new(),
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        };
+
+        store.persist_extract_result(&extract).unwrap();
+        let deps = store.query_deps(&source.path).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].path, target.path);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_newer_unsupported_schema_versions() {
+        let dir = unique_temp_dir("db-newer-version");
+        let db_path = dir.join("index.db");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .pragma_update(None, "user_version", INDEX_SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(connection);
+
+        let error = Store::open(&db_path).unwrap_err();
+        assert!(matches!(error, ScopeError::Migration(_)));
 
         std::fs::remove_dir_all(dir).unwrap();
     }
