@@ -6,7 +6,8 @@ use std::{
 
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty, EdgeKind,
-    NodeKind, RepoPath, ScanConfig, Store, SupportedLanguage, SymbolKind, TraversalRecord,
+    NodeKind, PublicSurfaceChangeKind, RepoPath, ScanConfig, Store, SupportedLanguage, SymbolKind,
+    TraversalRecord,
 };
 
 fn repo_root() -> PathBuf {
@@ -471,6 +472,55 @@ fn rust_small_explain_query_matches_golden_json() {
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].qualname.as_deref(), Some("resolver::resolve"));
     assert_eq!(filtered[0].distance, 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_public_surface_contains_only_exported_symbols() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let surface = store.query_public_surface(&RepoPath::from("src/parser.rs")).unwrap();
+    let names: Vec<_> = surface.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+
+    assert_eq!(surface.file, RepoPath::from("src/parser.rs"));
+    assert_eq!(names, vec!["parse"]);
+    assert!(surface.symbols.iter().all(|symbol| symbol.qualname.starts_with("parser::")));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn ts_small_public_surface_diff_captures_added_removed_and_modified_symbols() {
+    let repo = prepare_fixture_copy("ts_small");
+    let store = index_fixture(&repo);
+
+    let diff = store
+        .diff_public_surface(
+            &RepoPath::from("src/auth/jwt.ts"),
+            &RepoPath::from("src/auth/aliases.ts"),
+        )
+        .unwrap();
+
+    assert_eq!(diff.summary.added_count, 1);
+    assert_eq!(diff.summary.removed_count, 2);
+    assert_eq!(diff.summary.modified_count, 0);
+    assert!(diff
+        .changes
+        .iter()
+        .any(|change| change.kind == PublicSurfaceChangeKind::Added
+            && change.after.as_ref().is_some_and(|symbol| symbol.name == "verifyJwt")));
+    assert!(diff
+        .changes
+        .iter()
+        .filter(|change| change.kind == PublicSurfaceChangeKind::Removed)
+        .any(|change| change.before.as_ref().is_some_and(|symbol| symbol.name == "sign")));
+    assert!(diff
+        .changes
+        .iter()
+        .filter(|change| change.kind == PublicSurfaceChangeKind::Removed)
+        .any(|change| change.before.as_ref().is_some_and(|symbol| symbol.name == "verify")));
 
     fs::remove_dir_all(repo).unwrap();
 }

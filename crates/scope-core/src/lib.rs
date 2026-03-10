@@ -21,8 +21,9 @@ pub use model::{
     Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary,
     DependencyRecord, DiagnosticSeverity, EdgeKind, ExportRecord, ExtractResult, FileRecord,
     ImpactChangeType, ImpactTraversalRule, ImportPath, ImportRecord, ModuleRecord, NodeKind,
-    ParseDiagnostic, ParseStatus, RepoPath, Span, SymbolKind, SymbolRecord, TraversalRecord,
-    Visibility,
+    ParseDiagnostic, ParseStatus, PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind,
+    PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol, RepoPath, Span, SymbolKind,
+    SymbolRecord, TraversalRecord, Visibility,
 };
 pub use scanner::{scan_repo, ScanConfig, ScanEntry, SupportedLanguage};
 pub use store::{DatabaseInfo, Store, INDEX_SCHEMA_VERSION};

@@ -9,8 +9,10 @@ use serde::Serialize;
 
 use crate::{
     ArchFileEdge, Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary,
-    DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind, RepoPath,
-    ScopeError, ScopeResult, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
+    DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind, PublicSurface,
+    PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary,
+    PublicSurfaceSymbol, RepoPath, ScopeError, ScopeResult, SymbolKind, SymbolRecord,
+    TraversalRecord, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
@@ -398,6 +400,106 @@ impl Store {
             symbols.retain(|symbol| symbol.kind == kind);
         }
         Ok(symbols)
+    }
+
+    pub fn query_public_surface(&self, path: &RepoPath) -> ScopeResult<PublicSurface> {
+        let mut symbols: Vec<_> = self
+            .query_symbols(path, true, None)?
+            .into_iter()
+            .map(|symbol| PublicSurfaceSymbol {
+                file: symbol.file,
+                name: symbol.name,
+                qualname: symbol.qualname,
+                kind: symbol.kind,
+                visibility: symbol.visibility,
+                line: symbol.span.start_line,
+            })
+            .collect();
+        symbols.sort_by(|left, right| {
+            left.line
+                .cmp(&right.line)
+                .then_with(|| left.qualname.cmp(&right.qualname))
+        });
+        Ok(PublicSurface {
+            file: path.clone(),
+            symbols,
+        })
+    }
+
+    pub fn diff_public_surface(
+        &self,
+        before: &RepoPath,
+        after: &RepoPath,
+    ) -> ScopeResult<PublicSurfaceDiff> {
+        let before_surface = self.query_public_surface(before)?;
+        let after_surface = self.query_public_surface(after)?;
+
+        let before_by_identity: HashMap<_, _> = before_surface
+            .symbols
+            .iter()
+            .cloned()
+            .map(|symbol| (public_surface_identity(&symbol), symbol))
+            .collect();
+        let after_by_identity: HashMap<_, _> = after_surface
+            .symbols
+            .iter()
+            .cloned()
+            .map(|symbol| (public_surface_identity(&symbol), symbol))
+            .collect();
+
+        let mut identities: Vec<_> = before_by_identity
+            .keys()
+            .chain(after_by_identity.keys())
+            .cloned()
+            .collect();
+        identities.sort();
+        identities.dedup();
+
+        let mut changes = Vec::new();
+        for identity in identities {
+            match (before_by_identity.get(&identity), after_by_identity.get(&identity)) {
+                (Some(before_symbol), None) => changes.push(PublicSurfaceChange {
+                    kind: PublicSurfaceChangeKind::Removed,
+                    before: Some(before_symbol.clone()),
+                    after: None,
+                }),
+                (None, Some(after_symbol)) => changes.push(PublicSurfaceChange {
+                    kind: PublicSurfaceChangeKind::Added,
+                    before: None,
+                    after: Some(after_symbol.clone()),
+                }),
+                (Some(before_symbol), Some(after_symbol)) if before_symbol != after_symbol => {
+                    changes.push(PublicSurfaceChange {
+                        kind: PublicSurfaceChangeKind::Modified,
+                        before: Some(before_symbol.clone()),
+                        after: Some(after_symbol.clone()),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let summary = PublicSurfaceDiffSummary {
+            added_count: changes
+                .iter()
+                .filter(|change| change.kind == PublicSurfaceChangeKind::Added)
+                .count(),
+            removed_count: changes
+                .iter()
+                .filter(|change| change.kind == PublicSurfaceChangeKind::Removed)
+                .count(),
+            modified_count: changes
+                .iter()
+                .filter(|change| change.kind == PublicSurfaceChangeKind::Modified)
+                .count(),
+        };
+
+        Ok(PublicSurfaceDiff {
+            before_file: before.clone(),
+            after_file: after.clone(),
+            changes,
+            summary,
+        })
     }
 
     pub fn query_callees(
@@ -1865,6 +1967,10 @@ fn better_certainty(current: &Certainty, candidate: &Certainty) -> Certainty {
     }
 }
 
+fn public_surface_identity(symbol: &PublicSurfaceSymbol) -> String {
+    format!("{}:{}", symbol_kind_name(&symbol.kind), symbol.name)
+}
+
 fn certainty_rank(certainty: &Certainty) -> u8 {
     match certainty {
         Certainty::Exact => 0,
@@ -1919,7 +2025,10 @@ fn unix_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CallSiteRecord, ImportRecord, ParseStatus, Span, SymbolRecord, SymbolKind, Visibility};
+    use crate::{
+        CallSiteRecord, ImportRecord, ParseStatus, PublicSurfaceChangeKind, Span, SymbolRecord,
+        SymbolKind, Visibility,
+    };
     use rusqlite::Connection;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2374,6 +2483,112 @@ mod tests {
             .unwrap();
         assert_eq!(functions.len(), 2);
         assert!(functions.iter().all(|symbol| symbol.kind == SymbolKind::Function));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn queries_public_surface_from_exported_symbols() {
+        let dir = unique_temp_dir("db-public-surface");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let source = sample_file("src/lib.rs");
+        let extract = ExtractResult {
+            file: source.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![
+                sample_symbol("src/lib.rs", "greet", SymbolKind::Function, Visibility::Public),
+                sample_symbol("src/lib.rs", "Parser", SymbolKind::Struct, Visibility::Package),
+                sample_symbol("src/lib.rs", "helper", SymbolKind::Function, Visibility::Local),
+            ],
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        };
+
+        store.persist_extract_result(&extract).unwrap();
+
+        let surface = store.query_public_surface(&source.path).unwrap();
+        assert_eq!(surface.file, source.path);
+        assert_eq!(surface.symbols.len(), 2);
+        let names: Vec<_> = surface.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert_eq!(names, vec!["Parser", "greet"]);
+        assert!(surface
+            .symbols
+            .iter()
+            .all(|symbol| matches!(symbol.visibility, Visibility::Public | Visibility::Package)));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn diffs_public_surface_between_two_files() {
+        let dir = unique_temp_dir("db-public-surface-diff");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let before = sample_file("snapshots/before.rs");
+        let after = sample_file("snapshots/after.rs");
+        let before_extract = ExtractResult {
+            file: before.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![
+                sample_symbol("snapshots/before.rs", "greet", SymbolKind::Function, Visibility::Public),
+                sample_symbol("snapshots/before.rs", "Parser", SymbolKind::Struct, Visibility::Public),
+            ],
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        };
+        let mut renamed_parser = sample_symbol(
+            "snapshots/after.rs",
+            "Parser",
+            SymbolKind::Struct,
+            Visibility::Public,
+        );
+        renamed_parser.span = sample_span(8);
+        let after_extract = ExtractResult {
+            file: after.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![
+                renamed_parser,
+                sample_symbol("snapshots/after.rs", "format", SymbolKind::Function, Visibility::Public),
+            ],
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        };
+
+        store.persist_extract_result(&before_extract).unwrap();
+        store.persist_extract_result(&after_extract).unwrap();
+
+        let diff = store.diff_public_surface(&before.path, &after.path).unwrap();
+        assert_eq!(diff.before_file, before.path);
+        assert_eq!(diff.after_file, after.path);
+        assert_eq!(diff.summary.added_count, 1);
+        assert_eq!(diff.summary.removed_count, 1);
+        assert_eq!(diff.summary.modified_count, 1);
+        assert_eq!(diff.changes.len(), 3);
+        assert!(diff
+            .changes
+            .iter()
+            .any(|change| change.kind == PublicSurfaceChangeKind::Added
+                && change.after.as_ref().is_some_and(|symbol| symbol.name == "format")));
+        assert!(diff
+            .changes
+            .iter()
+            .any(|change| change.kind == PublicSurfaceChangeKind::Removed
+                && change.before.as_ref().is_some_and(|symbol| symbol.name == "greet")));
+        assert!(diff
+            .changes
+            .iter()
+            .any(|change| change.kind == PublicSurfaceChangeKind::Modified
+                && change.before.as_ref().is_some_and(|symbol| symbol.name == "Parser")
+                && change.after.as_ref().is_some_and(|symbol| symbol.line == 8)));
 
         std::fs::remove_dir_all(dir).unwrap();
     }

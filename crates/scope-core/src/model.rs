@@ -248,6 +248,52 @@ pub struct ContextResult {
     pub summary: ContextSummary,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicSurfaceSymbol {
+    pub file: RepoPath,
+    pub name: String,
+    pub qualname: String,
+    pub kind: SymbolKind,
+    pub visibility: Visibility,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicSurface {
+    pub file: RepoPath,
+    pub symbols: Vec<PublicSurfaceSymbol>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicSurfaceChangeKind {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicSurfaceChange {
+    pub kind: PublicSurfaceChangeKind,
+    pub before: Option<PublicSurfaceSymbol>,
+    pub after: Option<PublicSurfaceSymbol>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicSurfaceDiffSummary {
+    pub added_count: usize,
+    pub removed_count: usize,
+    pub modified_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicSurfaceDiff {
+    pub before_file: RepoPath,
+    pub after_file: RepoPath,
+    pub changes: Vec<PublicSurfaceChange>,
+    pub summary: PublicSurfaceDiffSummary,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImpactChangeType {
