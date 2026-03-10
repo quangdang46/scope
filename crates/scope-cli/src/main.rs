@@ -27,10 +27,19 @@ fn render_cli_error(error: &scope_core::ScopeError) -> String {
     })
 }
 
+fn serialize_output<T: serde::Serialize>(value: &T, compact: bool) -> Result<String, serde_json::Error> {
+    if compact {
+        serde_json::to_string(value)
+    } else {
+        serde_json::to_string_pretty(value)
+    }
+}
+
 fn run() -> Result<i32, scope_core::ScopeError> {
     let cli = Cli::parse();
     let cwd = env::current_dir().map_err(|error| scope_core::ScopeError::io(".", error))?;
     let verbosity = verbosity(&cli);
+    let compact = cli.compact;
     let mut exit_code = 0;
 
     let output = match cli.command {
@@ -46,13 +55,16 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 schema_version: context.store.schema_version()?,
             };
 
-            serde_json::to_string_pretty(&scope_core::stub::index(
-                context.paths.repo_root.display().to_string(),
-                args.no_git,
-                args.watch,
-                database,
-                indexed_files,
-            ))
+            serialize_output(
+                &scope_core::stub::index(
+                    context.paths.repo_root.display().to_string(),
+                    args.no_git,
+                    args.watch,
+                    database,
+                    indexed_files,
+                ),
+                compact,
+            )
         }
         Commands::Deps(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -70,13 +82,16 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     .query_deps(&scope_core::RepoPath::from(args.file.clone()))?
             };
 
-            serde_json::to_string_pretty(&scope_core::stub::deps(
-                args.file,
-                args.reverse,
-                args.transitive,
-                args.depth,
-                dependencies,
-            ))
+            serialize_output(
+                &scope_core::stub::deps(
+                    args.file,
+                    args.reverse,
+                    args.transitive,
+                    args.depth,
+                    dependencies,
+                ),
+                compact,
+            )
         }
         Commands::Symbols(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -91,12 +106,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 kind.clone(),
             )?;
 
-            serde_json::to_string_pretty(&scope_core::stub::symbols(
-                args.file,
-                args.public_only,
-                kind,
-                symbols,
-            ))
+            serialize_output(
+                &scope_core::stub::symbols(args.file, args.public_only, kind, symbols),
+                compact,
+            )
         }
         Commands::Calls(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -105,11 +118,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let traversals = context.store.query_callees(&args.symbol, args.transitive)?;
-            serde_json::to_string_pretty(&scope_core::stub::calls(
-                args.symbol,
-                args.transitive,
-                traversals,
-            ))
+            serialize_output(
+                &scope_core::stub::calls(args.symbol, args.transitive, traversals),
+                compact,
+            )
         }
         Commands::Callers(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -118,11 +130,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let traversals = context.store.query_callers(&args.symbol, args.transitive)?;
-            serde_json::to_string_pretty(&scope_core::stub::callers(
-                args.symbol,
-                args.transitive,
-                traversals,
-            ))
+            serialize_output(
+                &scope_core::stub::callers(args.symbol, args.transitive, traversals),
+                compact,
+            )
         }
         Commands::Impact(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -134,12 +145,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             let impacted = context
                 .store
                 .query_impact(&args.target, &change_type, args.depth)?;
-            serde_json::to_string_pretty(&scope_core::stub::impact(
-                args.target,
-                change_type,
-                args.depth,
-                impacted,
-            ))
+            serialize_output(
+                &scope_core::stub::impact(args.target, change_type, args.depth, impacted),
+                compact,
+            )
         }
         Commands::Explain(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -150,12 +159,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             let traversals = context
                 .store
                 .query_explain(&args.target, args.to.as_deref(), args.depth)?;
-            serde_json::to_string_pretty(&scope_core::stub::explain(
-                args.target,
-                args.to,
-                args.depth,
-                traversals,
-            ))
+            serialize_output(
+                &scope_core::stub::explain(args.target, args.to, args.depth, traversals),
+                compact,
+            )
         }
         Commands::Why(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -164,12 +171,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let path = context.store.query_why(&args.from, &args.to, args.depth)?;
-            serde_json::to_string_pretty(&scope_core::stub::why(
-                args.from,
-                args.to,
-                args.depth,
-                path,
-            ))
+            serialize_output(
+                &scope_core::stub::why(args.from, args.to, args.depth, path),
+                compact,
+            )
         }
         Commands::Context(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -181,7 +186,7 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             let result = context
                 .store
                 .query_context(&args.targets, &change_type, args.budget)?;
-            serde_json::to_string_pretty(&scope_core::stub::context(result))
+            serialize_output(&scope_core::stub::context(result), compact)
         }
         Commands::Pack(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -210,15 +215,15 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     if !result.violations.is_empty() {
                         exit_code = 1;
                     }
-                    serde_json::to_string_pretty(&scope_core::stub::arch_check(result))
+                    serialize_output(&scope_core::stub::arch_check(result), compact)
                 }
             }
         }
-        Commands::Doctor(args) => serde_json::to_string_pretty(&scope_core::stub::doctor(args.fix)),
-        Commands::Benchmark(args) => serde_json::to_string_pretty(&scope_core::stub::benchmark(
-            args.fixture,
-            args.iterations,
-        )),
+        Commands::Doctor(args) => serialize_output(&scope_core::stub::doctor(args.fix), compact),
+        Commands::Benchmark(args) => serialize_output(
+            &scope_core::stub::benchmark(args.fixture, args.iterations),
+            compact,
+        ),
     }
     .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
 
@@ -558,7 +563,7 @@ fn context_role_label(role: &ContextFileRole) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_context_pack, index_repo, render_cli_error};
+    use super::{build_context_pack, index_repo, render_cli_error, serialize_output};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -641,6 +646,27 @@ mod tests {
         assert_eq!(value["data"]["kind"], "invalid_input");
         assert_eq!(value["data"]["message"], "invalid command input: missing target");
         assert_eq!(value["warnings"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn serialize_output_pretty_mode_matches_existing_json_layout() {
+        let output = serialize_output(&scope_core::stub::doctor(false), false).unwrap();
+        assert!(output.contains("\n  \"schema_version\": 1,"));
+        assert!(output.contains("\n  \"warnings\": [\n"));
+    }
+
+    #[test]
+    fn serialize_output_compact_mode_minifies_without_changing_fields() {
+        let envelope = scope_core::stub::doctor(false);
+        let pretty = serialize_output(&envelope, false).unwrap();
+        let compact = serialize_output(&envelope, true).unwrap();
+
+        assert!(!compact.contains('\n'));
+        assert!(compact.len() < pretty.len());
+
+        let pretty_value: serde_json::Value = serde_json::from_str(&pretty).unwrap();
+        let compact_value: serde_json::Value = serde_json::from_str(&compact).unwrap();
+        assert_eq!(compact_value, pretty_value);
     }
 
     #[test]

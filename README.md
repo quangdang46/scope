@@ -188,6 +188,7 @@ For local development:
 ```bash
 cargo run -p scope-cli -- --help
 cargo run -p scope-cli -- index .
+cargo run -p scope-cli -- --compact deps src/lib.rs
 ```
 
 ## Near-Term Roadmap
@@ -198,6 +199,7 @@ cargo run -p scope-cli -- index .
 - add non-Rust adapters and wire them into the indexing pipeline
 - replace stub MCP output with a real MCP integration
 - keep JSON contracts stable for agent consumption
+- add compact/minified JSON mode for token-sensitive agent workflows
 
 ## Scope Boundaries
 

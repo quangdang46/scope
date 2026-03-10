@@ -464,6 +464,7 @@ dependencies = [
  "blake3",
  "clap",
  "scope-core",
+ "serde",
  "serde_json",
 ]
 

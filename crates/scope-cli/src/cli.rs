@@ -14,6 +14,8 @@ pub struct Cli {
     pub verbose: bool,
     #[arg(long, global = true)]
     pub quiet: bool,
+    #[arg(long, global = true)]
+    pub compact: bool,
     #[command(subcommand)]
     pub command: Commands,
 }

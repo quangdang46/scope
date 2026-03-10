@@ -238,6 +238,76 @@ Implements the Model Context Protocol stdio interface. Each MCP tool maps to a
 `scope-core` query. Produces the same JSON output as `--json` mode. Allows Claude Code
 and other MCP-compatible agents to call `scope` as a tool without shell invocation.
 
+##### MCP/stdIO integration boundary
+
+This wrapper is intentionally a **transport adapter**, not a second implementation of
+`scope` semantics.
+
+**Boundary rules:**
+- `scope-core` remains the source of truth for bootstrap, storage access, query execution,
+  JSON envelopes, certainty labels, and error classification.
+- `scope-cli` remains a shell-oriented entrypoint for humans and scripts.
+- `scope-mcp` only translates MCP tool calls into strongly typed `scope-core` invocations
+  and returns the resulting machine JSON without inventing a parallel output contract.
+- Business logic must not be duplicated in `scope-mcp`; if a capability needs new analysis
+  behavior, that belongs in `scope-core` first.
+
+**Tool mapping (initial wrapper scope):**
+- `index` → refresh index for a repo root
+- `deps` → forward/reverse file dependencies
+- `symbols` → file symbol inventory
+- `calls` / `callers` → direct call graph queries
+- `impact` → change-type-aware blast radius query
+- `explain` → local explanation neighborhood
+- `why` → shortest path between two files or two symbols
+- `context` → minimum-read-set selection
+- `arch_check` → architecture rule validation
+
+Only commands with already-stable core behavior should be exposed by the first wrapper.
+Stubbed or still-evolving surfaces such as `doctor`, `benchmark`, snapshot flows, and any
+future report/query-language endpoints should wait until their `scope-core` contracts are
+explicitly stabilized.
+
+**Input contract:**
+- MCP tool arguments mirror the stable CLI/core argument shape in snake_case.
+- Every tool accepts `repo_root` and optional `db_path` overrides so agents can target a
+  repository explicitly instead of relying on ambient cwd state.
+- Wrapper argument parsing may reject malformed or missing MCP arguments at the protocol
+  boundary, but it should avoid reinterpreting valid domain arguments.
+
+**Output contract:**
+- Successful tool results reuse the same `JsonEnvelope<T>` shape already emitted by
+  `scope-core` / CLI JSON mode, including `schema_version`, `command`, `status`, `data`,
+  and `warnings`.
+- Domain failures after dispatch (invalid target, bootstrap failure, unsupported query
+  shape, etc.) should be returned using the same stable error-envelope fields rather than a
+  wrapper-specific schema.
+- MCP protocol errors are reserved for transport-level failures such as unknown tool name,
+  malformed tool-call payloads, or wrapper serialization failure before a `scope-core`
+  command can run.
+
+**Lifecycle and state model:**
+- The wrapper is stateless across requests except for normal process lifetime concerns.
+- Each tool call bootstraps `scope-core` from the supplied repo/db parameters, executes one
+  query, and returns one machine-readable result.
+- No long-lived watcher, daemon-only cache, or hidden session state is introduced in the
+  wrapper layer.
+
+**Non-goals for `scope-2d1.8.3`:**
+- no bespoke MCP-only query semantics
+- no alternate response schema for agents
+- no direct SQLite access from wrapper code except through `scope-core`
+- no redesign of core commands to fit transport concerns
+- no implementation of the actual stdio server in this design task
+
+**Implementation handoff to `scope-2d1.8.6`:**
+- create a thin tool registry in `scope-mcp`
+- parse MCP tool calls into typed request structs
+- dispatch into existing `scope-core` entrypoints
+- preserve byte-for-byte compatible JSON field semantics with CLI JSON mode
+- add smoke tests that compare wrapper results against CLI/core expectations on fixture
+  repositories
+
 ---
 
 ## 6. File structure
