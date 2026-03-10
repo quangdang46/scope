@@ -6,8 +6,8 @@ use std::{
 
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty, EdgeKind,
-    NodeKind, PublicSurfaceChangeKind, RepoPath, ScanConfig, Store, SupportedLanguage, SymbolKind,
-    TraversalRecord,
+    NodeKind, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceSymbol, RepoPath,
+    ScanConfig, Store, SupportedLanguage, SymbolKind, TraversalRecord, Visibility,
 };
 
 fn repo_root() -> PathBuf {
@@ -601,6 +601,70 @@ fn ts_small_public_surface_diff_captures_added_removed_and_modified_symbols() {
             .is_some_and(|symbol| symbol.name == "verify")));
 
     fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_public_surface_is_deterministically_sorted_by_line_then_qualname() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let surface = store.query_public_surface(&RepoPath::from("src/parser.rs")).unwrap();
+    let ordered: Vec<_> = surface
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.line, symbol.qualname.as_str()))
+        .collect();
+
+    assert_eq!(ordered, vec![(1, "parser::parse")]);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn rust_small_public_surface_includes_exported_resolver_symbol() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let surface = store
+        .query_public_surface(&RepoPath::from("src/resolver.rs"))
+        .unwrap();
+
+    assert_eq!(surface.file, RepoPath::from("src/resolver.rs"));
+    assert_eq!(surface.symbols.len(), 1);
+    assert_eq!(surface.symbols[0].qualname, "resolver::resolve");
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn public_surface_diff_marks_matching_identity_with_metadata_changes_as_modified() {
+    let before = PublicSurfaceSymbol {
+        file: RepoPath::from("src/parser.rs"),
+        name: "parse".to_string(),
+        qualname: "parser::parse".to_string(),
+        kind: SymbolKind::Function,
+        visibility: Visibility::Public,
+        line: 1,
+    };
+    let after = PublicSurfaceSymbol {
+        file: RepoPath::from("src/parser.rs"),
+        name: "parse".to_string(),
+        qualname: "parser::parse".to_string(),
+        kind: SymbolKind::Function,
+        visibility: Visibility::Public,
+        line: 3,
+    };
+
+    let change = PublicSurfaceChange {
+        kind: PublicSurfaceChangeKind::Modified,
+        before: Some(before),
+        after: Some(after),
+    };
+
+    assert_eq!(change.kind, PublicSurfaceChangeKind::Modified);
+    assert_eq!(change.before.as_ref().unwrap().line, 1);
+    assert_eq!(change.after.as_ref().unwrap().line, 3);
+    assert_ne!(change.before, change.after);
 }
 
 #[test]

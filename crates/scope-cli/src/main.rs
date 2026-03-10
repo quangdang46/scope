@@ -556,18 +556,18 @@ fn format_public_surface(
     let Some(path) = path else {
         return Ok(String::new());
     };
-    let symbols = store.query_symbols(&path, true, None)?;
-    if symbols.is_empty() {
+    let surface = store.query_public_surface(&path)?;
+    if surface.symbols.is_empty() {
         return Ok(String::new());
     }
     let mut lines = vec![format!("--- PUBLIC SURFACE ({}) ---", path.0)];
-    for symbol in symbols {
+    for symbol in surface.symbols {
         lines.push(format!(
             "{} | {} | {} | line {}",
             symbol.qualname,
             symbol_kind_label(&symbol.kind),
             visibility_label(&symbol.visibility),
-            symbol.span.start_line
+            symbol.line
         ));
     }
     Ok(lines.join("\n"))
@@ -1039,8 +1039,8 @@ fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_context_pack, index_repo, render_cli_error, resolve_surface_target, run_benchmark,
-        serialize_output,
+        build_context_pack, format_public_surface, index_repo, render_cli_error,
+        resolve_surface_target, run_benchmark, serialize_output,
     };
     use scope_core::{
         PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol, RepoPath,
@@ -1402,9 +1402,98 @@ mod tests {
         let _ = index_repo(&repo, &store).unwrap();
 
         let error = resolve_surface_target(&store, "missing::symbol").unwrap_err();
-        assert!(error.to_string().contains("missing indexed file for target"));
+        assert!(error.to_string().contains("missing::symbol"));
 
         fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn surface_target_helper_returns_file_target_unchanged() {
+        let repo = prepare_fixture_copy("rust_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let resolved = resolve_surface_target(&store, "src/parser.rs").unwrap();
+        assert_eq!(resolved, RepoPath::from("src/parser.rs"));
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn format_public_surface_uses_store_surface_ordering_and_shape() {
+        let repo = prepare_fixture_copy("rust_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let formatted = format_public_surface(&store, "parser::parse").unwrap();
+
+        assert_eq!(
+            formatted,
+            "--- PUBLIC SURFACE (src/parser.rs) ---\nparser::parse | function | public | line 1"
+        );
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn surface_stub_reports_symbol_target_as_resolved_file() {
+        let repo = prepare_fixture_copy("ts_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let path = resolve_surface_target(&store, "auth::middleware::verifyToken").unwrap();
+        let surface = store.query_public_surface(&path).unwrap();
+        let envelope = scope_core::stub::surface(path.clone(), surface);
+
+        assert_eq!(envelope.data.target, RepoPath::from("src/auth/middleware.ts"));
+        assert_eq!(envelope.data.surface.file, RepoPath::from("src/auth/middleware.ts"));
+        assert!(envelope
+            .data
+            .surface
+            .symbols
+            .iter()
+            .any(|symbol| symbol.qualname == "auth::middleware::verifyToken"));
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn surface_diff_stub_reports_expected_fixture_summary() {
+        let repo = prepare_fixture_copy("ts_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let before = resolve_surface_target(&store, "src/auth/jwt.ts").unwrap();
+        let after = resolve_surface_target(&store, "src/auth/aliases.ts").unwrap();
+        let diff = store.diff_public_surface(&before, &after).unwrap();
+        let envelope = scope_core::stub::surface_diff(before.clone(), after.clone(), diff);
+
+        assert_eq!(envelope.data.before, RepoPath::from("src/auth/jwt.ts"));
+        assert_eq!(envelope.data.after, RepoPath::from("src/auth/aliases.ts"));
+        assert_eq!(envelope.data.diff.summary.added_count, 1);
+        assert_eq!(envelope.data.diff.summary.removed_count, 2);
+        assert_eq!(envelope.data.diff.summary.modified_count, 0);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn surface_usage_errors_match_expected_messages() {
+        let missing_target = scope_core::ScopeError::InvalidInput(
+            "surface requires a target or diff subcommand".to_string(),
+        );
+        let mixed_usage = scope_core::ScopeError::InvalidInput(
+            "surface target cannot be combined with a subcommand".to_string(),
+        );
+
+        assert_eq!(
+            missing_target.to_string(),
+            "invalid command input: surface requires a target or diff subcommand"
+        );
+        assert_eq!(
+            mixed_usage.to_string(),
+            "invalid command input: surface target cannot be combined with a subcommand"
+        );
     }
 
     #[test]
