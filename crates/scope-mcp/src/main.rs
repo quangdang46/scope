@@ -3,12 +3,12 @@ use std::{
     env, fs,
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{Instant, UNIX_EPOCH},
 };
 
 use scope_core::{
-    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, DatabaseInfo,
-    RepoPath, RiskSort, ScanConfig, Store, SymbolKind, Verbosity,
+    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, CochangeSort,
+    DatabaseInfo, RepoPath, RiskSort, ScanConfig, Store, SymbolKind, Verbosity,
 };
 use serde_json::{json, Value};
 
@@ -304,6 +304,22 @@ fn tool_registry() -> Vec<Value> {
             }),
         ),
         tool_definition(
+            "pack",
+            "Generate a budgeted plain-text context pack for an agent.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "target": { "type": "string" },
+                    "change_type": { "type": "string" },
+                    "budget": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["target", "budget"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
             "arch_check",
             "Check architecture rules against indexed file dependencies.",
             json!({
@@ -344,6 +360,24 @@ fn tool_registry() -> Vec<Value> {
                     "top": { "type": "integer", "minimum": 0 },
                     "sort": { "type": "string" }
                 },
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "cochange",
+            "Report files that frequently change with a target file across recent commits.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "target": { "type": "string" },
+                    "days": { "type": "integer", "minimum": 1 },
+                    "min_shared_commits": { "type": "integer", "minimum": 1 },
+                    "top": { "type": "integer", "minimum": 0 },
+                    "sort": { "type": "string" }
+                },
+                "required": ["target"],
                 "additionalProperties": false
             }),
         ),
@@ -429,6 +463,23 @@ fn tool_registry() -> Vec<Value> {
             }),
         ),
         tool_definition(
+            "rename_plan",
+            "Build a conservative rename execution plan for a file or symbol target.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "target": { "type": "string" },
+                    "to": { "type": "string" },
+                    "apply": { "type": "boolean" },
+                    "force": { "type": "boolean" }
+                },
+                "required": ["target", "to"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
             "unused",
             "Report exported symbols with no indexed inbound references.",
             json!({
@@ -480,6 +531,33 @@ fn tool_registry() -> Vec<Value> {
                     "depth": { "type": "integer", "minimum": 0 }
                 },
                 "required": ["target"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "doctor",
+            "Inspect repository and index health.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "fix": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "benchmark",
+            "Benchmark full versus incremental indexing on an isolated repo copy.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "fixture": { "type": "string" },
+                    "iterations": { "type": "integer", "minimum": 1 }
+                },
                 "additionalProperties": false
             }),
         ),
@@ -566,19 +644,24 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, DispatchError>
         "explain" => dispatch_explain(arguments),
         "why" => dispatch_why(arguments),
         "context" => dispatch_context(arguments),
+        "pack" => dispatch_pack(arguments),
         "arch_check" => dispatch_arch_check(arguments),
         "stability" => dispatch_stability(arguments),
         "risk" => dispatch_risk(arguments),
+        "cochange" => dispatch_cochange(arguments),
         "surface" => dispatch_surface(arguments),
         "surface_diff" => dispatch_surface_diff(arguments),
         "test_map_build" => dispatch_test_map_build(arguments),
         "test_map_covers" => dispatch_test_map_covers(arguments),
         "test_map_covered_by" => dispatch_test_map_covered_by(arguments),
         "test_map_uncovered" => dispatch_test_map_uncovered(arguments),
+        "rename_plan" => dispatch_rename_plan(arguments),
         "unused" => dispatch_unused(arguments),
         "cycles" => dispatch_cycles(arguments),
         "diff" => dispatch_diff(arguments),
         "tree" => dispatch_tree(arguments),
+        "doctor" => dispatch_doctor(arguments),
+        "benchmark" => dispatch_benchmark(arguments),
         "snapshot_save" => dispatch_snapshot_save(arguments),
         "snapshot_list" => dispatch_snapshot_list(arguments),
         "snapshot_delete" => dispatch_snapshot_delete(arguments),
@@ -749,6 +832,25 @@ fn dispatch_context(arguments: &Value) -> String {
     }
 }
 
+fn dispatch_pack(arguments: &Value) -> String {
+    match required_string(arguments, "target").and_then(|target| {
+        bootstrap_from_arguments(arguments).and_then(|context| {
+            let change_type = optional_string(arguments, "change_type")
+                .unwrap_or_else(|| "body".to_string());
+            let budget = optional_usize(arguments, "budget")?.ok_or_else(|| {
+                scope_core::ScopeError::InvalidInput(
+                    "mcp tool arguments require `budget`".to_string(),
+                )
+            })?;
+            let pack = build_context_pack(&context.store, &target, &change_type, budget)?;
+            Ok(pack)
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("pack", &error),
+    }
+}
+
 fn dispatch_arch_check(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
         let config = load_arch_config(&context.paths.repo_root)?;
@@ -789,6 +891,28 @@ fn dispatch_risk(arguments: &Value) -> String {
     }) {
         Ok(output) => output,
         Err(error) => render_domain_error("risk", &error),
+    }
+}
+
+fn dispatch_cochange(arguments: &Value) -> String {
+    match required_string(arguments, "target").and_then(|target| {
+        bootstrap_from_arguments(arguments).and_then(|context| {
+            let days = optional_u32(arguments, "days")?.unwrap_or(90);
+            let min_shared_commits = optional_usize(arguments, "min_shared_commits")?.unwrap_or(1);
+            let top = optional_usize(arguments, "top")?;
+            let sort = optional_cochange_sort(arguments, "sort")?;
+            let result = context.store.query_cochange(
+                &RepoPath::from(target),
+                days,
+                min_shared_commits,
+                top,
+                sort,
+            )?;
+            serialize_json(&scope_core::stub::cochange(result))
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("cochange", &error),
     }
 }
 
@@ -875,6 +999,31 @@ fn dispatch_test_map_uncovered(arguments: &Value) -> String {
     }
 }
 
+fn dispatch_rename_plan(arguments: &Value) -> String {
+    let target = required_string(arguments, "target");
+    let new_name = required_string(arguments, "to");
+    match target.and_then(|target| {
+        new_name.and_then(|new_name| {
+            bootstrap_from_arguments(arguments).and_then(|context| {
+                validate_new_name(&new_name)?;
+                let apply = optional_bool(arguments, "apply").unwrap_or(false);
+                let force = optional_bool(arguments, "force").unwrap_or(false);
+                let plan = context.store.build_rename_plan(
+                    &context.paths.repo_root,
+                    &target,
+                    &new_name,
+                    apply,
+                    force,
+                )?;
+                serialize_json(&scope_core::stub::rename_plan(plan))
+            })
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("rename-plan", &error),
+    }
+}
+
 fn dispatch_unused(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
         let result = context.store.query_unused()?;
@@ -921,6 +1070,33 @@ fn dispatch_tree(arguments: &Value) -> String {
     }) {
         Ok(output) => output,
         Err(error) => render_domain_error("tree", &error),
+    }
+}
+
+fn dispatch_doctor(arguments: &Value) -> String {
+    match bootstrap_from_arguments(arguments).and_then(|context| {
+        let fix = optional_bool(arguments, "fix").unwrap_or(false);
+        let stats = context.store.index_health_stats()?;
+        serialize_json(&scope_core::stub::doctor(fix, stats))
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("doctor", &error),
+    }
+}
+
+fn dispatch_benchmark(arguments: &Value) -> String {
+    match bootstrap_from_arguments(arguments).and_then(|context| {
+        let fixture = optional_string(arguments, "fixture");
+        let iterations = optional_u32(arguments, "iterations")?;
+        let summary = run_benchmark(
+            &context.paths.repo_root,
+            fixture.as_deref(),
+            iterations.unwrap_or(1),
+        )?;
+        serialize_json(&scope_core::stub::benchmark(fixture, iterations, summary))
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("benchmark", &error),
     }
 }
 
@@ -1116,6 +1292,17 @@ fn optional_risk_sort(arguments: &Value, key: &str) -> Result<RiskSort, scope_co
     }
 }
 
+fn optional_cochange_sort(arguments: &Value, key: &str) -> Result<CochangeSort, scope_core::ScopeError> {
+    match optional_string(arguments, key).as_deref() {
+        None | Some("score") => Ok(CochangeSort::Score),
+        Some("shared_commits") => Ok(CochangeSort::SharedCommits),
+        Some("path") => Ok(CochangeSort::Path),
+        Some(other) => Err(scope_core::ScopeError::InvalidInput(format!(
+            "unsupported cochange sort: {other}"
+        ))),
+    }
+}
+
 fn serialize_json<T: serde::Serialize>(value: &T) -> Result<String, scope_core::ScopeError> {
     serde_json::to_string_pretty(value).map_err(|error| {
         scope_core::ScopeError::InvalidInput(format!("failed to serialize MCP result: {error}"))
@@ -1129,12 +1316,339 @@ fn render_domain_error(command: &'static str, error: &scope_core::ScopeError) ->
         })
 }
 
+fn build_context_pack(
+    store: &scope_core::Store,
+    target: &str,
+    change_type: &str,
+    budget: usize,
+) -> Result<String, scope_core::ScopeError> {
+    let context = store.query_context(&[target.to_string()], change_type, Some(budget))?;
+    let mut sections = Vec::new();
+
+    let public_surface = format_public_surface(store, target)?;
+    if !public_surface.is_empty() {
+        sections.push(public_surface);
+    }
+
+    let direct_callers = format_direct_callers(store, target)?;
+    if !direct_callers.is_empty() {
+        sections.push(direct_callers);
+    }
+
+    let direct_callees = format_direct_callees(store, target)?;
+    if !direct_callees.is_empty() {
+        sections.push(direct_callees);
+    }
+
+    let transitive_callers = format_transitive_callers(&context.should_read);
+    if !transitive_callers.is_empty() {
+        sections.push(transitive_callers);
+    }
+
+    let change_section = format_change_specific_section(store, target, change_type)?;
+    if !change_section.is_empty() {
+        sections.push(change_section);
+    }
+
+    let header_without_used = vec![
+        "=== SCOPE CONTEXT PACK ===".to_string(),
+        format!("Target:      {target}"),
+        format!("Change type: {change_type}"),
+        format!("Budget:      {budget} tokens (approx)"),
+        "Used:        0 tokens (approx)".to_string(),
+        format!("Schema:      {}", scope_core::SCHEMA_VERSION),
+        String::new(),
+    ]
+    .join("\n");
+    let base_overhead = estimate_text_tokens(&header_without_used)
+        + estimate_text_tokens(&format!(
+            "END SCOPE PACK | schema: {} | truncated: yes",
+            scope_core::SCHEMA_VERSION
+        ));
+
+    let mut body = String::new();
+    let mut body_used = 0usize;
+    let mut truncated = context.summary.truncated || base_overhead > budget;
+    for section in sections {
+        let section_tokens = estimate_text_tokens(&section);
+        if base_overhead + body_used + section_tokens > budget {
+            truncated = true;
+            break;
+        }
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&section);
+        body_used += section_tokens;
+    }
+
+    let footer = format!(
+        "END SCOPE PACK | schema: {} | truncated: {}",
+        scope_core::SCHEMA_VERSION,
+        if truncated { "yes" } else { "no" }
+    );
+
+    let header = vec![
+        "=== SCOPE CONTEXT PACK ===".to_string(),
+        format!("Target:      {target}"),
+        format!("Change type: {change_type}"),
+        format!("Budget:      {budget} tokens (approx)"),
+        format!(
+            "Used:        {} tokens (approx)",
+            estimate_text_tokens(&header_without_used) + body_used + estimate_text_tokens(&footer)
+        ),
+        format!("Schema:      {}", scope_core::SCHEMA_VERSION),
+        String::new(),
+    ]
+    .join("\n");
+
+    let mut pack = header;
+    if !body.is_empty() {
+        pack.push_str("\n\n");
+        pack.push_str(&body);
+    }
+    pack.push_str("\n\n");
+    pack.push_str(&footer);
+
+    Ok(pack)
+}
+
+fn format_public_surface(
+    store: &scope_core::Store,
+    target: &str,
+) -> Result<String, scope_core::ScopeError> {
+    let path = store.target_file_for_target(target)?;
+    let Some(path) = path else {
+        return Ok(String::new());
+    };
+    let surface = store.query_public_surface(&path)?;
+    if surface.symbols.is_empty() {
+        return Ok(String::new());
+    }
+    let mut lines = vec![format!("--- PUBLIC SURFACE ({}) ---", path.0)];
+    for symbol in surface.symbols {
+        lines.push(format!(
+            "{} | {} | {} | line {}",
+            symbol.qualname,
+            symbol_kind_label(&symbol.kind),
+            visibility_label(&symbol.visibility),
+            symbol.line
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn format_direct_callers(
+    store: &scope_core::Store,
+    target: &str,
+) -> Result<String, scope_core::ScopeError> {
+    if !looks_like_symbol(target) {
+        return Ok(String::new());
+    }
+    let records = store.query_callers(target, false)?;
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.certainty,
+                scope_core::Certainty::Exact | scope_core::Certainty::Resolved
+            )
+        })
+        .collect();
+    if records.is_empty() {
+        return Ok(String::new());
+    }
+    let mut lines = vec!["--- DIRECT CALLERS ---".to_string()];
+    for record in records {
+        lines.push(format_traversal_line(&record));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn format_direct_callees(
+    store: &scope_core::Store,
+    target: &str,
+) -> Result<String, scope_core::ScopeError> {
+    if !looks_like_symbol(target) {
+        return Ok(String::new());
+    }
+    let records = store.query_callees(target, false)?;
+    if records.is_empty() {
+        return Ok(String::new());
+    }
+    let mut lines = vec!["--- DIRECT CALLEES ---".to_string()];
+    for record in records {
+        lines.push(format_traversal_line(&record));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn format_transitive_callers(should_read: &[scope_core::ContextFileRecord]) -> String {
+    let nearby: Vec<_> = should_read
+        .iter()
+        .filter(|record| {
+            record.distance == 2
+                || record.roles.contains(&scope_core::ContextFileRole::NearbyContext)
+                || record.roles.contains(&scope_core::ContextFileRole::Importer)
+        })
+        .collect();
+    if nearby.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec!["--- TRANSITIVE CALLERS / NEARBY CONTEXT ---".to_string()];
+    for record in nearby {
+        lines.push(format_context_record_line(record));
+    }
+    lines.join("\n")
+}
+
+fn format_change_specific_section(
+    store: &scope_core::Store,
+    target: &str,
+    change_type: &str,
+) -> Result<String, scope_core::ScopeError> {
+    let impacted = store.query_impact(target, change_type, None)?;
+    if impacted.is_empty() {
+        return Ok(String::new());
+    }
+    let title = match change_type {
+        "rename" => "--- RENAME IMPACT ---",
+        "delete" => "--- DELETE IMPACT ---",
+        "signature" => "--- SIGNATURE IMPACT ---",
+        "body" => "--- BODY IMPACT ---",
+        "visibility" => "--- VISIBILITY IMPACT ---",
+        "side-effect" => "--- SIDE-EFFECT IMPACT ---",
+        _ => "--- IMPACT ---",
+    };
+    let mut lines = vec![title.to_string()];
+    for record in impacted {
+        lines.push(format_traversal_line(&record));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn format_traversal_line(record: &scope_core::TraversalRecord) -> String {
+    let path = record
+        .path
+        .as_ref()
+        .map(|path| path.0.as_str())
+        .unwrap_or("<unknown>");
+    let label = record.qualname.as_deref().unwrap_or(path);
+    format!(
+        "{} | {} | certainty: {} | distance: {} | {}",
+        path,
+        label,
+        certainty_label(&record.certainty),
+        record.distance,
+        record.reason
+    )
+}
+
+fn format_context_record_line(record: &scope_core::ContextFileRecord) -> String {
+    format!(
+        "{} | tokens: {} | distance: {} | certainty: {} | roles: {}",
+        record.path.0,
+        record.estimated_tokens,
+        record.distance,
+        certainty_label(&record.certainty),
+        record
+            .roles
+            .iter()
+            .map(context_role_label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn validate_new_name(new_name: &str) -> Result<(), scope_core::ScopeError> {
+    if new_name.is_empty()
+        || !new_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+    {
+        return Err(scope_core::ScopeError::InvalidInput(
+            "rename-plan requires a simple identifier for --to".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn looks_like_symbol(target: &str) -> bool {
+    target.contains("::")
+        && !target.ends_with(".rs")
+        && !target.ends_with(".ts")
+        && !target.ends_with(".js")
+}
+
+fn estimate_text_tokens(text: &str) -> usize {
+    (text.len() / 4).max(1)
+}
+
+fn certainty_label(certainty: &scope_core::Certainty) -> &'static str {
+    match certainty {
+        scope_core::Certainty::Exact => "exact",
+        scope_core::Certainty::Resolved => "resolved",
+        scope_core::Certainty::Heuristic => "heuristic",
+        scope_core::Certainty::Dynamic => "dynamic",
+    }
+}
+
+fn visibility_label(visibility: &scope_core::Visibility) -> &'static str {
+    match visibility {
+        scope_core::Visibility::Local => "local",
+        scope_core::Visibility::Module => "module",
+        scope_core::Visibility::Package => "package",
+        scope_core::Visibility::Public => "public",
+        scope_core::Visibility::Unknown => "unknown",
+    }
+}
+
+fn symbol_kind_label(kind: &scope_core::SymbolKind) -> &'static str {
+    match kind {
+        scope_core::SymbolKind::Function => "function",
+        scope_core::SymbolKind::Method => "method",
+        scope_core::SymbolKind::Struct => "struct",
+        scope_core::SymbolKind::Class => "class",
+        scope_core::SymbolKind::Enum => "enum",
+        scope_core::SymbolKind::TypeAlias => "type_alias",
+        scope_core::SymbolKind::Module => "module",
+        scope_core::SymbolKind::Namespace => "namespace",
+        scope_core::SymbolKind::Constant => "constant",
+        scope_core::SymbolKind::Static => "static",
+        scope_core::SymbolKind::Interface => "interface",
+        scope_core::SymbolKind::Trait => "trait",
+        scope_core::SymbolKind::Variable => "variable",
+    }
+}
+
+fn context_role_label(role: &scope_core::ContextFileRole) -> &'static str {
+    match role {
+        scope_core::ContextFileRole::Target => "target",
+        scope_core::ContextFileRole::DefinesTargetSymbol => "defines_target_symbol",
+        scope_core::ContextFileRole::DirectCaller => "direct_caller",
+        scope_core::ContextFileRole::DirectCallee => "direct_callee",
+        scope_core::ContextFileRole::Importer => "importer",
+        scope_core::ContextFileRole::Dependency => "dependency",
+        scope_core::ContextFileRole::NearbyContext => "nearby_context",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexRunStats {
     indexed_files: usize,
     changed_files: usize,
     deleted_files: usize,
     affected_files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BenchmarkIterationResult {
+    indexed_files: usize,
+    mutation_target: RepoPath,
+    full_ms: u128,
+    incremental_ms: u128,
+    full_stats: IndexRunStats,
+    incremental_stats: IndexRunStats,
 }
 
 fn index_repo(repo_root: &Path, store: &Store) -> Result<IndexRunStats, scope_core::ScopeError> {
@@ -1229,6 +1743,219 @@ fn index_repo(repo_root: &Path, store: &Store) -> Result<IndexRunStats, scope_co
     })
 }
 
+fn run_benchmark(
+    repo_root: &Path,
+    fixture: Option<&str>,
+    iterations: u32,
+) -> Result<scope_core::stub::BenchmarkSummary, scope_core::ScopeError> {
+    let iterations = iterations.max(1);
+    let source_root = fixture
+        .map(fixture_root)
+        .transpose()?
+        .unwrap_or_else(|| repo_root.to_path_buf());
+
+    let mut runs = Vec::with_capacity(iterations as usize);
+
+    for iteration in 0..iterations {
+        let benchmark_root =
+            prepare_benchmark_copy(&source_root, &format!("benchmark-{iteration}"))?;
+        let summary = benchmark_iteration(&benchmark_root, fixture)?;
+        runs.push(summary);
+        fs::remove_dir_all(&benchmark_root)
+            .map_err(|error| scope_core::ScopeError::io(&benchmark_root, error))?;
+    }
+
+    let indexed_files = runs.first().map(|run| run.indexed_files).unwrap_or(0);
+    let mutation = scope_core::stub::BenchmarkMutationSummary {
+        target_file: runs
+            .first()
+            .map(|run| run.mutation_target.clone())
+            .unwrap_or_else(|| RepoPath::from("")),
+        change_kind: "append_comment",
+    };
+    let full = summarize_phase(&runs, |run| run.full_ms, |run| &run.full_stats);
+    let incremental = summarize_phase(
+        &runs,
+        |run| run.incremental_ms,
+        |run| &run.incremental_stats,
+    );
+    let comparison = scope_core::stub::BenchmarkComparisonSummary {
+        saved_ms: full.avg_ms as i128 - incremental.avg_ms as i128,
+        incremental_pct_of_full: if full.avg_ms == 0 {
+            0
+        } else {
+            ((incremental.avg_ms * 100) / full.avg_ms) as u32
+        },
+    };
+
+    Ok(scope_core::stub::BenchmarkSummary {
+        indexed_files,
+        mutation,
+        full,
+        incremental,
+        comparison,
+    })
+}
+
+fn benchmark_iteration(
+    benchmark_root: &Path,
+    fixture: Option<&str>,
+) -> Result<BenchmarkIterationResult, scope_core::ScopeError> {
+    let db_path = benchmark_root.join(".scope/index.db");
+    let store = scope_core::Store::open(&db_path)?;
+
+    let started = Instant::now();
+    let full_stats = index_repo(benchmark_root, &store)?;
+    let full_ms = started.elapsed().as_millis();
+
+    let target = select_benchmark_mutation_target(benchmark_root, fixture)?;
+    apply_benchmark_edit(&target)?;
+
+    let started = Instant::now();
+    let incremental_stats = index_repo(benchmark_root, &store)?;
+    let incremental_ms = started.elapsed().as_millis();
+
+    Ok(BenchmarkIterationResult {
+        indexed_files: full_stats.indexed_files,
+        mutation_target: repo_relative_path(benchmark_root, &target),
+        full_ms,
+        incremental_ms,
+        full_stats,
+        incremental_stats,
+    })
+}
+
+fn summarize_phase(
+    runs: &[BenchmarkIterationResult],
+    duration: impl Fn(&BenchmarkIterationResult) -> u128,
+    stats: impl Fn(&BenchmarkIterationResult) -> &IndexRunStats,
+) -> scope_core::stub::BenchmarkPhaseSummary {
+    let min_ms = runs.iter().map(&duration).min().unwrap_or(0);
+    let max_ms = runs.iter().map(&duration).max().unwrap_or(0);
+    let avg_ms = if runs.is_empty() {
+        0
+    } else {
+        runs.iter().map(&duration).sum::<u128>() / runs.len() as u128
+    };
+
+    let avg_indexed = if runs.is_empty() {
+        0
+    } else {
+        runs.iter().map(|run| stats(run).indexed_files).sum::<usize>() / runs.len()
+    };
+    let avg_changed = if runs.is_empty() {
+        0
+    } else {
+        runs.iter().map(|run| stats(run).changed_files).sum::<usize>() / runs.len()
+    };
+    let avg_deleted = if runs.is_empty() {
+        0
+    } else {
+        runs.iter().map(|run| stats(run).deleted_files).sum::<usize>() / runs.len()
+    };
+    let avg_affected = if runs.is_empty() {
+        0
+    } else {
+        runs.iter().map(|run| stats(run).affected_files).sum::<usize>() / runs.len()
+    };
+
+    scope_core::stub::BenchmarkPhaseSummary {
+        avg_ms,
+        min_ms,
+        max_ms,
+        files_processed_avg: avg_indexed,
+        changed_files_avg: avg_changed,
+        deleted_files_avg: avg_deleted,
+        affected_files_avg: avg_affected,
+    }
+}
+
+fn select_benchmark_mutation_target(
+    repo_root: &Path,
+    fixture: Option<&str>,
+) -> Result<PathBuf, scope_core::ScopeError> {
+    let preferred = fixture
+        .map(|name| match name {
+            "rust_small" => "src/parser.rs",
+            "ts_small" | "test_map_ts" => "src/auth/verify.ts",
+            _ => "",
+        })
+        .filter(|path| !path.is_empty())
+        .map(|relative| repo_root.join(relative));
+
+    if let Some(path) = preferred.filter(|path| path.exists()) {
+        return Ok(path);
+    }
+
+    let entries = scan_repo(repo_root, &ScanConfig::default())?;
+    entries
+        .into_iter()
+        .map(|entry| entry.absolute_path)
+        .next()
+        .ok_or_else(|| scope_core::ScopeError::InvalidInput("benchmark found no source files".to_string()))
+}
+
+fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
+    let mut content = fs::read_to_string(path).map_err(|error| scope_core::ScopeError::io(path, error))?;
+    content.push_str("\n// scope benchmark mutation\n");
+    fs::write(path, content).map_err(|error| scope_core::ScopeError::io(path, error))
+}
+
+fn repo_relative_path(repo_root: &Path, path: &Path) -> RepoPath {
+    let relative = path.strip_prefix(repo_root).unwrap_or(path);
+    RepoPath::from(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn fixture_root(name: &str) -> Result<PathBuf, scope_core::ScopeError> {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .map_err(|error| scope_core::ScopeError::io("workspace root", error))?;
+    Ok(repo.join("fixtures").join(name))
+}
+
+fn prepare_benchmark_copy(source_root: &Path, prefix: &str) -> Result<PathBuf, scope_core::ScopeError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| scope_core::ScopeError::InvalidInput(error.to_string()))?
+        .as_nanos();
+    let dst = std::env::temp_dir().join(format!("scope-mcp-{prefix}-{nanos}"));
+    copy_dir_recursive_skip_index(source_root, source_root, &dst)?;
+    Ok(dst)
+}
+
+fn copy_dir_recursive_skip_index(
+    root: &Path,
+    src: &Path,
+    dst: &Path,
+) -> Result<(), scope_core::ScopeError> {
+    fs::create_dir_all(dst).map_err(|error| scope_core::ScopeError::io(dst, error))?;
+    for entry in fs::read_dir(src).map_err(|error| scope_core::ScopeError::io(src, error))? {
+        let entry = entry.map_err(|error| scope_core::ScopeError::io(src, error))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(|error| scope_core::ScopeError::io(&src_path, error))?
+            .is_dir()
+        {
+            copy_dir_recursive_skip_index(root, &src_path, &dst_path)?;
+        } else {
+            if src_path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|relative| relative.to_str())
+                == Some(".scope/index.db")
+            {
+                continue;
+            }
+            fs::copy(&src_path, &dst_path)
+                .map_err(|error| scope_core::ScopeError::io(&src_path, error))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,10 +2021,15 @@ mod tests {
         let tools = tool_registry();
         assert!(tools.iter().any(|tool| tool["name"] == "deps"));
         assert!(tools.iter().any(|tool| tool["name"] == "impact"));
+        assert!(tools.iter().any(|tool| tool["name"] == "pack"));
         assert!(tools.iter().any(|tool| tool["name"] == "arch_check"));
+        assert!(tools.iter().any(|tool| tool["name"] == "cochange"));
         assert!(tools.iter().any(|tool| tool["name"] == "surface"));
         assert!(tools.iter().any(|tool| tool["name"] == "surface_diff"));
         assert!(tools.iter().any(|tool| tool["name"] == "test_map_covers"));
+        assert!(tools.iter().any(|tool| tool["name"] == "rename_plan"));
+        assert!(tools.iter().any(|tool| tool["name"] == "doctor"));
+        assert!(tools.iter().any(|tool| tool["name"] == "benchmark"));
         assert!(tools.iter().any(|tool| tool["name"] == "snapshot_save"));
         assert!(tools.iter().any(|tool| tool["name"] == "snapshot_list"));
         assert!(tools.iter().any(|tool| tool["name"] == "snapshot_delete"));
@@ -1389,6 +2121,131 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["source_file"], "src/auth/middleware.ts");
         assert_eq!(value["data"]["result"]["summary"]["covering_tests"], 3);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_cochange_returns_scope_json_envelope() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+        let context = bootstrap_from_arguments(&json!({ "repo_root": repo.display().to_string() })).unwrap();
+        context
+            .store
+            .persist_file_churn(&RepoPath::from("src/parser.rs"), "c1", Some("agent@example.com"), None)
+            .unwrap();
+        context
+            .store
+            .persist_file_churn(&RepoPath::from("src/utils.rs"), "c1", Some("agent@example.com"), None)
+            .unwrap();
+
+        let output = dispatch_tool(
+            "cochange",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/parser.rs"
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["target"], "src/parser.rs");
+        assert_eq!(value["data"]["result"]["files"][0]["path"], "src/utils.rs");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_pack_returns_plain_text_context_pack() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "pack",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "parser::parse",
+                "change_type": "body",
+                "budget": 400
+            }),
+        )
+        .unwrap();
+        assert!(output.contains("=== SCOPE CONTEXT PACK ==="));
+        assert!(output.contains("Target:      parser::parse"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_rename_plan_returns_scope_json_envelope() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "rename_plan",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "parser::parse",
+                "to": "parse2"
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "rename-plan");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["target"], "parser::parse");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_doctor_returns_scope_json_envelope() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "doctor",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "fix": false
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "doctor");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["checks"].is_array());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_benchmark_returns_scope_json_envelope() {
+        let repo = prepare_fixture_copy("rust_small");
+        let output = dispatch_tool(
+            "benchmark",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "iterations": 1
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "benchmark");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["summary"]["comparison"].is_object());
         fs::remove_dir_all(repo).unwrap();
     }
 
