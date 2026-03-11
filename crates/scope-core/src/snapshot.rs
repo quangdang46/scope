@@ -6,7 +6,8 @@ pub const SNAPSHOT_VERSION: u32 = 1;
 pub const SNAPSHOT_COMPRESSION_LEVEL: i32 = 3;
 
 pub fn encode_snapshot(record: &SnapshotStoredRecord) -> ScopeResult<Vec<u8>> {
-    let json = serde_json::to_vec(record).map_err(|error| ScopeError::Serialization(error.to_string()))?;
+    let json =
+        serde_json::to_vec(record).map_err(|error| ScopeError::Serialization(error.to_string()))?;
     zstd::stream::encode_all(Cursor::new(json), SNAPSHOT_COMPRESSION_LEVEL)
         .map_err(|error| ScopeError::Serialization(error.to_string()))
 }

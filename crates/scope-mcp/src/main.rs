@@ -54,7 +54,10 @@ fn handle_message(request: &Value) -> Option<Value> {
         "tools/call" => {
             let id = id?;
             let tool_name = params.get("name").and_then(Value::as_str);
-            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             match tool_name {
                 Some(name) => match dispatch_tool(name, &arguments) {
                     Ok(output) => Some(jsonrpc_result(
@@ -777,7 +780,9 @@ fn dispatch_deps(arguments: &Value) -> String {
             let transitive = optional_bool(arguments, "transitive").unwrap_or(false);
             let depth = optional_usize(arguments, "depth")?;
             let dependencies = if reverse {
-                context.store.query_reverse_deps(&RepoPath::from(file.clone()))?
+                context
+                    .store
+                    .query_reverse_deps(&RepoPath::from(file.clone()))?
             } else {
                 context.store.query_deps(&RepoPath::from(file.clone()))?
             };
@@ -801,9 +806,11 @@ fn dispatch_symbols(arguments: &Value) -> String {
         bootstrap_from_arguments(arguments).and_then(|context| {
             let public_only = optional_bool(arguments, "public_only").unwrap_or(false);
             let kind = optional_symbol_kind(arguments, "kind")?;
-            let symbols = context
-                .store
-                .query_symbols(&RepoPath::from(file.clone()), public_only, kind.clone())?;
+            let symbols = context.store.query_symbols(
+                &RepoPath::from(file.clone()),
+                public_only,
+                kind.clone(),
+            )?;
             serialize_json(&scope_core::stub::symbols(file, public_only, kind, symbols))
         })
     }) {
@@ -848,7 +855,12 @@ fn dispatch_impact(arguments: &Value) -> String {
             bootstrap_from_arguments(arguments).and_then(|context| {
                 let depth = optional_usize(arguments, "depth")?;
                 let impacted = context.store.query_impact(&target, &change_type, depth)?;
-                serialize_json(&scope_core::stub::impact(target, change_type, depth, impacted))
+                serialize_json(&scope_core::stub::impact(
+                    target,
+                    change_type,
+                    depth,
+                    impacted,
+                ))
             })
         })
     }) {
@@ -894,7 +906,9 @@ fn dispatch_context(arguments: &Value) -> String {
         required_string(arguments, "change_type").and_then(|change_type| {
             bootstrap_from_arguments(arguments).and_then(|context| {
                 let budget = optional_usize(arguments, "budget")?;
-                let result = context.store.query_context(&targets, &change_type, budget)?;
+                let result = context
+                    .store
+                    .query_context(&targets, &change_type, budget)?;
                 serialize_json(&scope_core::stub::context(result))
             })
         })
@@ -907,8 +921,8 @@ fn dispatch_context(arguments: &Value) -> String {
 fn dispatch_pack(arguments: &Value) -> String {
     match required_string(arguments, "target").and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let change_type = optional_string(arguments, "change_type")
-                .unwrap_or_else(|| "body".to_string());
+            let change_type =
+                optional_string(arguments, "change_type").unwrap_or_else(|| "body".to_string());
             let budget = optional_usize(arguments, "budget")?.ok_or_else(|| {
                 scope_core::ScopeError::InvalidInput(
                     "mcp tool arguments require `budget`".to_string(),
@@ -1022,8 +1036,14 @@ fn dispatch_surface_diff(arguments: &Value) -> String {
             bootstrap_from_arguments(arguments).and_then(|context| {
                 let before_path = context.store.resolve_surface_target(&before)?;
                 let after_path = context.store.resolve_surface_target(&after)?;
-                let diff = context.store.diff_public_surface(&before_path, &after_path)?;
-                serialize_json(&scope_core::stub::surface_diff(before_path, after_path, diff))
+                let diff = context
+                    .store
+                    .diff_public_surface(&before_path, &after_path)?;
+                serialize_json(&scope_core::stub::surface_diff(
+                    before_path,
+                    after_path,
+                    diff,
+                ))
             })
         })
     }) {
@@ -1133,7 +1153,9 @@ fn dispatch_cycles(arguments: &Value) -> String {
 fn dispatch_diff(arguments: &Value) -> String {
     match required_string(arguments, "branch").and_then(|branch| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let result = context.store.query_branch_diff(&context.paths.repo_root, &branch)?;
+            let result = context
+                .store
+                .query_branch_diff(&context.paths.repo_root, &branch)?;
             serialize_json(&scope_core::stub::diff(result))
         })
     }) {
@@ -1173,7 +1195,9 @@ fn dispatch_entry_cone(arguments: &Value) -> String {
     match required_string(arguments, "target").and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
             let config = load_arch_config(&context.paths.repo_root)?;
-            let result = context.store.query_entry_cone(&config, &RepoPath::from(target))?;
+            let result = context
+                .store
+                .query_entry_cone(&config, &RepoPath::from(target))?;
             serialize_json(&scope_core::stub::entry_cone(result))
         })
     }) {
@@ -1186,7 +1210,9 @@ fn dispatch_entry_reaches(arguments: &Value) -> String {
     match required_string(arguments, "target").and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
             let config = load_arch_config(&context.paths.repo_root)?;
-            let result = context.store.query_entry_reaches(&config, &RepoPath::from(target))?;
+            let result = context
+                .store
+                .query_entry_reaches(&config, &RepoPath::from(target))?;
             serialize_json(&scope_core::stub::entry_reaches(result))
         })
     }) {
@@ -1199,7 +1225,9 @@ fn dispatch_entry_unreachable(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
         let config = load_arch_config(&context.paths.repo_root)?;
         let min_age_days = optional_u64(arguments, "min_age_days")?;
-        let result = context.store.query_entry_unreachable(&config, min_age_days)?;
+        let result = context
+            .store
+            .query_entry_unreachable(&config, min_age_days)?;
         serialize_json(&scope_core::stub::entry_unreachable(result))
     }) {
         Ok(output) => output,
@@ -1286,7 +1314,9 @@ fn dispatch_diff_snapshot(arguments: &Value) -> String {
     }
 }
 
-fn bootstrap_from_arguments(arguments: &Value) -> Result<scope_core::AppContext, scope_core::ScopeError> {
+fn bootstrap_from_arguments(
+    arguments: &Value,
+) -> Result<scope_core::AppContext, scope_core::ScopeError> {
     let repo_root_override = optional_string(arguments, "repo_root").map(PathBuf::from);
     let cwd = if let Some(repo_root) = repo_root_override.as_ref() {
         repo_root.clone()
@@ -1307,10 +1337,16 @@ fn required_string(arguments: &Value, key: &str) -> Result<String, scope_core::S
 }
 
 fn optional_string(arguments: &Value, key: &str) -> Option<String> {
-    arguments.get(key).and_then(Value::as_str).map(ToString::to_string)
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
-fn required_string_array(arguments: &Value, key: &str) -> Result<Vec<String>, scope_core::ScopeError> {
+fn required_string_array(
+    arguments: &Value,
+    key: &str,
+) -> Result<Vec<String>, scope_core::ScopeError> {
     let Some(values) = arguments.get(key).and_then(Value::as_array) else {
         return Err(scope_core::ScopeError::InvalidInput(format!(
             "mcp tool arguments require `{key}` as an array of strings"
@@ -1384,7 +1420,10 @@ fn optional_f64(arguments: &Value, key: &str) -> Result<Option<f64>, scope_core:
         .transpose()
 }
 
-fn optional_symbol_kind(arguments: &Value, key: &str) -> Result<Option<SymbolKind>, scope_core::ScopeError> {
+fn optional_symbol_kind(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<SymbolKind>, scope_core::ScopeError> {
     optional_string(arguments, key)
         .map(|kind| match kind.as_str() {
             "function" => Ok(SymbolKind::Function),
@@ -1402,7 +1441,10 @@ fn optional_symbol_kind(arguments: &Value, key: &str) -> Result<Option<SymbolKin
         .transpose()
 }
 
-fn optional_cycle_severity(arguments: &Value, key: &str) -> Result<Option<scope_core::CycleSeverity>, scope_core::ScopeError> {
+fn optional_cycle_severity(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<scope_core::CycleSeverity>, scope_core::ScopeError> {
     optional_string(arguments, key)
         .map(|severity| match severity.as_str() {
             "low" => Ok(scope_core::CycleSeverity::Low),
@@ -1415,7 +1457,10 @@ fn optional_cycle_severity(arguments: &Value, key: &str) -> Result<Option<scope_
         .transpose()
 }
 
-fn optional_stability_sort(arguments: &Value, key: &str) -> Result<scope_core::StabilitySort, scope_core::ScopeError> {
+fn optional_stability_sort(
+    arguments: &Value,
+    key: &str,
+) -> Result<scope_core::StabilitySort, scope_core::ScopeError> {
     match optional_string(arguments, key).as_deref() {
         None | Some("instability") => Ok(scope_core::StabilitySort::Instability),
         Some("fan_in") => Ok(scope_core::StabilitySort::FanIn),
@@ -1439,7 +1484,10 @@ fn optional_risk_sort(arguments: &Value, key: &str) -> Result<RiskSort, scope_co
     }
 }
 
-fn optional_cochange_sort(arguments: &Value, key: &str) -> Result<CochangeSort, scope_core::ScopeError> {
+fn optional_cochange_sort(
+    arguments: &Value,
+    key: &str,
+) -> Result<CochangeSort, scope_core::ScopeError> {
     match optional_string(arguments, key).as_deref() {
         None | Some("score") => Ok(CochangeSort::Score),
         Some("shared_commits") => Ok(CochangeSort::SharedCommits),
@@ -1635,8 +1683,12 @@ fn format_transitive_callers(should_read: &[scope_core::ContextFileRecord]) -> S
         .iter()
         .filter(|record| {
             record.distance == 2
-                || record.roles.contains(&scope_core::ContextFileRole::NearbyContext)
-                || record.roles.contains(&scope_core::ContextFileRole::Importer)
+                || record
+                    .roles
+                    .contains(&scope_core::ContextFileRole::NearbyContext)
+                || record
+                    .roles
+                    .contains(&scope_core::ContextFileRole::Importer)
         })
         .collect();
     if nearby.is_empty() {
@@ -1988,22 +2040,34 @@ fn summarize_phase(
     let avg_indexed = if runs.is_empty() {
         0
     } else {
-        runs.iter().map(|run| stats(run).indexed_files).sum::<usize>() / runs.len()
+        runs.iter()
+            .map(|run| stats(run).indexed_files)
+            .sum::<usize>()
+            / runs.len()
     };
     let avg_changed = if runs.is_empty() {
         0
     } else {
-        runs.iter().map(|run| stats(run).changed_files).sum::<usize>() / runs.len()
+        runs.iter()
+            .map(|run| stats(run).changed_files)
+            .sum::<usize>()
+            / runs.len()
     };
     let avg_deleted = if runs.is_empty() {
         0
     } else {
-        runs.iter().map(|run| stats(run).deleted_files).sum::<usize>() / runs.len()
+        runs.iter()
+            .map(|run| stats(run).deleted_files)
+            .sum::<usize>()
+            / runs.len()
     };
     let avg_affected = if runs.is_empty() {
         0
     } else {
-        runs.iter().map(|run| stats(run).affected_files).sum::<usize>() / runs.len()
+        runs.iter()
+            .map(|run| stats(run).affected_files)
+            .sum::<usize>()
+            / runs.len()
     };
 
     scope_core::stub::BenchmarkPhaseSummary {
@@ -2039,11 +2103,14 @@ fn select_benchmark_mutation_target(
         .into_iter()
         .map(|entry| entry.absolute_path)
         .next()
-        .ok_or_else(|| scope_core::ScopeError::InvalidInput("benchmark found no source files".to_string()))
+        .ok_or_else(|| {
+            scope_core::ScopeError::InvalidInput("benchmark found no source files".to_string())
+        })
 }
 
 fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
-    let mut content = fs::read_to_string(path).map_err(|error| scope_core::ScopeError::io(path, error))?;
+    let mut content =
+        fs::read_to_string(path).map_err(|error| scope_core::ScopeError::io(path, error))?;
     content.push_str("\n// scope benchmark mutation\n");
     fs::write(path, content).map_err(|error| scope_core::ScopeError::io(path, error))
 }
@@ -2061,7 +2128,10 @@ fn fixture_root(name: &str) -> Result<PathBuf, scope_core::ScopeError> {
     Ok(repo.join("fixtures").join(name))
 }
 
-fn prepare_benchmark_copy(source_root: &Path, prefix: &str) -> Result<PathBuf, scope_core::ScopeError> {
+fn prepare_benchmark_copy(
+    source_root: &Path,
+    prefix: &str,
+) -> Result<PathBuf, scope_core::ScopeError> {
     let nanos = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| scope_core::ScopeError::InvalidInput(error.to_string()))?
@@ -2240,7 +2310,10 @@ mod tests {
         assert_eq!(value["command"], "audit");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["capability"], "network");
-        assert_eq!(value["data"]["result"]["summary"]["unexpected_entry_points"], 1);
+        assert_eq!(
+            value["data"]["result"]["summary"]["unexpected_entry_points"],
+            1
+        );
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -2292,7 +2365,10 @@ mod tests {
         let value: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["command"], "test-map-covers");
         assert_eq!(value["status"], "ok");
-        assert_eq!(value["data"]["result"]["source_file"], "src/auth/middleware.ts");
+        assert_eq!(
+            value["data"]["result"]["source_file"],
+            "src/auth/middleware.ts"
+        );
         assert_eq!(value["data"]["result"]["summary"]["covering_tests"], 3);
         fs::remove_dir_all(repo).unwrap();
     }
@@ -2305,14 +2381,25 @@ mod tests {
             &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
         )
         .unwrap();
-        let context = bootstrap_from_arguments(&json!({ "repo_root": repo.display().to_string() })).unwrap();
+        let context =
+            bootstrap_from_arguments(&json!({ "repo_root": repo.display().to_string() })).unwrap();
         context
             .store
-            .persist_file_churn(&RepoPath::from("src/parser.rs"), "c1", Some("agent@example.com"), None)
+            .persist_file_churn(
+                &RepoPath::from("src/parser.rs"),
+                "c1",
+                Some("agent@example.com"),
+                None,
+            )
             .unwrap();
         context
             .store
-            .persist_file_churn(&RepoPath::from("src/utils.rs"), "c1", Some("agent@example.com"), None)
+            .persist_file_churn(
+                &RepoPath::from("src/utils.rs"),
+                "c1",
+                Some("agent@example.com"),
+                None,
+            )
             .unwrap();
 
         let output = dispatch_tool(
@@ -2493,7 +2580,9 @@ mod tests {
         assert_eq!(diff_value["status"], "ok");
         assert_eq!(diff_value["data"]["result"]["before"]["name"], "baseline");
         assert_eq!(diff_value["data"]["result"]["after"]["name"], "baseline");
-        assert!(diff_value["data"]["result"]["summary"]["files"].as_u64().is_some());
+        assert!(diff_value["data"]["result"]["summary"]["files"]
+            .as_u64()
+            .is_some());
 
         let delete_output = dispatch_tool(
             "snapshot_delete",

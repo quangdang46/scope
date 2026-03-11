@@ -6,10 +6,10 @@ use std::{
 };
 
 use scope_core::{
-    adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty,
-    CycleSeverity, EdgeKind, NodeKind, PublicSurfaceChange, PublicSurfaceChangeKind,
-    PublicSurfaceSymbol, RepoPath, ScanConfig, SnapshotDeleteResult, SnapshotListSummary,
-    Store, SupportedLanguage, SymbolKind, TraversalRecord, Visibility,
+    adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty, CycleSeverity,
+    EdgeKind, NodeKind, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceSymbol,
+    RepoPath, ScanConfig, SnapshotDeleteResult, SnapshotListSummary, Store, SupportedLanguage,
+    SymbolKind, TraversalRecord, Visibility,
 };
 
 fn repo_root() -> PathBuf {
@@ -158,7 +158,9 @@ fn rust_small_fixture_has_expected_files() {
 fn snapshot_round_trip_and_diff_work_for_rust_small_fixture() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
-    let first = store.save_snapshot("baseline", Some("HEAD".to_string())).unwrap();
+    let first = store
+        .save_snapshot("baseline", Some("HEAD".to_string()))
+        .unwrap();
     let list = store.list_snapshots().unwrap();
 
     assert_eq!(first.snapshot.name, "baseline");
@@ -166,10 +168,14 @@ fn snapshot_round_trip_and_diff_work_for_rust_small_fixture() {
     assert_eq!(list.snapshots[0].name, "baseline");
 
     let parser_path = repo.join("src/parser.rs");
-    let updated = fs::read_to_string(&parser_path).unwrap().replace("pub fn parse", "pub fn parse_token");
+    let updated = fs::read_to_string(&parser_path)
+        .unwrap()
+        .replace("pub fn parse", "pub fn parse_token");
     fs::write(&parser_path, updated).unwrap();
     let _ = index_fixture(&repo);
-    let second = store.save_snapshot("after", Some("HEAD~0".to_string())).unwrap();
+    let second = store
+        .save_snapshot("after", Some("HEAD~0".to_string()))
+        .unwrap();
     let config = load_arch_config(&repo).unwrap();
     let diff = store.diff_snapshot("baseline", "after", &config).unwrap();
 
@@ -179,7 +185,13 @@ fn snapshot_round_trip_and_diff_work_for_rust_small_fixture() {
     assert!(!diff.omitted.is_empty());
 
     let deleted = store.delete_snapshot("baseline").unwrap();
-    assert_eq!(deleted, SnapshotDeleteResult { name: "baseline".to_string(), deleted: true });
+    assert_eq!(
+        deleted,
+        SnapshotDeleteResult {
+            name: "baseline".to_string(),
+            deleted: true
+        }
+    );
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -678,7 +690,9 @@ fn rust_small_public_surface_is_deterministically_sorted_by_line_then_qualname()
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
 
-    let surface = store.query_public_surface(&RepoPath::from("src/parser.rs")).unwrap();
+    let surface = store
+        .query_public_surface(&RepoPath::from("src/parser.rs"))
+        .unwrap();
     let ordered: Vec<_> = surface
         .symbols
         .iter()
@@ -1010,7 +1024,13 @@ fn risk_query_reports_expected_scores_and_fallbacks() {
     assert_eq!(single.files[0].path, RepoPath::from("src/parser.rs"));
 
     let filtered = store
-        .query_risk(None, 10_000, Some(1.0), Some(1), scope_core::RiskSort::Score)
+        .query_risk(
+            None,
+            10_000,
+            Some(1.0),
+            Some(1),
+            scope_core::RiskSort::Score,
+        )
         .unwrap();
     assert_eq!(filtered.files.len(), 1);
     assert_eq!(filtered.files[0].path, RepoPath::from("src/parser.rs"));
@@ -1100,7 +1120,9 @@ fn generated_cochange_fixture_persists_expected_file_churn() {
             continue;
         }
         let mut parts = trimmed.split('|');
-        if let (Some(sha), Some(email), Some(timestamp)) = (parts.next(), parts.next(), parts.next()) {
+        if let (Some(sha), Some(email), Some(timestamp)) =
+            (parts.next(), parts.next(), parts.next())
+        {
             if let Ok(timestamp) = timestamp.parse::<i64>() {
                 current_commit = Some((sha.to_string(), email.to_string(), timestamp));
                 continue;
@@ -1339,7 +1361,10 @@ fn utility_queries_report_expected_results_for_rust_small_fixture() {
     assert_eq!(diff_actual, diff_expected);
 
     assert!(matches!(
-        store.query_cycles(Some(CycleSeverity::High)).unwrap().severity,
+        store
+            .query_cycles(Some(CycleSeverity::High))
+            .unwrap()
+            .severity,
         Some(CycleSeverity::High)
     ));
     assert!(matches!(
@@ -1701,11 +1726,20 @@ fn test_map_queries_cover_expected_fixture_cones() {
     assert_eq!(covers.summary.covering_tests, 3);
     assert_eq!(covers.summary.nearest_distance, Some(1));
     assert_eq!(covers.tests.len(), 3);
-    assert_eq!(covers.tests[0].path, RepoPath::from("tests/auth/middleware.test.ts"));
+    assert_eq!(
+        covers.tests[0].path,
+        RepoPath::from("tests/auth/middleware.test.ts")
+    );
     assert_eq!(covers.tests[0].distance, 1);
-    assert_eq!(covers.tests[1].path, RepoPath::from("tests/integration/api.test.ts"));
+    assert_eq!(
+        covers.tests[1].path,
+        RepoPath::from("tests/integration/api.test.ts")
+    );
     assert_eq!(covers.tests[1].distance, 2);
-    assert_eq!(covers.tests[2].path, RepoPath::from("tests/e2e/app.test.ts"));
+    assert_eq!(
+        covers.tests[2].path,
+        RepoPath::from("tests/e2e/app.test.ts")
+    );
     assert_eq!(covers.tests[2].distance, 3);
 
     let covered_by = store
@@ -1719,16 +1753,27 @@ fn test_map_queries_cover_expected_fixture_cones() {
             .iter()
             .map(|record| record.path.0.as_str())
             .collect::<Vec<_>>(),
-        vec!["src/app.ts", "src/routes/api.ts", "src/auth/middleware.ts", "src/auth/jwt.ts"]
+        vec![
+            "src/app.ts",
+            "src/routes/api.ts",
+            "src/auth/middleware.ts",
+            "src/auth/jwt.ts"
+        ]
     );
 
     let uncovered = store.query_uncovered_files(&config.tests).unwrap();
     assert_eq!(uncovered.summary.source_files_considered, 9);
     assert_eq!(uncovered.summary.uncovered_source_files, 5);
     assert!(uncovered.files.contains(&RepoPath::from("src/index.ts")));
-    assert!(uncovered.files.contains(&RepoPath::from("src/auth/index.ts")));
-    assert!(uncovered.files.contains(&RepoPath::from("src/auth/aliases.ts")));
-    assert!(uncovered.files.contains(&RepoPath::from("src/utils/formatter.ts")));
+    assert!(uncovered
+        .files
+        .contains(&RepoPath::from("src/auth/index.ts")));
+    assert!(uncovered
+        .files
+        .contains(&RepoPath::from("src/auth/aliases.ts")));
+    assert!(uncovered
+        .files
+        .contains(&RepoPath::from("src/utils/formatter.ts")));
 
     let source_as_test_error = store
         .query_test_coverage(&RepoPath::from("src/auth/middleware.ts"), &config.tests)
@@ -1758,7 +1803,10 @@ fn test_map_queries_cover_expected_fixture_cones() {
     assert_eq!(app_tree.summary.nodes, 3);
     assert_eq!(app_tree.tree.path, RepoPath::from("src/app.ts"));
     assert_eq!(app_tree.tree.children.len(), 1);
-    assert_eq!(app_tree.tree.children[0].path, RepoPath::from("src/routes/api.ts"));
+    assert_eq!(
+        app_tree.tree.children[0].path,
+        RepoPath::from("src/routes/api.ts")
+    );
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -1829,9 +1877,15 @@ fn capability_audit_fixture_matches_golden_json() {
     assert_eq!(result.summary.reaching_entry_points, 2);
     assert_eq!(result.summary.expected_entry_points, 1);
     assert_eq!(result.summary.unexpected_entry_points, 1);
-    assert_eq!(result.reaches[0].entry_point, RepoPath::from("src/workers/job.ts"));
+    assert_eq!(
+        result.reaches[0].entry_point,
+        RepoPath::from("src/workers/job.ts")
+    );
     assert!(result.reaches[0].expected);
-    assert_eq!(result.reaches[1].entry_point, RepoPath::from("src/cli/main.ts"));
+    assert_eq!(
+        result.reaches[1].entry_point,
+        RepoPath::from("src/cli/main.ts")
+    );
     assert!(!result.reaches[1].expected);
     assert_eq!(
         result.reaches[1].path,

@@ -34,7 +34,8 @@ pub fn init_tracing(verbosity: Verbosity) -> ScopeResult<()> {
             .map_err(|error| ScopeError::Tracing(error.to_string()))
             .or_else(|error| match error {
                 ScopeError::Tracing(message)
-                    if message.contains("a global default trace dispatcher has already been set") =>
+                    if message
+                        .contains("a global default trace dispatcher has already been set") =>
                 {
                     Ok(())
                 }

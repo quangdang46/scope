@@ -3,15 +3,15 @@ use serde::Serialize;
 use crate::{
     json::JsonEnvelope,
     model::{
-        ArchCheckResult, AuditResult, BranchDiffResult, Certainty, CochangeResult,
-        ContextResult, CyclesResult, DependencyRecord, EdgeKind, EntryConeResult,
-        EntryListResult, EntryReachesResult, EntryUnreachableResult, GateResult,
-        HealthReportResult, ImpactChangeType, ImpactTraversalRule, MirrorResult, NodeKind,
-        PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult,
-        SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult, SnapshotSaveResult, Span,
-        SplitResult, StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult,
-        TestMapCoveredByResult, TestMapCoversResult, TestMapUncoveredResult, TraversalRecord,
-        TreeResult, UnusedResult, Visibility,
+        ArchCheckResult, AuditResult, BranchDiffResult, Certainty, CochangeResult, ContextResult,
+        CyclesResult, DependencyRecord, EdgeKind, EntryConeResult, EntryListResult,
+        EntryReachesResult, EntryUnreachableResult, GateResult, HealthReportResult,
+        ImpactChangeType, ImpactTraversalRule, MirrorResult, NodeKind, PublicSurface,
+        PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult, SnapshotDeleteResult,
+        SnapshotDiffResult, SnapshotListResult, SnapshotSaveResult, Span, SplitResult,
+        StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult, TestMapCoveredByResult,
+        TestMapCoversResult, TestMapUncoveredResult, TraversalRecord, TreeResult, UnusedResult,
+        Visibility,
     },
     DatabaseInfo, IndexHealthStats,
 };
@@ -779,9 +779,7 @@ pub fn test_map_covers(result: TestMapCoversResult) -> JsonEnvelope<TestMapCover
     JsonEnvelope::success("test-map-covers", TestMapCoversData { result })
 }
 
-pub fn test_map_covered_by(
-    result: TestMapCoveredByResult,
-) -> JsonEnvelope<TestMapCoveredByData> {
+pub fn test_map_covered_by(result: TestMapCoveredByResult) -> JsonEnvelope<TestMapCoveredByData> {
     JsonEnvelope::success("test-map-covered-by", TestMapCoveredByData { result })
 }
 

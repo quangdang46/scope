@@ -296,7 +296,9 @@ mod tests {
             expected_callers: Vec::new(),
         }])
         .unwrap_err();
-        assert!(error.to_string().contains("must declare a pattern or symbols"));
+        assert!(error
+            .to_string()
+            .contains("must declare a pattern or symbols"));
 
         let error = validate_capability_config(&[CapabilityConfig {
             name: "network".to_string(),
@@ -314,6 +316,8 @@ mod tests {
             expected_callers: vec!["[".to_string()],
         }])
         .unwrap_err();
-        assert!(error.to_string().contains("invalid capability expected_callers pattern"));
+        assert!(error
+            .to_string()
+            .contains("invalid capability expected_callers pattern"));
     }
 }
