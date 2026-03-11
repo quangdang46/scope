@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "command": "tree",
+  "status": "ok",
+  "data": {
+    "result": {
+      "target": "src/index.ts",
+      "reverse": false,
+      "depth": 2,
+      "tree": {
+        "path": "src/index.ts",
+        "children": [
+          {
+            "path": "src/auth/index.ts",
+            "children": [
+              {
+                "path": "src/auth/aliases.ts",
+                "children": [],
+                "truncated": true,
+                "cycle": false
+              },
+              {
+                "path": "src/auth/middleware.ts",
+                "children": [],
+                "truncated": true,
+                "cycle": false
+              }
+            ],
+            "truncated": false,
+            "cycle": false
+          },
+          {
+            "path": "src/utils/formatter.ts",
+            "children": [
+              {
+                "path": "src/utils/logger.ts",
+                "children": [],
+                "truncated": true,
+                "cycle": false
+              }
+            ],
+            "truncated": false,
+            "cycle": false
+          }
+        ],
+        "truncated": false,
+        "cycle": false
+      },
+      "summary": {
+        "reverse": false,
+        "depth": 2,
+        "nodes": 6
+      }
+    }
+  },
+  "warnings": []
+}

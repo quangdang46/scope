@@ -1351,6 +1351,46 @@ fn utility_queries_report_expected_results_for_rust_small_fixture() {
 }
 
 #[test]
+fn utility_queries_report_expected_results_for_ts_small_fixture() {
+    let repo = prepare_fixture_copy("ts_small");
+    let store = index_fixture(&repo);
+
+    let unused = store.query_unused().unwrap();
+    assert_eq!(unused.summary.exported_symbols, 10);
+    assert_eq!(unused.summary.unused_symbols, 8);
+    assert_eq!(unused.symbols[0].qualname, "auth::aliases::verifyJwt");
+    let unused_actual = serde_json::to_string_pretty(&stub::unused(unused.clone())).unwrap();
+    let unused_expected = read_golden("ts_small_unused.json");
+    assert_eq!(unused_actual, unused_expected);
+
+    let cycles = store.query_cycles(None).unwrap();
+    assert_eq!(cycles.summary.cycle_count, 0);
+    assert!(cycles.cycles.is_empty());
+    let cycles_actual = serde_json::to_string_pretty(&stub::cycles(cycles.clone())).unwrap();
+    let cycles_expected = read_golden("ts_small_cycles.json");
+    assert_eq!(cycles_actual, cycles_expected);
+
+    let tree = store
+        .query_tree(&RepoPath::from("src/index.ts"), false, Some(2))
+        .unwrap();
+    assert_eq!(tree.target, RepoPath::from("src/index.ts"));
+    assert_eq!(tree.summary.nodes, 6);
+    let tree_actual = serde_json::to_string_pretty(&stub::tree(tree.clone())).unwrap();
+    let tree_expected = read_golden("ts_small_tree.json");
+    assert_eq!(tree_actual, tree_expected);
+
+    let diff = store.query_branch_diff(&repo, "HEAD").unwrap();
+    assert_eq!(diff.branch, "HEAD");
+    assert_eq!(diff.summary.changed_files, 0);
+    assert!(diff.affected_files.is_empty());
+    let diff_actual = serde_json::to_string_pretty(&stub::diff(diff.clone())).unwrap();
+    let diff_expected = read_golden("ts_small_diff_head.json");
+    assert_eq!(diff_actual, diff_expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn why_queries_match_golden_json_and_handle_limits() {
     let rust_repo = prepare_fixture_copy("rust_small");
     let rust_store = index_fixture(&rust_repo);
@@ -1710,6 +1750,15 @@ fn test_map_queries_cover_expected_fixture_cones() {
     assert!(missing_target_error
         .to_string()
         .contains("scope test-map covers could not resolve target"));
+
+    let app_tree = store
+        .query_tree(&RepoPath::from("src/app.ts"), false, Some(2))
+        .unwrap();
+    assert_eq!(app_tree.target, RepoPath::from("src/app.ts"));
+    assert_eq!(app_tree.summary.nodes, 3);
+    assert_eq!(app_tree.tree.path, RepoPath::from("src/app.ts"));
+    assert_eq!(app_tree.tree.children.len(), 1);
+    assert_eq!(app_tree.tree.children[0].path, RepoPath::from("src/routes/api.ts"));
 
     fs::remove_dir_all(repo).unwrap();
 }

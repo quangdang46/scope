@@ -4657,12 +4657,17 @@ fn suggest_split_cluster_name(members: &[SplitClusterMember], ordinal: usize) ->
     for member in members {
         let label = match member.kind {
             SymbolKind::Function => "functions",
-            SymbolKind::Struct => "structs",
-            SymbolKind::Enum => "enums",
-            SymbolKind::Trait => "traits",
             SymbolKind::Method => "methods",
+            SymbolKind::Struct => "structs",
+            SymbolKind::Class => "classes",
+            SymbolKind::Enum => "enums",
+            SymbolKind::TypeAlias => "type_aliases",
             SymbolKind::Module => "modules",
+            SymbolKind::Namespace => "namespaces",
             SymbolKind::Constant => "constants",
+            SymbolKind::Static => "statics",
+            SymbolKind::Interface => "interfaces",
+            SymbolKind::Trait => "traits",
             SymbolKind::Variable => "variables",
         };
         *by_kind.entry(label).or_default() += 1;

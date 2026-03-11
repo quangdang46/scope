@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "command": "unused",
+  "status": "ok",
+  "data": {
+    "result": {
+      "symbols": [
+        {
+          "file": "src/auth/aliases.ts",
+          "name": "verifyJwt",
+          "qualname": "auth::aliases::verifyJwt",
+          "kind": "function",
+          "visibility": "public",
+          "line": 1,
+          "inbound_references": 0,
+          "reason": "exported symbol `auth::aliases::verifyJwt` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/auth/index.ts",
+          "name": "verifyToken",
+          "qualname": "auth::verifyToken",
+          "kind": "function",
+          "visibility": "public",
+          "line": 1,
+          "inbound_references": 0,
+          "reason": "exported symbol `auth::verifyToken` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/auth/index.ts",
+          "name": "verifyJwt",
+          "qualname": "auth::verifyJwt",
+          "kind": "function",
+          "visibility": "public",
+          "line": 2,
+          "inbound_references": 0,
+          "reason": "exported symbol `auth::verifyJwt` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/auth/jwt.ts",
+          "name": "sign",
+          "qualname": "auth::jwt::sign",
+          "kind": "function",
+          "visibility": "public",
+          "line": 1,
+          "inbound_references": 0,
+          "reason": "exported symbol `auth::jwt::sign` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/auth/middleware.ts",
+          "name": "verifyToken",
+          "qualname": "auth::middleware::verifyToken",
+          "kind": "function",
+          "visibility": "public",
+          "line": 3,
+          "inbound_references": 0,
+          "reason": "exported symbol `auth::middleware::verifyToken` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/index.ts",
+          "name": "verifyToken",
+          "qualname": "index::verifyToken",
+          "kind": "function",
+          "visibility": "public",
+          "line": 1,
+          "inbound_references": 0,
+          "reason": "exported symbol `index::verifyToken` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/index.ts",
+          "name": "format",
+          "qualname": "index::format",
+          "kind": "function",
+          "visibility": "public",
+          "line": 2,
+          "inbound_references": 0,
+          "reason": "exported symbol `index::format` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/utils/formatter.ts",
+          "name": "format",
+          "qualname": "utils::formatter::format",
+          "kind": "function",
+          "visibility": "public",
+          "line": 3,
+          "inbound_references": 0,
+          "reason": "exported symbol `utils::formatter::format` has no indexed inbound call edges"
+        }
+      ],
+      "summary": {
+        "exported_symbols": 10,
+        "unused_symbols": 8
+      }
+    }
+  },
+  "warnings": []
+}
