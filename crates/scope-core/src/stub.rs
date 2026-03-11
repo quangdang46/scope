@@ -4,8 +4,10 @@ use crate::{
     json::JsonEnvelope,
     model::{
         ArchCheckResult, Certainty, ContextResult, DependencyRecord, EdgeKind, ImpactChangeType,
-        ImpactTraversalRule, NodeKind, PublicSurface, PublicSurfaceDiff, RepoPath, RiskResult,
-        Span, StabilityResult, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
+        ImpactTraversalRule, NodeKind, PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath,
+        RiskResult, Span, StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult,
+        TestMapCoveredByResult, TestMapCoversResult, TestMapUncoveredResult, TraversalRecord,
+        Visibility,
     },
     DatabaseInfo, IndexHealthStats,
 };
@@ -176,6 +178,31 @@ pub struct SurfaceDiffData {
     pub before: RepoPath,
     pub after: RepoPath,
     pub diff: PublicSurfaceDiff,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenamePlanData {
+    pub result: RenamePlan,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestMapBuildData {
+    pub result: TestMapBuildResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestMapCoversData {
+    pub result: TestMapCoversResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestMapCoveredByData {
+    pub result: TestMapCoveredByResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestMapUncoveredData {
+    pub result: TestMapUncoveredResult,
 }
 
 pub fn index(
@@ -572,6 +599,28 @@ pub fn stability(result: StabilityResult) -> JsonEnvelope<StabilityData> {
 
 pub fn risk(result: RiskResult) -> JsonEnvelope<RiskData> {
     JsonEnvelope::success("risk", RiskData { result })
+}
+
+pub fn rename_plan(result: RenamePlan) -> JsonEnvelope<RenamePlanData> {
+    JsonEnvelope::success("rename-plan", RenamePlanData { result })
+}
+
+pub fn test_map_build(result: TestMapBuildResult) -> JsonEnvelope<TestMapBuildData> {
+    JsonEnvelope::success("test-map-build", TestMapBuildData { result })
+}
+
+pub fn test_map_covers(result: TestMapCoversResult) -> JsonEnvelope<TestMapCoversData> {
+    JsonEnvelope::success("test-map-covers", TestMapCoversData { result })
+}
+
+pub fn test_map_covered_by(
+    result: TestMapCoveredByResult,
+) -> JsonEnvelope<TestMapCoveredByData> {
+    JsonEnvelope::success("test-map-covered-by", TestMapCoveredByData { result })
+}
+
+pub fn test_map_uncovered(result: TestMapUncoveredResult) -> JsonEnvelope<TestMapUncoveredData> {
+    JsonEnvelope::success("test-map-uncovered", TestMapUncoveredData { result })
 }
 
 pub fn surface(target: RepoPath, surface: PublicSurface) -> JsonEnvelope<SurfaceData> {

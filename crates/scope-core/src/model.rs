@@ -294,6 +294,69 @@ pub struct PublicSurfaceDiff {
     pub summary: PublicSurfaceDiffSummary,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RenameEditKind {
+    Definition,
+    ImportSpecifier,
+    ImportPath,
+    DeferredCallSite,
+    DeferredReexport,
+    DeferredDynamicImport,
+    DeferredUnknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenameEdit {
+    pub start_byte: u32,
+    pub end_byte: u32,
+    pub line: u32,
+    pub before_text: String,
+    pub after_text: String,
+    pub kind: RenameEditKind,
+    pub verified: bool,
+    pub deferred_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenamePlanStep {
+    pub path: RepoPath,
+    pub distance: u32,
+    pub certainty: Certainty,
+    pub roles: Vec<String>,
+    pub reasons: Vec<String>,
+    pub edits: Vec<RenameEdit>,
+    pub apply_safe: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenamePlanSummary {
+    pub files_considered: usize,
+    pub files_planned: usize,
+    pub files_skipped: usize,
+    pub edits_planned: usize,
+    pub safe_edits_planned: usize,
+    pub deferred_edits_planned: usize,
+    pub applied_files: usize,
+    pub applied_edits: usize,
+    pub blocked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenamePlan {
+    pub target: String,
+    pub target_file: RepoPath,
+    pub old_name: String,
+    pub new_name: String,
+    pub apply_requested: bool,
+    pub force_requested: bool,
+    pub applied: bool,
+    pub steps: Vec<RenamePlanStep>,
+    pub skipped: Vec<RenamePlanStep>,
+    pub warnings: Vec<String>,
+    pub summary: RenamePlanSummary,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImpactChangeType {
@@ -340,6 +403,8 @@ pub struct ArchConfig {
     pub layers: Vec<ArchLayer>,
     #[serde(default, rename = "rule")]
     pub rules: Vec<ArchRule>,
+    #[serde(default, rename = "tests")]
+    pub tests: TestConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -365,6 +430,84 @@ pub struct ArchCheckResult {
     pub checked_edges: usize,
     pub checked_layered_edges: usize,
     pub violations: Vec<ArchViolation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestConfig {
+    pub patterns: Vec<String>,
+    pub exclude_patterns: Vec<String>,
+}
+
+impl Default for TestConfig {
+    fn default() -> Self {
+        Self {
+            patterns: vec![
+                "**/*.test.*".to_string(),
+                "**/*.spec.*".to_string(),
+                "tests/**".to_string(),
+                "**/test_*.rs".to_string(),
+                "**/__tests__/**".to_string(),
+            ],
+            exclude_patterns: vec!["**/__mocks__/**".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapRecord {
+    pub path: RepoPath,
+    pub distance: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapBuildSummary {
+    pub test_files: usize,
+    pub covered_source_files: usize,
+    pub uncovered_source_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapBuildResult {
+    pub tests: Vec<RepoPath>,
+    pub summary: TestMapBuildSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapCoversSummary {
+    pub covering_tests: usize,
+    pub nearest_distance: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapCoversResult {
+    pub source_file: RepoPath,
+    pub tests: Vec<TestMapRecord>,
+    pub summary: TestMapCoversSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapCoveredBySummary {
+    pub covered_source_files: usize,
+    pub nearest_distance: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapCoveredByResult {
+    pub test_file: RepoPath,
+    pub covered_files: Vec<TestMapRecord>,
+    pub summary: TestMapCoveredBySummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapUncoveredSummary {
+    pub source_files_considered: usize,
+    pub uncovered_source_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestMapUncoveredResult {
+    pub files: Vec<RepoPath>,
+    pub summary: TestMapUncoveredSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

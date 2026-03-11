@@ -108,6 +108,7 @@ fn planned_fixture_directories_exist() {
         "ts_small",
         "dynamic_limits",
         "arch_violations",
+        "test_map_ts",
     ] {
         assert!(
             fixture_root(fixture).is_dir(),
@@ -150,6 +151,26 @@ fn ts_small_fixture_has_expected_files() {
         assert!(
             root.join(relative).is_file(),
             "missing ts_small file: {relative}"
+        );
+    }
+}
+
+#[test]
+fn test_map_ts_fixture_has_expected_files() {
+    let root = fixture_root("test_map_ts");
+    for relative in [
+        "package.json",
+        ".scope/arch.toml",
+        "src/auth/middleware.ts",
+        "src/routes/api.ts",
+        "src/app.ts",
+        "tests/auth/middleware.test.ts",
+        "tests/integration/api.test.ts",
+        "tests/e2e/app.test.ts",
+    ] {
+        assert!(
+            root.join(relative).is_file(),
+            "missing test_map_ts file: {relative}"
         );
     }
 }
@@ -1268,6 +1289,66 @@ fn context_queries_match_golden_json_and_budget_behavior() {
     assert!(file_result.should_read.is_empty());
 
     fs::remove_dir_all(rust_repo).unwrap();
+}
+
+#[test]
+fn test_map_queries_cover_expected_fixture_cones() {
+    let repo = prepare_fixture_copy("test_map_ts");
+    let store = index_fixture(&repo);
+    let config = load_arch_config(&repo).unwrap();
+
+    let build = store.build_test_map(&config.tests).unwrap();
+    assert_eq!(build.summary.test_files, 3);
+    assert_eq!(build.summary.covered_source_files, 4);
+    assert_eq!(build.summary.uncovered_source_files, 5);
+
+    let covers = store
+        .query_tests_covering(&RepoPath::from("src/auth/middleware.ts"), &config.tests)
+        .unwrap();
+    assert_eq!(covers.len(), 3);
+    assert_eq!(covers[0].path, RepoPath::from("tests/auth/middleware.test.ts"));
+    assert_eq!(covers[0].distance, 1);
+    assert_eq!(covers[1].path, RepoPath::from("tests/integration/api.test.ts"));
+    assert_eq!(covers[1].distance, 2);
+    assert_eq!(covers[2].path, RepoPath::from("tests/e2e/app.test.ts"));
+    assert_eq!(covers[2].distance, 3);
+
+    let covered_by = store
+        .query_test_coverage(&RepoPath::from("tests/e2e/app.test.ts"), &config.tests)
+        .unwrap();
+    assert_eq!(
+        covered_by.iter().map(|record| record.path.0.as_str()).collect::<Vec<_>>(),
+        vec!["src/app.ts", "src/routes/api.ts", "src/auth/middleware.ts", "src/auth/jwt.ts"]
+    );
+
+    let uncovered = store.query_uncovered_files(&config.tests).unwrap();
+    assert!(uncovered.contains(&RepoPath::from("src/index.ts")));
+    assert!(uncovered.contains(&RepoPath::from("src/auth/index.ts")));
+    assert!(uncovered.contains(&RepoPath::from("src/auth/aliases.ts")));
+    assert!(uncovered.contains(&RepoPath::from("src/utils/formatter.ts")));
+
+    let source_as_test_error = store
+        .query_test_coverage(&RepoPath::from("src/auth/middleware.ts"), &config.tests)
+        .unwrap_err();
+    assert!(source_as_test_error
+        .to_string()
+        .contains("scope test-map covered-by requires a detected test file target"));
+
+    let test_as_source_error = store
+        .query_tests_covering(&RepoPath::from("tests/e2e/app.test.ts"), &config.tests)
+        .unwrap_err();
+    assert!(test_as_source_error
+        .to_string()
+        .contains("scope test-map covers requires a source file target"));
+
+    let missing_target_error = store
+        .query_tests_covering(&RepoPath::from("src/missing.ts"), &config.tests)
+        .unwrap_err();
+    assert!(missing_target_error
+        .to_string()
+        .contains("scope test-map covers could not resolve target"));
+
+    fs::remove_dir_all(repo).unwrap();
 }
 
 #[test]

@@ -11,9 +11,11 @@ use crate::{
     ArchFileEdge, Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary,
     DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind, PublicSurface,
     PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary,
-    PublicSurfaceSymbol, RepoPath, RiskRecord, RiskResult, RiskSort, RiskSummary, ScopeError,
+    PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep,
+    RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort, RiskSummary, ScopeError,
     ScopeResult, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
-    StabilitySummary, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
+    StabilitySummary, SymbolKind, SymbolRecord, TestConfig, TestMapBuildResult,
+    TestMapBuildSummary, TestMapRecord, TraversalRecord, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
@@ -170,6 +172,12 @@ struct ContextCandidate {
     reasons: Vec<String>,
     roles: Vec<ContextFileRole>,
     pinned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameTarget {
+    Symbol { qualname: String, symbol: SymbolRecord },
+    File { path: RepoPath },
 }
 
 impl Store {
@@ -416,6 +424,203 @@ impl Store {
         })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn build_test_map(&self, tests: &TestConfig) -> ScopeResult<TestMapBuildResult> {
+        let test_files = self.detect_test_files(tests)?;
+        let coverage_map = self.compute_test_coverage_map(&test_files)?;
+        let all_source_files = self.list_source_files(&test_files);
+        let covered_source_files = coverage_map.len();
+        let uncovered_source_files = all_source_files
+            .into_iter()
+            .filter(|path| !coverage_map.contains_key(path))
+            .count();
+
+        Ok(TestMapBuildResult {
+            tests: test_files.clone(),
+            summary: TestMapBuildSummary {
+                test_files: test_files.len(),
+                covered_source_files,
+                uncovered_source_files,
+            },
+        })
+    }
+
+    pub fn query_tests_covering(
+        &self,
+        source_file: &RepoPath,
+        tests: &TestConfig,
+    ) -> ScopeResult<TestMapCoversResult> {
+        if self.file_id(source_file)?.is_none() {
+            return Err(ScopeError::InvalidInput(format!(
+                "scope test-map covers could not resolve target `{}`; use an indexed source file path",
+                source_file.0
+            )));
+        }
+
+        let test_files = self.detect_test_files(tests)?;
+        if test_files.iter().any(|path| path == source_file) {
+            return Err(ScopeError::InvalidInput(format!(
+                "scope test-map covers requires a source file target, but `{}` matches configured test-file patterns",
+                source_file.0
+            )));
+        }
+
+        let coverage_map = self.compute_test_coverage_map(&test_files)?;
+        let records = coverage_map.get(source_file).cloned().unwrap_or_default();
+        Ok(TestMapCoversResult {
+            source_file: source_file.clone(),
+            summary: TestMapCoversSummary {
+                covering_tests: records.len(),
+                nearest_distance: records.first().map(|record| record.distance),
+            },
+            tests: records,
+        })
+    }
+
+    pub fn query_test_coverage(
+        &self,
+        test_file: &RepoPath,
+        tests: &TestConfig,
+    ) -> ScopeResult<TestMapCoveredByResult> {
+        if self.file_id(test_file)?.is_none() {
+            return Err(ScopeError::InvalidInput(format!(
+                "scope test-map covered-by could not resolve target `{}`; use an indexed test file path",
+                test_file.0
+            )));
+        }
+
+        let test_files = self.detect_test_files(tests)?;
+        if !test_files.iter().any(|path| path == test_file) {
+            return Err(ScopeError::InvalidInput(format!(
+                "scope test-map covered-by requires a detected test file target, but `{}` does not match configured test-file patterns",
+                test_file.0
+            )));
+        }
+        let test_set: HashSet<_> = test_files.into_iter().collect();
+        let records = self.forward_file_closure(test_file, Some(&test_set))?;
+        Ok(TestMapCoveredByResult {
+            test_file: test_file.clone(),
+            summary: TestMapCoveredBySummary {
+                covered_source_files: records.len(),
+                nearest_distance: records.first().map(|record| record.distance),
+            },
+            covered_files: records,
+        })
+    }
+
+    pub fn query_uncovered_files(&self, tests: &TestConfig) -> ScopeResult<TestMapUncoveredResult> {
+        let test_files = self.detect_test_files(tests)?;
+        let coverage_map = self.compute_test_coverage_map(&test_files)?;
+        let source_files = self.list_source_files(&test_files);
+        let source_files_considered = source_files.len();
+        let mut uncovered = source_files
+            .into_iter()
+            .filter(|path| !coverage_map.contains_key(path))
+            .collect::<Vec<_>>();
+        uncovered.sort_by(|left, right| {
+            let left_mtime = self
+                .file_state(left)
+                .ok()
+                .and_then(|state| state.and_then(|file| file.mtime_unix_seconds))
+                .unwrap_or(i64::MIN);
+            let right_mtime = self
+                .file_state(right)
+                .ok()
+                .and_then(|state| state.and_then(|file| file.mtime_unix_seconds))
+                .unwrap_or(i64::MIN);
+            right_mtime.cmp(&left_mtime).then_with(|| left.cmp(right))
+        });
+        Ok(TestMapUncoveredResult {
+            summary: TestMapUncoveredSummary {
+                source_files_considered,
+                uncovered_source_files: uncovered.len(),
+            },
+            files: uncovered,
+        })
+    }
+
+    fn detect_test_files(&self, tests: &TestConfig) -> ScopeResult<Vec<RepoPath>> {
+        let all_files = self.list_indexed_files()?;
+        let mut matches = all_files
+            .into_iter()
+            .filter(|path| matches_test_patterns(path, tests))
+            .collect::<Vec<_>>();
+        matches.sort();
+        Ok(matches)
+    }
+
+    fn compute_test_coverage_map(
+        &self,
+        test_files: &[RepoPath],
+    ) -> ScopeResult<HashMap<RepoPath, Vec<TestMapRecord>>> {
+        let test_set: HashSet<_> = test_files.iter().cloned().collect();
+        let mut coverage_map: HashMap<RepoPath, Vec<TestMapRecord>> = HashMap::new();
+        for test_file in test_files {
+            for record in self.forward_file_closure(test_file, Some(&test_set))? {
+                coverage_map.entry(record.path.clone()).or_default().push(TestMapRecord {
+                    path: test_file.clone(),
+                    distance: record.distance,
+                });
+            }
+        }
+        for records in coverage_map.values_mut() {
+            records.sort_by(|left, right| left.distance.cmp(&right.distance).then_with(|| left.path.cmp(&right.path)));
+            records.dedup_by(|left, right| left.path == right.path && left.distance == right.distance);
+        }
+        Ok(coverage_map)
+    }
+
+    fn forward_file_closure(
+        &self,
+        start: &RepoPath,
+        excluded: Option<&HashSet<RepoPath>>,
+    ) -> ScopeResult<Vec<TestMapRecord>> {
+        let Some(start_id) = self.file_id(start)? else {
+            return Ok(Vec::new());
+        };
+        let mut visited = HashSet::from([start_id]);
+        let mut queue = VecDeque::from([(start_id, 0u32)]);
+        let mut covered = Vec::new();
+
+        while let Some((file_id, distance)) = queue.pop_front() {
+            let mut statement = self.connection.prepare(
+                "SELECT files.id, files.path
+                 FROM file_edges
+                 JOIN files ON files.id = file_edges.to_file_id
+                 WHERE file_edges.from_file_id = ?1
+                 ORDER BY files.path ASC",
+            )?;
+            let rows = statement.query_map([file_id], |row| {
+                Ok((row.get::<_, i64>(0)?, RepoPath(row.get::<_, String>(1)?)))
+            })?;
+            for row in rows {
+                let (next_id, next_path) = row?;
+                if !visited.insert(next_id) {
+                    continue;
+                }
+                queue.push_back((next_id, distance + 1));
+                if excluded.is_some_and(|set| set.contains(&next_path)) {
+                    continue;
+                }
+                covered.push(TestMapRecord {
+                    path: next_path,
+                    distance: distance + 1,
+                });
+            }
+        }
+
+        covered.sort_by(|left, right| left.distance.cmp(&right.distance).then_with(|| left.path.cmp(&right.path)));
+        Ok(covered)
+    }
+
+    fn list_source_files(&self, test_files: &[RepoPath]) -> Vec<RepoPath> {
+        let test_set: HashSet<_> = test_files.iter().cloned().collect();
+        self.list_indexed_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| !test_set.contains(path))
+            .collect()
     }
 
     pub fn persist_file_churn(
@@ -732,6 +937,170 @@ impl Store {
         Ok(PublicSurface {
             file: path.clone(),
             symbols,
+        })
+    }
+
+    pub fn resolve_rename_target(&self, target: &str) -> ScopeResult<RenameTarget> {
+        if let Some(symbol_id) = self.symbol_id(target)? {
+            let symbol = self.symbol_record_by_id(symbol_id)?.ok_or_else(|| {
+                ScopeError::InvalidInput(format!("missing indexed symbol for target: {target}"))
+            })?;
+            return Ok(RenameTarget::Symbol {
+                qualname: target.to_string(),
+                symbol,
+            });
+        }
+
+        let path = RepoPath::from(target.to_string());
+        if self.file_id(&path)?.is_some() {
+            return Ok(RenameTarget::File { path });
+        }
+
+        Err(ScopeError::InvalidInput(format!(
+            "rename-plan could not resolve target `{target}`; use an indexed file path or symbol qualname"
+        )))
+    }
+
+    pub fn build_rename_plan(
+        &self,
+        repo_root: &Path,
+        target: &str,
+        new_name: &str,
+        apply_requested: bool,
+        force_requested: bool,
+    ) -> ScopeResult<RenamePlan> {
+        let resolved = self.resolve_rename_target(target)?;
+        let mut steps = Vec::new();
+        let mut skipped = Vec::new();
+        let mut warnings = Vec::new();
+        let mut applied_files = 0usize;
+        let mut applied_edits = 0usize;
+        let target_file = match &resolved {
+            RenameTarget::Symbol { symbol, .. } => symbol.file.clone(),
+            RenameTarget::File { path } => path.clone(),
+        };
+        let old_name = match &resolved {
+            RenameTarget::Symbol { symbol, .. } => symbol.name.clone(),
+            RenameTarget::File { path } => file_stem_name(path)?,
+        };
+
+        if old_name == new_name {
+            return Err(ScopeError::InvalidInput(
+                "rename-plan target already uses the requested name".to_string(),
+            ));
+        }
+
+        match &resolved {
+            RenameTarget::Symbol { qualname, symbol } => {
+                let definition_source = std::fs::read_to_string(repo_root.join(&symbol.file.0))
+                    .map_err(|error| ScopeError::io(repo_root.join(&symbol.file.0), error))?;
+                if let Some(definition_edit) = definition_edit_from_symbol(symbol, &definition_source, new_name) {
+                    let definition = RenamePlanStep {
+                        path: symbol.file.clone(),
+                        distance: 0,
+                        certainty: Certainty::Exact,
+                        roles: vec!["target".to_string(), "defines_target_symbol".to_string()],
+                        reasons: vec![format!("defines symbol {qualname}")],
+                        edits: vec![definition_edit],
+                        apply_safe: true,
+                    };
+                    steps.push(definition);
+                } else {
+                    skipped.push(RenamePlanStep {
+                        path: symbol.file.clone(),
+                        distance: 0,
+                        certainty: Certainty::Heuristic,
+                        roles: vec!["target".to_string(), "defines_target_symbol".to_string()],
+                        reasons: vec![format!("defines symbol {qualname}")],
+                        edits: vec![RenameEdit {
+                            start_byte: 0,
+                            end_byte: 0,
+                            line: symbol.span.start_line,
+                            before_text: old_name.clone(),
+                            after_text: new_name.to_string(),
+                            kind: RenameEditKind::DeferredUnknown,
+                            verified: false,
+                            deferred_reason: Some(
+                                "could not derive exact identifier span from the current source line"
+                                    .to_string(),
+                            ),
+                        }],
+                        apply_safe: false,
+                    });
+                }
+
+                for step in self.collect_symbol_import_rename_steps(symbol, &old_name, new_name)? {
+                    steps.push(step);
+                }
+
+                for step in self.collect_symbol_deferred_steps(qualname)? {
+                    skipped.push(step);
+                }
+            }
+            RenameTarget::File { path } => {
+                for step in self.collect_file_import_path_steps(path, &old_name, new_name)? {
+                    steps.push(step);
+                }
+                warnings.push(
+                    "file-target rename planning does not move files yet; only import-path rewrites are planned"
+                        .to_string(),
+                );
+            }
+        }
+
+        steps.sort_by(|left, right| left.path.cmp(&right.path));
+        skipped.sort_by(|left, right| left.path.cmp(&right.path));
+
+        let safe_edits_planned = steps.iter().map(|step| step.edits.len()).sum::<usize>();
+        let deferred_edits_planned = skipped.iter().map(|step| step.edits.len()).sum::<usize>();
+        let edits_planned = safe_edits_planned + deferred_edits_planned;
+        let blocked = !force_requested && !skipped.is_empty();
+
+        if apply_requested {
+            if blocked {
+                warnings.push(
+                    "apply blocked because deferred or unsupported sites remain; rerun with --force to apply only the safe subset"
+                        .to_string(),
+                );
+            } else {
+                let applied = self.apply_rename_plan_steps(repo_root, &steps)?;
+                applied_files = applied.0;
+                applied_edits = applied.1;
+                if !skipped.is_empty() {
+                    warnings.push(
+                        "apply completed only for safe sites; inspect deferred sites manually"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        let files_considered = edits_planned_file_count(&resolved, &steps, &skipped);
+        let files_planned = steps.len();
+        let files_skipped = skipped.len();
+
+        Ok(RenamePlan {
+            target: target.to_string(),
+            target_file,
+            old_name,
+            new_name: new_name.to_string(),
+            apply_requested,
+            force_requested,
+            applied: apply_requested && !blocked && applied_files > 0,
+            steps,
+            skipped,
+            warnings,
+            summary: RenamePlanSummary {
+                files_considered,
+                files_planned,
+                files_skipped,
+                edits_planned,
+                safe_edits_planned,
+                deferred_edits_planned,
+                applied_files,
+                applied_edits,
+                blocked,
+            },
         })
     }
 
@@ -1356,6 +1725,17 @@ impl Store {
             .map_err(Into::into)
     }
 
+    fn require_indexed_file(&self, path: &RepoPath) -> ScopeResult<()> {
+        if self.file_id(path)?.is_some() {
+            Ok(())
+        } else {
+            Err(ScopeError::InvalidInput(format!(
+                "file not indexed: {}",
+                path.0
+            )))
+        }
+    }
+
     fn symbol_id(&self, qualname: &str) -> ScopeResult<Option<i64>> {
         self.connection
             .query_row(
@@ -1740,6 +2120,196 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    fn symbol_record_by_id(&self, symbol_id: i64) -> ScopeResult<Option<SymbolRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT files.path, symbols.name, symbols.qualname, symbols.kind, symbols.visibility, symbols.exported, symbols.span_start, symbols.span_end, symbols.start_line, symbols.end_line
+             FROM symbols
+             JOIN files ON files.id = symbols.file_id
+             WHERE symbols.id = ?1",
+        )?;
+        statement
+            .query_row([symbol_id], |row| {
+                Ok(SymbolRecord {
+                    file: RepoPath(row.get::<_, String>(0)?),
+                    name: row.get(1)?,
+                    qualname: row.get(2)?,
+                    kind: symbol_kind_from_db(&row.get::<_, String>(3)?),
+                    visibility: visibility_from_db(&row.get::<_, String>(4)?),
+                    exported: row.get::<_, i64>(5)? != 0,
+                    span: crate::Span {
+                        start_byte: row.get::<_, i64>(6)? as u32,
+                        end_byte: row.get::<_, i64>(7)? as u32,
+                        start_line: row.get::<_, i64>(8)? as u32,
+                        end_line: row.get::<_, i64>(9)? as u32,
+                    },
+                })
+            })
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn collect_symbol_import_rename_steps(
+        &self,
+        symbol: &SymbolRecord,
+        old_name: &str,
+        new_name: &str,
+    ) -> ScopeResult<Vec<RenamePlanStep>> {
+        let Some(file_id) = self.file_id(&symbol.file)? else {
+            return Ok(Vec::new());
+        };
+        let mut steps = Vec::new();
+        let mut statement = self.connection.prepare(
+            "SELECT files.path, imports.raw_text, imports.span_start, imports.span_end, imports.start_line, imports.certainty
+             FROM imports
+             JOIN files ON files.id = imports.file_id
+             WHERE imports.resolved_file_id = ?1
+             ORDER BY files.path ASC, imports.start_line ASC",
+        )?;
+        let rows = statement.query_map([file_id], |row| {
+            Ok((
+                RepoPath(row.get::<_, String>(0)?),
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u32,
+                row.get::<_, i64>(3)? as u32,
+                row.get::<_, i64>(4)? as u32,
+                certainty_from_db(&row.get::<_, String>(5)?),
+            ))
+        })?;
+
+        for row in rows {
+            let (path, raw_text, span_start, _span_end, start_line, certainty) = row?;
+            if let Some(edit) = rename_edit_from_import(&raw_text, span_start, start_line, old_name, new_name) {
+                let mut reasons = vec![format!(
+                    "import statement references defining file {}",
+                    symbol.file.0
+                )];
+                if raw_text.starts_with("export ") {
+                    reasons.push(format!("re-export mentions symbol {}", symbol.qualname));
+                }
+                steps.push(RenamePlanStep {
+                    path,
+                    distance: 1,
+                    certainty,
+                    roles: vec!["importer".to_string()],
+                    reasons,
+                    edits: vec![edit],
+                    apply_safe: true,
+                });
+            }
+        }
+
+        Ok(steps)
+    }
+
+    fn collect_file_import_path_steps(
+        &self,
+        target: &RepoPath,
+        old_name: &str,
+        new_name: &str,
+    ) -> ScopeResult<Vec<RenamePlanStep>> {
+        let Some(file_id) = self.file_id(target)? else {
+            return Ok(Vec::new());
+        };
+        let mut steps = Vec::new();
+        let mut statement = self.connection.prepare(
+            "SELECT files.path, imports.raw_text, imports.span_start, imports.start_line, imports.certainty
+             FROM imports
+             JOIN files ON files.id = imports.file_id
+             WHERE imports.resolved_file_id = ?1
+             ORDER BY files.path ASC, imports.start_line ASC",
+        )?;
+        let rows = statement.query_map([file_id], |row| {
+            Ok((
+                RepoPath(row.get::<_, String>(0)?),
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u32,
+                row.get::<_, i64>(3)? as u32,
+                certainty_from_db(&row.get::<_, String>(4)?),
+            ))
+        })?;
+
+        for row in rows {
+            let (path, raw_text, span_start, start_line, certainty) = row?;
+            if let Some(edit) = rename_edit_from_import_path(&raw_text, span_start, start_line, old_name, new_name) {
+                steps.push(RenamePlanStep {
+                    path,
+                    distance: 1,
+                    certainty,
+                    roles: vec!["importer".to_string()],
+                    reasons: vec![format!("import path resolves to target file {}", target.0)],
+                    edits: vec![edit],
+                    apply_safe: true,
+                });
+            }
+        }
+
+        Ok(steps)
+    }
+
+    fn collect_symbol_deferred_steps(&self, qualname: &str) -> ScopeResult<Vec<RenamePlanStep>> {
+        let mut steps = Vec::new();
+        for traversal in self.query_callers(qualname, false)? {
+            let Some(path) = traversal.path else {
+                continue;
+            };
+            steps.push(RenamePlanStep {
+                path,
+                distance: traversal.distance,
+                certainty: traversal.certainty,
+                roles: vec!["direct_caller".to_string()],
+                reasons: vec![traversal.reason],
+                edits: vec![RenameEdit {
+                    start_byte: 0,
+                    end_byte: 0,
+                    line: 0,
+                    before_text: qualname.rsplit("::").next().unwrap_or_default().to_string(),
+                    after_text: String::new(),
+                    kind: RenameEditKind::DeferredCallSite,
+                    verified: false,
+                    deferred_reason: Some(
+                        "call-site token spans are not persisted in the index yet".to_string(),
+                    ),
+                }],
+                apply_safe: false,
+            });
+        }
+        Ok(steps)
+    }
+
+    fn apply_rename_plan_steps(
+        &self,
+        repo_root: &Path,
+        steps: &[RenamePlanStep],
+    ) -> ScopeResult<(usize, usize)> {
+        let mut per_file: HashMap<RepoPath, Vec<RenameEdit>> = HashMap::new();
+        for step in steps {
+            for edit in &step.edits {
+                if edit.verified {
+                    per_file.entry(step.path.clone()).or_default().push(edit.clone());
+                }
+            }
+        }
+
+        let mut applied_files = 0usize;
+        let mut applied_edits = 0usize;
+        let mut paths: Vec<_> = per_file.into_iter().collect();
+        paths.sort_by(|left, right| left.0.cmp(&right.0));
+
+        for (path, edits) in paths {
+            let absolute_path = repo_root.join(&path.0);
+            let source = std::fs::read_to_string(&absolute_path)
+                .map_err(|error| ScopeError::io(&absolute_path, error))?;
+            let updated = apply_rename_edits_to_source(&source, &edits)?;
+            if updated != source {
+                write_updated_source_atomically(&absolute_path, &updated)?;
+                applied_files += 1;
+                applied_edits += edits.len();
+            }
+        }
+
+        Ok((applied_files, applied_edits))
     }
 
     fn traverse_reverse_callers(
@@ -2249,6 +2819,169 @@ fn reconcile_schema(connection: &Connection) -> ScopeResult<()> {
     Ok(())
 }
 
+fn edits_planned_file_count(
+    resolved: &RenameTarget,
+    steps: &[RenamePlanStep],
+    skipped: &[RenamePlanStep],
+) -> usize {
+    let mut files = HashSet::new();
+    match resolved {
+        RenameTarget::Symbol { symbol, .. } => {
+            files.insert(symbol.file.clone());
+        }
+        RenameTarget::File { path } => {
+            files.insert(path.clone());
+        }
+    }
+    for step in steps {
+        files.insert(step.path.clone());
+    }
+    for step in skipped {
+        files.insert(step.path.clone());
+    }
+    files.len()
+}
+
+fn file_stem_name(path: &RepoPath) -> ScopeResult<String> {
+    std::path::Path::new(&path.0)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ScopeError::InvalidInput(format!(
+                "rename-plan could not derive file name from target: {}",
+                path.0
+            ))
+        })
+}
+
+fn definition_edit_from_symbol(
+    symbol: &SymbolRecord,
+    source: &str,
+    new_name: &str,
+) -> Option<RenameEdit> {
+    let start = symbol.span.start_byte as usize;
+    let end = symbol.span.end_byte as usize;
+    let line = source.get(start..end)?;
+    let offset = identifier_match_offset(line, &symbol.name)?;
+    Some(RenameEdit {
+        start_byte: symbol.span.start_byte + offset as u32,
+        end_byte: symbol.span.start_byte + (offset + symbol.name.len()) as u32,
+        line: symbol.span.start_line,
+        before_text: symbol.name.clone(),
+        after_text: new_name.to_string(),
+        kind: RenameEditKind::Definition,
+        verified: true,
+        deferred_reason: None,
+    })
+}
+
+fn rename_edit_from_import(
+    raw_text: &str,
+    span_start: u32,
+    start_line: u32,
+    old_name: &str,
+    new_name: &str,
+) -> Option<RenameEdit> {
+    identifier_match_offset(raw_text, old_name).map(|offset| RenameEdit {
+        start_byte: span_start + offset as u32,
+        end_byte: span_start + (offset + old_name.len()) as u32,
+        line: start_line,
+        before_text: old_name.to_string(),
+        after_text: new_name.to_string(),
+        kind: if raw_text.starts_with("export ") {
+            RenameEditKind::ImportSpecifier
+        } else {
+            RenameEditKind::ImportSpecifier
+        },
+        verified: true,
+        deferred_reason: None,
+    })
+}
+
+fn rename_edit_from_import_path(
+    raw_text: &str,
+    span_start: u32,
+    start_line: u32,
+    old_name: &str,
+    new_name: &str,
+) -> Option<RenameEdit> {
+    raw_text.find(old_name).map(|offset| RenameEdit {
+        start_byte: span_start + offset as u32,
+        end_byte: span_start + (offset + old_name.len()) as u32,
+        line: start_line,
+        before_text: old_name.to_string(),
+        after_text: new_name.to_string(),
+        kind: RenameEditKind::ImportPath,
+        verified: true,
+        deferred_reason: None,
+    })
+}
+
+fn identifier_match_offset(source: &str, needle: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut index = 0usize;
+    while index + needle_bytes.len() <= bytes.len() {
+        if &bytes[index..index + needle_bytes.len()] == needle_bytes
+            && is_identifier_boundary(bytes, index.checked_sub(1).unwrap_or(usize::MAX), true)
+            && is_identifier_boundary(bytes, index + needle_bytes.len(), false)
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_identifier_boundary(bytes: &[u8], index: usize, is_left: bool) -> bool {
+    if is_left {
+        if index == usize::MAX || index >= bytes.len() {
+            return true;
+        }
+        !is_identifier_byte(bytes[index])
+    } else {
+        if index >= bytes.len() {
+            return true;
+        }
+        !is_identifier_byte(bytes[index])
+    }
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
+fn apply_rename_edits_to_source(source: &str, edits: &[RenameEdit]) -> ScopeResult<String> {
+    let mut ordered = edits.to_vec();
+    ordered.sort_by(|left, right| right.start_byte.cmp(&left.start_byte));
+    let mut updated = source.to_string();
+    for edit in ordered {
+        let range = edit.start_byte as usize..edit.end_byte as usize;
+        if updated.get(range.clone()) != Some(edit.before_text.as_str()) {
+            return Err(ScopeError::InvalidInput(format!(
+                "rename-plan apply mismatch at {}..{}",
+                edit.start_byte, edit.end_byte
+            )));
+        }
+        updated.replace_range(range, &edit.after_text);
+    }
+    Ok(updated)
+}
+
+fn write_updated_source_atomically(path: &Path, updated: &str) -> ScopeResult<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ScopeError::InvalidInput(format!("path has no parent: {}", path.display())))?;
+    let temp_path = parent.join(format!(
+        ".scope-rename-{}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&temp_path, updated).map_err(|error| ScopeError::io(&temp_path, error))?;
+    std::fs::rename(&temp_path, path).map_err(|error| ScopeError::io(path, error))?;
+    Ok(())
+}
+
 fn has_required_tables(connection: &Connection, tables: &[&str]) -> ScopeResult<bool> {
     for table in tables {
         if !table_exists(connection, table)? {
@@ -2568,6 +3301,22 @@ fn default_depth_for_change_type(change_type: &str) -> u32 {
     } else {
         DEFAULT_TRANSITIVE_DEPTH
     }
+}
+
+fn matches_test_patterns(path: &RepoPath, tests: &TestConfig) -> bool {
+    let included = tests.patterns.iter().any(|pattern| {
+        glob::Pattern::new(pattern)
+            .map(|pattern| pattern.matches(&path.0))
+            .unwrap_or(false)
+    });
+    if !included {
+        return false;
+    }
+    !tests.exclude_patterns.iter().any(|pattern| {
+        glob::Pattern::new(pattern)
+            .map(|pattern| pattern.matches(&path.0))
+            .unwrap_or(false)
+    })
 }
 
 fn score_for_candidate(base_score: u32, distance: u32, certainty: &Certainty) -> u32 {

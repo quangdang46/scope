@@ -11,6 +11,7 @@ use std::{
 use clap::Parser;
 use cli::{
     ArchCommand, ChangeType, Cli, Commands, RiskSortArg, StabilitySortArg, SurfaceCommand,
+    TestMapCommand,
 };
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, DatabaseInfo,
@@ -327,6 +328,53 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 .store
                 .query_risk(file.as_ref(), args.days, args.threshold, args.top, sort)?;
             serialize_output(&scope_core::stub::risk(result), compact)
+        }
+        Commands::TestMap(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let config = load_arch_config(&context.paths.repo_root)?;
+            match args.command {
+                TestMapCommand::Build => {
+                    let result = context.store.build_test_map(&config.tests)?;
+                    serialize_output(&scope_core::stub::test_map_build(result), compact)
+                }
+                TestMapCommand::Covers(args) => {
+                    let target = RepoPath::from(args.target);
+                    let result = context.store.query_tests_covering(&target, &config.tests)?;
+                    serialize_output(&scope_core::stub::test_map_covers(result), compact)
+                }
+                TestMapCommand::CoveredBy(args) => {
+                    let target = RepoPath::from(args.target);
+                    let result = context.store.query_test_coverage(&target, &config.tests)?;
+                    serialize_output(&scope_core::stub::test_map_covered_by(result), compact)
+                }
+                TestMapCommand::Uncovered => {
+                    let result = context.store.query_uncovered_files(&config.tests)?;
+                    serialize_output(&scope_core::stub::test_map_uncovered(result), compact)
+                }
+            }
+        }
+        Commands::RenamePlan(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            validate_new_name(&args.new_name)?;
+            let plan = context.store.build_rename_plan(
+                &context.paths.repo_root,
+                &args.target,
+                &args.new_name,
+                args.apply,
+                args.force,
+            )?;
+            if plan.summary.blocked || (!plan.skipped.is_empty() && args.apply) {
+                exit_code = 1;
+            }
+            serialize_output(&scope_core::stub::rename_plan(plan), compact)
         }
         Commands::Doctor(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -711,6 +759,21 @@ fn resolve_surface_target(
     })
 }
 
+fn validate_new_name(new_name: &str) -> Result<(), scope_core::ScopeError> {
+    if new_name.is_empty()
+        || !new_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+    {
+        return Err(scope_core::ScopeError::InvalidInput(
+            "rename-plan requires a simple identifier for --to".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+
+
 fn looks_like_symbol(target: &str) -> bool {
     target.contains("::")
         && !target.ends_with(".rs")
@@ -1043,7 +1106,8 @@ mod tests {
         resolve_surface_target, run_benchmark, serialize_output,
     };
     use scope_core::{
-        PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol, RepoPath,
+        Certainty, PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
+        RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
         RiskRecord, RiskResult, StabilityRecord, StabilityResult, SymbolKind, Visibility,
     };
     use std::{
@@ -1331,6 +1395,82 @@ mod tests {
     }
 
     #[test]
+    fn serialize_output_test_map_command_uses_expected_envelope_shape() {
+        let envelope = scope_core::stub::test_map_covers(scope_core::TestMapCoversResult {
+            source_file: RepoPath::from("src/auth/middleware.ts"),
+            tests: vec![scope_core::TestMapRecord {
+                path: RepoPath::from("tests/auth/middleware.test.ts"),
+                distance: 1,
+            }],
+            summary: scope_core::TestMapCoversSummary {
+                covering_tests: 1,
+                nearest_distance: Some(1),
+            },
+        });
+        let output = serialize_output(&envelope, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["command"], "test-map-covers");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["source_file"], "src/auth/middleware.ts");
+        assert_eq!(value["data"]["result"]["tests"][0]["path"], "tests/auth/middleware.test.ts");
+        assert_eq!(value["data"]["result"]["tests"][0]["distance"], 1);
+        assert_eq!(value["data"]["result"]["summary"]["covering_tests"], 1);
+    }
+
+    #[test]
+    fn serialize_output_rename_plan_command_uses_expected_envelope_shape() {
+        let envelope = scope_core::stub::rename_plan(RenamePlan {
+            target: "parser::parse".to_string(),
+            target_file: RepoPath::from("src/parser.rs"),
+            old_name: "parse".to_string(),
+            new_name: "parseToken".to_string(),
+            apply_requested: false,
+            force_requested: false,
+            applied: false,
+            steps: vec![RenamePlanStep {
+                path: RepoPath::from("src/parser.rs"),
+                distance: 0,
+                certainty: Certainty::Exact,
+                roles: vec!["target".to_string()],
+                reasons: vec!["defines symbol parser::parse".to_string()],
+                edits: vec![RenameEdit {
+                    start_byte: 7,
+                    end_byte: 12,
+                    line: 1,
+                    before_text: "parse".to_string(),
+                    after_text: "parseToken".to_string(),
+                    kind: RenameEditKind::Definition,
+                    verified: true,
+                    deferred_reason: None,
+                }],
+                apply_safe: true,
+            }],
+            skipped: Vec::new(),
+            warnings: Vec::new(),
+            summary: RenamePlanSummary {
+                files_considered: 1,
+                files_planned: 1,
+                files_skipped: 0,
+                edits_planned: 1,
+                safe_edits_planned: 1,
+                deferred_edits_planned: 0,
+                applied_files: 0,
+                applied_edits: 0,
+                blocked: false,
+            },
+        });
+        let output = serialize_output(&envelope, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["command"], "rename-plan");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["target"], "parser::parse");
+        assert_eq!(value["data"]["result"]["steps"][0]["path"], "src/parser.rs");
+        assert_eq!(value["data"]["result"]["steps"][0]["edits"][0]["after_text"], "parseToken");
+    }
+
+    #[test]
     fn rust_small_parse_pack_body_matches_golden() {
         let repo = prepare_fixture_copy("rust_small");
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
@@ -1494,6 +1634,110 @@ mod tests {
             mixed_usage.to_string(),
             "invalid command input: surface target cannot be combined with a subcommand"
         );
+    }
+
+    #[test]
+    fn rename_plan_dry_run_collects_fixture_sites() {
+        let repo = prepare_fixture_copy("ts_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let plan = store
+            .build_rename_plan(
+                &repo,
+                "auth::middleware::verifyToken",
+                "verifySession",
+                false,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(plan.target_file, RepoPath::from("src/auth/middleware.ts"));
+        assert_eq!(plan.old_name, "verifyToken");
+        assert_eq!(plan.new_name, "verifySession");
+        assert!(!plan.applied);
+        assert_eq!(plan.summary.edits_planned, 2);
+        assert!(!plan.summary.blocked);
+        assert!(plan.steps.iter().any(|step| step.path == RepoPath::from("src/auth/index.ts")));
+        assert!(plan.steps.iter().any(|step| step.path == RepoPath::from("src/auth/middleware.ts")));
+        assert!(!plan.steps.iter().any(|step| step.path == RepoPath::from("src/index.ts")));
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn rename_plan_apply_updates_safe_fixture_sites() {
+        let repo = prepare_fixture_copy("ts_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let plan = store
+            .build_rename_plan(
+                &repo,
+                "auth::middleware::verifyToken",
+                "verifySession",
+                true,
+                true,
+            )
+            .unwrap();
+
+        assert!(plan.applied);
+        assert_eq!(plan.summary.applied_files, 2);
+        assert_eq!(plan.summary.applied_edits, 2);
+        let root_index = fs::read_to_string(repo.join("src/index.ts")).unwrap();
+        assert!(root_index.contains("export { verifyToken } from \"./auth/index\";"));
+        assert!(root_index.contains("export { format } from \"./utils/formatter\";"));
+
+        let auth_index = fs::read_to_string(repo.join("src/auth/index.ts")).unwrap();
+        assert!(auth_index.contains("export { verifySession } from \"./middleware\";"));
+        assert!(!auth_index.contains("export { verifyToken } from \"./middleware\";"));
+
+        assert!(fs::read_to_string(repo.join("src/auth/middleware.ts"))
+            .unwrap()
+            .contains("export function verifySession(token: string): boolean"));
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn rename_plan_file_target_plans_import_path_rewrites_without_move() {
+        let repo = prepare_fixture_copy("rust_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let plan = store
+            .build_rename_plan(&repo, "src/parser.rs", "parser2", false, false)
+            .unwrap();
+
+        assert_eq!(plan.target_file, RepoPath::from("src/parser.rs"));
+        assert_eq!(plan.old_name, "parser");
+        assert_eq!(plan.new_name, "parser2");
+        assert!(!plan.warnings.is_empty());
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn rename_plan_without_force_blocks_when_deferred_sites_remain() {
+        let repo = prepare_fixture_copy("ts_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let plan = store
+            .build_rename_plan(
+                &repo,
+                "auth::middleware::verifyToken",
+                "verifySession",
+                true,
+                false,
+            )
+            .unwrap();
+
+        assert!(!plan.summary.blocked);
+        assert!(plan.applied);
+        assert!(plan.skipped.is_empty());
+
+        fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]

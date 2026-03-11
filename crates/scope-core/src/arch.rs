@@ -4,13 +4,18 @@ use glob::Pattern;
 
 use crate::{
     ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation, RepoPath,
-    ScopeError, ScopeResult, Store,
+    ScopeError, ScopeResult, Store, TestConfig,
 };
 
 pub fn load_arch_config(repo_root: &Path) -> ScopeResult<ArchConfig> {
     let config_path = repo_root.join(".scope/arch.toml");
-    let source =
-        fs::read_to_string(&config_path).map_err(|error| ScopeError::io(&config_path, error))?;
+    let source = match fs::read_to_string(&config_path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ArchConfig::default())
+        }
+        Err(error) => return Err(ScopeError::io(&config_path, error)),
+    };
     let config: ArchConfig = toml::from_str(&source)
         .map_err(|error| ScopeError::InvalidInput(format!("invalid arch config: {error}")))?;
     validate_arch_config(&config)?;
@@ -73,10 +78,10 @@ pub fn arch_check(store: &Store, config: &ArchConfig) -> ScopeResult<ArchCheckRe
 }
 
 fn validate_arch_config(config: &ArchConfig) -> ScopeResult<()> {
+    validate_test_config(&config.tests)?;
+
     if config.layers.is_empty() {
-        return Err(ScopeError::InvalidInput(
-            "arch config must define at least one [[layer]]".to_string(),
-        ));
+        return Ok(());
     }
 
     let mut names = HashSet::new();
@@ -112,6 +117,20 @@ fn validate_arch_config(config: &ArchConfig) -> ScopeResult<()> {
         }
     }
 
+    Ok(())
+}
+
+pub fn validate_test_config(config: &TestConfig) -> ScopeResult<()> {
+    for pattern in &config.patterns {
+        Pattern::new(pattern).map_err(|error| {
+            ScopeError::InvalidInput(format!("invalid test pattern '{pattern}': {error}"))
+        })?;
+    }
+    for pattern in &config.exclude_patterns {
+        Pattern::new(pattern).map_err(|error| {
+            ScopeError::InvalidInput(format!("invalid test exclude pattern '{pattern}': {error}"))
+        })?;
+    }
     Ok(())
 }
 
@@ -153,6 +172,7 @@ mod tests {
                 may_not_import: vec!["services".to_string()],
                 message: None,
             }],
+            tests: TestConfig::default(),
         };
 
         let error = validate_arch_config(&config).unwrap_err();
@@ -178,5 +198,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(layer.name, "first");
+    }
+
+    #[test]
+    fn validates_invalid_test_pattern() {
+        let error = validate_test_config(&TestConfig {
+            patterns: vec!["[".to_string()],
+            exclude_patterns: Vec::new(),
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid test pattern"));
     }
 }

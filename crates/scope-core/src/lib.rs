@@ -22,9 +22,12 @@ pub use model::{
     DiagnosticSeverity, EdgeKind, ExportRecord, ExtractResult, FileRecord, ImpactChangeType,
     ImpactTraversalRule, ImportPath, ImportRecord, ModuleRecord, NodeKind, ParseDiagnostic,
     ParseStatus, PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff,
-    PublicSurfaceDiffSummary, PublicSurfaceSymbol, RepoPath, RiskRecord, RiskResult, RiskSort,
-    RiskSummary, Span, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
-    StabilitySummary, SymbolKind, SymbolRecord, TraversalRecord, Visibility,
+    PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan,
+    RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort, RiskSummary,
+    Span, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort, StabilitySummary,
+    SymbolKind, SymbolRecord, TestConfig, TestMapBuildResult, TestMapBuildSummary,
+    TestMapCoveredByResult, TestMapCoveredBySummary, TestMapCoversResult, TestMapCoversSummary,
+    TestMapRecord, TestMapUncoveredResult, TestMapUncoveredSummary, TraversalRecord, Visibility,
 };
 pub use scanner::{scan_repo, ScanConfig, ScanEntry, SupportedLanguage};
 pub use store::{DatabaseInfo, IndexHealthStats, ParseStatusCounts, Store, INDEX_SCHEMA_VERSION};

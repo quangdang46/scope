@@ -50,6 +50,10 @@ pub enum Commands {
     Stability(StabilityArgs),
     /// Report churn-weighted risk scores from indexed file dependencies
     Risk(RiskArgs),
+    /// Build static test coverage topology from file imports
+    TestMap(TestMapArgs),
+    /// Build a conservative rename execution plan for a file or symbol target
+    RenamePlan(RenamePlanArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
@@ -241,6 +245,40 @@ pub struct RiskArgs {
     pub top: Option<usize>,
     #[arg(long, value_enum, default_value_t = RiskSortArg::Score)]
     pub sort: RiskSortArg,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TestMapArgs {
+    #[command(subcommand)]
+    pub command: TestMapCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TestMapCommand {
+    /// Detect test files and summarize static coverage topology
+    Build,
+    /// Show which tests statically cover a source file
+    Covers(TestMapTargetArgs),
+    /// Show which source files are statically covered by a test file
+    CoveredBy(TestMapTargetArgs),
+    /// List indexed non-test files with no static test coverage
+    Uncovered,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TestMapTargetArgs {
+    pub target: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct RenamePlanArgs {
+    pub target: String,
+    #[arg(long = "to")]
+    pub new_name: String,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]
