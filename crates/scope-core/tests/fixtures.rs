@@ -1305,27 +1305,37 @@ fn test_map_queries_cover_expected_fixture_cones() {
     let covers = store
         .query_tests_covering(&RepoPath::from("src/auth/middleware.ts"), &config.tests)
         .unwrap();
-    assert_eq!(covers.len(), 3);
-    assert_eq!(covers[0].path, RepoPath::from("tests/auth/middleware.test.ts"));
-    assert_eq!(covers[0].distance, 1);
-    assert_eq!(covers[1].path, RepoPath::from("tests/integration/api.test.ts"));
-    assert_eq!(covers[1].distance, 2);
-    assert_eq!(covers[2].path, RepoPath::from("tests/e2e/app.test.ts"));
-    assert_eq!(covers[2].distance, 3);
+    assert_eq!(covers.summary.covering_tests, 3);
+    assert_eq!(covers.summary.nearest_distance, Some(1));
+    assert_eq!(covers.tests.len(), 3);
+    assert_eq!(covers.tests[0].path, RepoPath::from("tests/auth/middleware.test.ts"));
+    assert_eq!(covers.tests[0].distance, 1);
+    assert_eq!(covers.tests[1].path, RepoPath::from("tests/integration/api.test.ts"));
+    assert_eq!(covers.tests[1].distance, 2);
+    assert_eq!(covers.tests[2].path, RepoPath::from("tests/e2e/app.test.ts"));
+    assert_eq!(covers.tests[2].distance, 3);
 
     let covered_by = store
         .query_test_coverage(&RepoPath::from("tests/e2e/app.test.ts"), &config.tests)
         .unwrap();
+    assert_eq!(covered_by.summary.covered_source_files, 4);
+    assert_eq!(covered_by.summary.nearest_distance, Some(1));
     assert_eq!(
-        covered_by.iter().map(|record| record.path.0.as_str()).collect::<Vec<_>>(),
+        covered_by
+            .covered_files
+            .iter()
+            .map(|record| record.path.0.as_str())
+            .collect::<Vec<_>>(),
         vec!["src/app.ts", "src/routes/api.ts", "src/auth/middleware.ts", "src/auth/jwt.ts"]
     );
 
     let uncovered = store.query_uncovered_files(&config.tests).unwrap();
-    assert!(uncovered.contains(&RepoPath::from("src/index.ts")));
-    assert!(uncovered.contains(&RepoPath::from("src/auth/index.ts")));
-    assert!(uncovered.contains(&RepoPath::from("src/auth/aliases.ts")));
-    assert!(uncovered.contains(&RepoPath::from("src/utils/formatter.ts")));
+    assert_eq!(uncovered.summary.source_files_considered, 9);
+    assert_eq!(uncovered.summary.uncovered_source_files, 5);
+    assert!(uncovered.files.contains(&RepoPath::from("src/index.ts")));
+    assert!(uncovered.files.contains(&RepoPath::from("src/auth/index.ts")));
+    assert!(uncovered.files.contains(&RepoPath::from("src/auth/aliases.ts")));
+    assert!(uncovered.files.contains(&RepoPath::from("src/utils/formatter.ts")));
 
     let source_as_test_error = store
         .query_test_coverage(&RepoPath::from("src/auth/middleware.ts"), &config.tests)

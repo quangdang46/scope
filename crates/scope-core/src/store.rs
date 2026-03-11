@@ -15,7 +15,9 @@ use crate::{
     RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort, RiskSummary, ScopeError,
     ScopeResult, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
     StabilitySummary, SymbolKind, SymbolRecord, TestConfig, TestMapBuildResult,
-    TestMapBuildSummary, TestMapRecord, TraversalRecord, Visibility,
+    TestMapBuildSummary, TestMapCoveredByResult, TestMapCoveredBySummary, TestMapCoversResult,
+    TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult, TestMapUncoveredSummary,
+    TraversalRecord, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
@@ -1725,16 +1727,6 @@ impl Store {
             .map_err(Into::into)
     }
 
-    fn require_indexed_file(&self, path: &RepoPath) -> ScopeResult<()> {
-        if self.file_id(path)?.is_some() {
-            Ok(())
-        } else {
-            Err(ScopeError::InvalidInput(format!(
-                "file not indexed: {}",
-                path.0
-            )))
-        }
-    }
 
     fn symbol_id(&self, qualname: &str) -> ScopeResult<Option<i64>> {
         self.connection
