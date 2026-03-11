@@ -1,0 +1,765 @@
+use std::{net::SocketAddr, sync::Arc};
+
+use axum::{
+    extract::{Query, State},
+    http::{header, HeaderValue, StatusCode},
+    response::{Html, IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use tower::ServiceExt;
+
+use crate::{
+    load_arch_config,
+    model::{CochangeSort, ImpactChangeType, RiskSort, StabilitySort, SymbolKind},
+    stub, DatabaseInfo, IndexHealthStats, RepoPath, RuntimePaths, ScopeError, ScopeResult, Store,
+};
+
+#[derive(Debug, Clone)]
+pub struct ServeOptions {
+    pub port: u16,
+    pub open: bool,
+    pub no_ui: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServeState {
+    pub paths: RuntimePaths,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServeStatusData {
+    pub repo_root: String,
+    pub database: DatabaseInfo,
+    pub stats: IndexHealthStats,
+}
+
+const WEB_UI_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>scope serve</title>
+  <style>
+    :root { color-scheme: dark light; }
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 24px; background: #0f172a; color: #e2e8f0; }
+    h1 { margin-top: 0; }
+    a { color: #93c5fd; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 20px; }
+    .card { border: 1px solid #334155; border-radius: 8px; padding: 16px; background: #111827; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+    button { cursor: pointer; border: 1px solid #475569; background: #1e293b; color: inherit; border-radius: 6px; padding: 8px 12px; }
+    pre { white-space: pre-wrap; word-break: break-word; border: 1px solid #334155; border-radius: 8px; padding: 16px; background: #020617; min-height: 280px; }
+    .muted { color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <h1>scope serve</h1>
+  <p class="muted">Minimal local API explorer for the indexed repository.</p>
+
+  <div class="grid">
+    <div class="card">
+      <strong>Status</strong>
+      <p>Check index/database health.</p>
+      <a href="/api/status">/api/status</a>
+    </div>
+    <div class="card">
+      <strong>Entry points</strong>
+      <p>List detected entry points.</p>
+      <a href="/api/entry/list">/api/entry/list</a>
+    </div>
+    <div class="card">
+      <strong>Snapshots</strong>
+      <p>List saved snapshots.</p>
+      <a href="/api/snapshot/list">/api/snapshot/list</a>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button data-endpoint="/api/status">Load status</button>
+    <button data-endpoint="/api/entry/list">Load entry list</button>
+    <button data-endpoint="/api/snapshot/list">Load snapshots</button>
+  </div>
+
+  <pre id="output">Click a button to fetch JSON.</pre>
+
+  <script>
+    const output = document.getElementById('output');
+    async function load(endpoint) {
+      output.textContent = `Loading ${endpoint} ...`;
+      try {
+        const response = await fetch(endpoint);
+        const data = await response.json();
+        output.textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        output.textContent = String(error);
+      }
+    }
+    for (const button of document.querySelectorAll('button[data-endpoint]')) {
+      button.addEventListener('click', () => load(button.dataset.endpoint));
+    }
+  </script>
+</body>
+</html>
+"#;
+
+pub fn build_router(state: Arc<ServeState>, no_ui: bool) -> Router {
+    let mut app = Router::new()
+        .route("/api/status", get(api_status))
+        .route("/api/deps", get(api_deps))
+        .route("/api/symbols", get(api_symbols))
+        .route("/api/calls", get(api_calls))
+        .route("/api/callers", get(api_callers))
+        .route("/api/impact", get(api_impact))
+        .route("/api/why", get(api_why))
+        .route("/api/context", get(api_context))
+        .route("/api/risk", get(api_risk))
+        .route("/api/stability", get(api_stability))
+        .route("/api/cochange", get(api_cochange))
+        .route("/api/entry/list", get(api_entry_list))
+        .route("/api/entry/unreachable", get(api_entry_unreachable))
+        .route("/api/snapshot/list", get(api_snapshot_list))
+        .with_state(state);
+
+    if no_ui {
+        app = app.fallback(not_found_json);
+    } else {
+        app = app.fallback(serve_ui);
+    }
+
+    app
+}
+
+pub async fn run_server(paths: RuntimePaths, options: ServeOptions) -> ScopeResult<()> {
+    let state = Arc::new(ServeState { paths });
+    let app = build_router(state, options.no_ui);
+    let address = SocketAddr::from(([127, 0, 0, 1], options.port));
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(|error| ScopeError::io(format!("bind {address}"), error))?;
+
+    if options.open {
+        let _ = open::that(format!("http://{address}"));
+    }
+
+    eprintln!("scope serve: http://{address}");
+    axum::serve(listener, app)
+        .await
+        .map_err(|error| ScopeError::Internal(error.to_string()))
+}
+
+async fn serve_ui() -> Html<&'static str> {
+    Html(WEB_UI_HTML)
+}
+
+async fn not_found_json() -> Response {
+    json_error(
+        StatusCode::NOT_FOUND,
+        "serve",
+        ScopeError::NotFound {
+            kind: "route",
+            value: "/".to_string(),
+        },
+    )
+}
+
+fn open_store(state: &ServeState) -> ScopeResult<Store> {
+    Store::open(&state.paths.db_path)
+}
+
+fn status_payload(state: &ServeState) -> ScopeResult<crate::JsonEnvelope<ServeStatusData>> {
+    let store = open_store(state)?;
+    let schema_version = store.schema_version()?;
+    let stats = store.index_health_stats()?;
+    Ok(crate::JsonEnvelope::success(
+        "serve-status",
+        ServeStatusData {
+            repo_root: state.paths.repo_root.display().to_string(),
+            database: DatabaseInfo {
+                path: state.paths.db_path.display().to_string(),
+                schema_version,
+            },
+            stats,
+        },
+    ))
+}
+
+fn json_success<T: Serialize>(value: T) -> Response {
+    Json(value).into_response()
+}
+
+fn json_error(status: StatusCode, command: &'static str, error: ScopeError) -> Response {
+    let body = crate::JsonEnvelope::error(command, &error);
+    let mut response = Json(body).into_response();
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+fn query_error(command: &'static str, error: ScopeError) -> Response {
+    let status = match error {
+        ScopeError::InvalidInput(_) | ScopeError::NotFound { .. } | ScopeError::IndexNotFound => {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    json_error(status, command, error)
+}
+
+#[derive(Debug, Deserialize)]
+struct DepsParams {
+    file: String,
+    #[serde(default)]
+    reverse: bool,
+    #[serde(default)]
+    transitive: bool,
+    depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SymbolsParams {
+    file: String,
+    #[serde(default)]
+    public_only: bool,
+    kind: Option<SymbolKind>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CallsParams {
+    symbol: String,
+    #[serde(default)]
+    transitive: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImpactParams {
+    target: String,
+    change_type: ImpactChangeType,
+    depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WhyParams {
+    from: String,
+    to: String,
+    depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextParams {
+    target: String,
+    change_type: ImpactChangeType,
+    budget: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RiskParams {
+    file: Option<String>,
+    #[serde(default = "default_days")]
+    days: u32,
+    threshold: Option<f64>,
+    top: Option<usize>,
+    #[serde(default)]
+    sort: Option<RiskSort>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StabilityParams {
+    file: Option<String>,
+    flag_threshold: Option<f64>,
+    #[serde(default)]
+    sort: Option<StabilitySort>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CochangeParams {
+    target: String,
+    #[serde(default = "default_days")]
+    days: u32,
+    #[serde(default = "default_min_shared_commits")]
+    min_shared_commits: usize,
+    top: Option<usize>,
+    #[serde(default)]
+    sort: Option<CochangeSort>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EntryUnreachableParams {
+    min_age_days: Option<u64>,
+}
+
+fn default_days() -> u32 {
+    90
+}
+
+fn default_min_shared_commits() -> usize {
+    1
+}
+
+async fn api_status(State(state): State<Arc<ServeState>>) -> Response {
+    match status_payload(&state) {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("serve-status", error),
+    }
+}
+
+async fn api_deps(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<DepsParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let target = RepoPath::from(params.file.clone());
+        let dependencies = if params.reverse {
+            store.query_reverse_deps(&target)?
+        } else {
+            store.query_deps(&target)?
+        };
+        Ok(stub::deps(
+            params.file,
+            params.reverse,
+            params.transitive,
+            params.depth,
+            dependencies,
+        ))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("deps", error),
+    }
+}
+
+async fn api_symbols(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<SymbolsParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let symbols = store.query_symbols(
+            &RepoPath::from(params.file.clone()),
+            params.public_only,
+            params.kind.clone(),
+        )?;
+        Ok(stub::symbols(
+            params.file,
+            params.public_only,
+            params.kind,
+            symbols,
+        ))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("symbols", error),
+    }
+}
+
+async fn api_calls(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<CallsParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let traversals = store.query_callees(&params.symbol, params.transitive)?;
+        Ok(stub::calls(params.symbol, params.transitive, traversals))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("calls", error),
+    }
+}
+
+async fn api_callers(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<CallsParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let traversals = store.query_callers(&params.symbol, params.transitive)?;
+        Ok(stub::callers(params.symbol, params.transitive, traversals))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("callers", error),
+    }
+}
+
+async fn api_impact(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<ImpactParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let change_type = impact_change_type_name(&params.change_type);
+        let impacted = store.query_impact(&params.target, &change_type, params.depth)?;
+        Ok(stub::impact(
+            params.target,
+            change_type,
+            params.depth,
+            impacted,
+        ))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("impact", error),
+    }
+}
+
+async fn api_why(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<WhyParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let path = store.query_why(&params.from, &params.to, params.depth)?;
+        Ok(stub::why(params.from, params.to, params.depth, path))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("why", error),
+    }
+}
+
+async fn api_context(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<ContextParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let change_type = impact_change_type_name(&params.change_type);
+        let result = store.query_context(&[params.target], &change_type, params.budget)?;
+        Ok(stub::context(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("context", error),
+    }
+}
+
+async fn api_risk(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<RiskParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let _ = refresh_git_churn(&state.paths.repo_root, &store, params.days);
+        let result = store.query_risk(
+            optional_repo_path(&params.file).as_ref(),
+            params.days,
+            params.threshold,
+            params.top,
+            params.sort.unwrap_or(RiskSort::Score),
+        )?;
+        Ok(stub::risk(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("risk", error),
+    }
+}
+
+async fn api_stability(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<StabilityParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let result = store.query_stability(
+            optional_repo_path(&params.file).as_ref(),
+            params.flag_threshold,
+            params.sort.unwrap_or(StabilitySort::Instability),
+        )?;
+        Ok(stub::stability(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("stability", error),
+    }
+}
+
+async fn api_cochange(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<CochangeParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let _ = refresh_git_churn(&state.paths.repo_root, &store, params.days);
+        let result = store.query_cochange(
+            &RepoPath::from(params.target.clone()),
+            params.days,
+            params.min_shared_commits,
+            params.top,
+            params.sort.unwrap_or(CochangeSort::Score),
+        )?;
+        Ok(stub::cochange(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("cochange", error),
+    }
+}
+
+async fn api_entry_list(State(state): State<Arc<ServeState>>) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let config = load_arch_config(&state.paths.repo_root)?;
+        let result = store.query_entry_list(&config)?;
+        Ok(stub::entry_list(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("entry-list", error),
+    }
+}
+
+async fn api_entry_unreachable(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<EntryUnreachableParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let config = load_arch_config(&state.paths.repo_root)?;
+        let result = store.query_entry_unreachable(&config, params.min_age_days)?;
+        Ok(stub::entry_unreachable(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("entry-unreachable", error),
+    }
+}
+
+async fn api_snapshot_list(State(state): State<Arc<ServeState>>) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let result = store.list_snapshots()?;
+        Ok(stub::snapshot_list(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("snapshot-list", error),
+    }
+}
+
+fn impact_change_type_name(change_type: &ImpactChangeType) -> String {
+    match change_type {
+        ImpactChangeType::Body => "body",
+        ImpactChangeType::Signature => "signature",
+        ImpactChangeType::Rename => "rename",
+        ImpactChangeType::Delete => "delete",
+        ImpactChangeType::Visibility => "visibility",
+        ImpactChangeType::SideEffect => "side-effect",
+    }
+    .to_string()
+}
+
+fn refresh_git_churn(repo_root: &std::path::Path, store: &Store, days: u32) -> ScopeResult<()> {
+    store.clear_file_churn()?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("log")
+        .arg(format!("--since={} days ago", days))
+        .arg("--format=%H|%ae|%ct")
+        .arg("--name-only")
+        .output()
+        .map_err(|error| ScopeError::io("git log", error))?;
+
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let mut current_commit: Option<(String, String, i64)> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(header) = parse_git_log_header(trimmed) {
+            current_commit = Some(header);
+            continue;
+        }
+        let Some((sha, email, timestamp)) = current_commit.as_ref() else {
+            continue;
+        };
+        let _ = store.persist_file_churn(
+            &RepoPath::from(trimmed.to_string()),
+            sha,
+            Some(email.as_str()),
+            Some(*timestamp),
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_git_log_header(line: &str) -> Option<(String, String, i64)> {
+    let mut parts = line.split('|');
+    let sha = parts.next()?.to_string();
+    let email = parts.next()?.to_string();
+    let timestamp = parts.next()?.parse().ok()?;
+    if sha.is_empty() {
+        return None;
+    }
+    Some((sha, email, timestamp))
+}
+
+fn optional_repo_path(value: &Option<String>) -> Option<RepoPath> {
+    value.as_ref().map(|path| RepoPath::from(path.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::Value;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::{adapter_for_language, scan_repo, ScanConfig, Store};
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("scope-serve-{prefix}-{nanos}"))
+    }
+
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap()
+    }
+
+    fn fixture_root(name: &str) -> std::path::PathBuf {
+        workspace_root().join("fixtures").join(name)
+    }
+
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
+        fs::create_dir_all(dst).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                copy_dir_recursive(&src_path, &dst_path);
+            } else {
+                if src_path
+                    .strip_prefix(src)
+                    .ok()
+                    .and_then(|relative| relative.to_str())
+                    == Some(".scope/index.db")
+                {
+                    continue;
+                }
+                fs::copy(&src_path, &dst_path).unwrap();
+            }
+        }
+    }
+
+    fn prepare_fixture_copy(name: &str) -> std::path::PathBuf {
+        let src = fixture_root(name);
+        let dst = unique_temp_dir(name);
+        copy_dir_recursive(&src, &dst);
+        dst
+    }
+
+    fn index_fixture(repo_root: &std::path::Path) {
+        let store = Store::open(&repo_root.join(".scope/index.db")).unwrap();
+        let entries = scan_repo(repo_root, &ScanConfig::default()).unwrap();
+        let extracts: Vec<_> = entries
+            .into_iter()
+            .filter_map(|entry| {
+                let adapter = adapter_for_language(entry.language)?;
+                if !crate::adapters::supports_path(adapter, &entry.absolute_path) {
+                    return None;
+                }
+                let source = fs::read_to_string(&entry.absolute_path).unwrap();
+                let metadata = fs::metadata(&entry.absolute_path).unwrap();
+                let mut extract = adapter.extract(&entry, &source);
+                extract.file.content_hash =
+                    Some(blake3::hash(source.as_bytes()).to_hex().to_string());
+                extract.file.mtime_unix_seconds = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs() as i64);
+                extract.file.size_bytes = Some(metadata.len() as i64);
+                Some(extract)
+            })
+            .collect();
+        store.persist_extract_results(&extracts).unwrap();
+    }
+
+    fn build_test_state(name: &str) -> (Arc<ServeState>, std::path::PathBuf) {
+        let repo = prepare_fixture_copy(name);
+        index_fixture(&repo);
+        let paths = RuntimePaths {
+            repo_root: repo.clone(),
+            scope_dir: repo.join(".scope"),
+            db_path: repo.join(".scope/index.db"),
+        };
+        (Arc::new(ServeState { paths }), repo)
+    }
+
+    async fn call(app: Router, uri: &str) -> Response {
+        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn status_endpoint_returns_json_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/status").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "serve-status");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["stats"]["files"], 5);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deps_endpoint_returns_existing_envelope_shape() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/deps?file=src/lib.rs").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "deps");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "src/lib.rs");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn html_fallback_is_served_when_ui_enabled() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("scope serve"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn html_fallback_is_disabled_with_no_ui() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, true);
+        let response = call(app, "/").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "serve");
+        assert_eq!(value["status"], "error");
+        fs::remove_dir_all(repo).unwrap();
+    }
+}

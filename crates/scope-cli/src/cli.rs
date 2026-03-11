@@ -72,6 +72,8 @@ pub enum Commands {
     Tree(TreeArgs),
     /// Detect entry points and analyze file reachability
     Entry(EntryArgs),
+    /// Start a local HTTP API server with a minimal embedded UI
+    Serve(ServeArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
@@ -414,6 +416,16 @@ pub struct EntryTargetArgs {
 pub struct EntryUnreachableArgs {
     #[arg(long)]
     pub min_age_days: Option<u64>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ServeArgs {
+    #[arg(long, default_value_t = 7777)]
+    pub port: u16,
+    #[arg(long)]
+    pub open: bool,
+    #[arg(long)]
+    pub no_ui: bool,
 }
 
 #[derive(Debug, clap::Args)]

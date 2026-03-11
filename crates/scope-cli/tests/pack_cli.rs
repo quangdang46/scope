@@ -213,7 +213,10 @@ fn unused_command_returns_json_envelope_for_fixture_repo() {
     assert_eq!(value["status"], "ok");
     assert_eq!(value["data"]["result"]["summary"]["exported_symbols"], 8);
     assert_eq!(value["data"]["result"]["summary"]["unused_symbols"], 6);
-    assert_eq!(value["data"]["result"]["symbols"][0]["qualname"], "lib::parser");
+    assert_eq!(
+        value["data"]["result"]["symbols"][0]["qualname"],
+        "lib::parser"
+    );
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -283,4 +286,18 @@ fn diff_command_reports_no_changes_for_clean_fixture_repo() {
     assert_eq!(value["data"]["result"]["summary"]["affected_files"], 0);
 
     fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn serve_help_includes_core_flags() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["serve", "--help"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--port"));
+    assert!(stdout.contains("--open"));
+    assert!(stdout.contains("--no-ui"));
 }

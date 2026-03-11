@@ -26,3 +26,7 @@ toml = "0.8.20"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 zstd = "0.13.3"
+axum = "0.8.1"
+tokio = { version = "1.44.1", features = ["macros", "rt-multi-thread", "net"] }
+open = "5.3.2"
+tower = { version = "0.5.2", features = ["util"] }

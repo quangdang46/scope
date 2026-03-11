@@ -14,8 +14,8 @@ use cli::{
     SnapshotCommand, StabilitySortArg, SurfaceCommand, TestMapCommand,
 };
 use scope_core::{
-    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions,
-    CochangeSort, CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind, Verbosity,
+    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, CochangeSort,
+    CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind, Verbosity,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -295,7 +295,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     let before = context.store.resolve_surface_target(&diff_args.before)?;
                     let after = context.store.resolve_surface_target(&diff_args.after)?;
                     let diff = context.store.diff_public_surface(&before, &after)?;
-                    serialize_output(&scope_core::stub::surface_diff(before, after, diff), compact)
+                    serialize_output(
+                        &scope_core::stub::surface_diff(before, after, diff),
+                        compact,
+                    )
                 }
                 (None, Some(target)) => {
                     let path = context.store.resolve_surface_target(&target)?;
@@ -345,9 +348,13 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 RiskSortArg::Dependents => RiskSort::Dependents,
                 RiskSortArg::Path => RiskSort::Path,
             };
-            let result = context
-                .store
-                .query_risk(file.as_ref(), args.days, args.threshold, args.top, sort)?;
+            let result = context.store.query_risk(
+                file.as_ref(),
+                args.days,
+                args.threshold,
+                args.top,
+                sort,
+            )?;
             serialize_output(&scope_core::stub::risk(result), compact)
         }
         Commands::Cochange(args) => {
@@ -446,7 +453,9 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let config = load_arch_config(&context.paths.repo_root)?;
-            let result = context.store.diff_snapshot(&args.before, &args.after, &config)?;
+            let result = context
+                .store
+                .diff_snapshot(&args.before, &args.after, &config)?;
             serialize_output(&scope_core::stub::diff_snapshot(result), compact)
         }
         Commands::Unused => {
@@ -474,7 +483,9 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let result = context.store.query_branch_diff(&context.paths.repo_root, &args.branch)?;
+            let result = context
+                .store
+                .query_branch_diff(&context.paths.repo_root, &args.branch)?;
             serialize_output(&scope_core::stub::diff(result), compact)
         }
         Commands::Tree(args) => {
@@ -483,9 +494,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let result = context
-                .store
-                .query_tree(&RepoPath::from(args.path), args.reverse, args.depth)?;
+            let result =
+                context
+                    .store
+                    .query_tree(&RepoPath::from(args.path), args.reverse, args.depth)?;
             serialize_output(&scope_core::stub::tree(result), compact)
         }
         Commands::Entry(args) => {
@@ -501,18 +513,42 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     serialize_output(&scope_core::stub::entry_list(result), compact)
                 }
                 cli::EntryCommand::Cone(args) => {
-                    let result = context.store.query_entry_cone(&config, &RepoPath::from(args.target))?;
+                    let result = context
+                        .store
+                        .query_entry_cone(&config, &RepoPath::from(args.target))?;
                     serialize_output(&scope_core::stub::entry_cone(result), compact)
                 }
                 cli::EntryCommand::Reaches(args) => {
-                    let result = context.store.query_entry_reaches(&config, &RepoPath::from(args.target))?;
+                    let result = context
+                        .store
+                        .query_entry_reaches(&config, &RepoPath::from(args.target))?;
                     serialize_output(&scope_core::stub::entry_reaches(result), compact)
                 }
                 cli::EntryCommand::Unreachable(args) => {
-                    let result = context.store.query_entry_unreachable(&config, args.min_age_days)?;
+                    let result = context
+                        .store
+                        .query_entry_unreachable(&config, args.min_age_days)?;
                     serialize_output(&scope_core::stub::entry_unreachable(result), compact)
                 }
             }
+        }
+        Commands::Serve(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| scope_core::ScopeError::Internal(error.to_string()))?;
+            runtime.block_on(scope_core::run_server(
+                context.paths,
+                scope_core::ServeOptions {
+                    port: args.port,
+                    open: args.open,
+                    no_ui: args.no_ui,
+                },
+            ))?;
+            return Ok(exit_code);
         }
         Commands::Doctor(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -888,8 +924,6 @@ fn validate_new_name(new_name: &str) -> Result<(), scope_core::ScopeError> {
     Ok(())
 }
 
-
-
 fn looks_like_symbol(target: &str) -> bool {
     target.contains("::")
         && !target.ends_with(".rs")
@@ -1226,8 +1260,8 @@ mod tests {
         Certainty, CochangeRecord, CochangeResult, CycleRecord, CycleSeverity, CyclesResult,
         PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
         RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
-        RiskRecord, RiskResult, StabilityRecord, StabilityResult, SymbolKind, TreeNode,
-        TreeResult, TreeSummary, UnusedRecord, UnusedResult, UnusedSummary, Visibility,
+        RiskRecord, RiskResult, StabilityRecord, StabilityResult, SymbolKind, TreeNode, TreeResult,
+        TreeSummary, UnusedRecord, UnusedResult, UnusedSummary, Visibility,
     };
     use std::{
         fs,
@@ -1512,17 +1546,22 @@ mod tests {
                 visibility: Visibility::Public,
                 line: 3,
                 inbound_references: 0,
-                reason: "exported symbol `lib::greet` has no indexed inbound call edges".to_string(),
+                reason: "exported symbol `lib::greet` has no indexed inbound call edges"
+                    .to_string(),
             }],
             summary: UnusedSummary {
                 exported_symbols: 4,
                 unused_symbols: 1,
             },
         });
-        let unused_value: serde_json::Value = serde_json::from_str(&serialize_output(&unused, true).unwrap()).unwrap();
+        let unused_value: serde_json::Value =
+            serde_json::from_str(&serialize_output(&unused, true).unwrap()).unwrap();
         assert_eq!(unused_value["command"], "unused");
         assert_eq!(unused_value["status"], "ok");
-        assert_eq!(unused_value["data"]["result"]["symbols"][0]["qualname"], "lib::greet");
+        assert_eq!(
+            unused_value["data"]["result"]["symbols"][0]["qualname"],
+            "lib::greet"
+        );
 
         let cycles = scope_core::stub::cycles(CyclesResult {
             severity: Some(CycleSeverity::Medium),
@@ -1540,7 +1579,8 @@ mod tests {
                 high_count: 0,
             },
         });
-        let cycles_value: serde_json::Value = serde_json::from_str(&serialize_output(&cycles, true).unwrap()).unwrap();
+        let cycles_value: serde_json::Value =
+            serde_json::from_str(&serialize_output(&cycles, true).unwrap()).unwrap();
         assert_eq!(cycles_value["command"], "cycles");
         assert_eq!(cycles_value["data"]["result"]["severity"], "medium");
 
@@ -1559,7 +1599,8 @@ mod tests {
                 affected_files: 1,
             },
         });
-        let diff_value: serde_json::Value = serde_json::from_str(&serialize_output(&diff, true).unwrap()).unwrap();
+        let diff_value: serde_json::Value =
+            serde_json::from_str(&serialize_output(&diff, true).unwrap()).unwrap();
         assert_eq!(diff_value["command"], "diff");
         assert_eq!(diff_value["data"]["result"]["branch"], "main");
 
@@ -1584,7 +1625,8 @@ mod tests {
                 nodes: 2,
             },
         });
-        let tree_value: serde_json::Value = serde_json::from_str(&serialize_output(&tree, true).unwrap()).unwrap();
+        let tree_value: serde_json::Value =
+            serde_json::from_str(&serialize_output(&tree, true).unwrap()).unwrap();
         assert_eq!(tree_value["command"], "tree");
         assert_eq!(tree_value["data"]["result"]["target"], "src/lib.rs");
     }
@@ -1609,7 +1651,10 @@ mod tests {
         assert_eq!(value["command"], "surface");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["target"], "src/parser.rs");
-        assert_eq!(value["data"]["surface"]["symbols"][0]["qualname"], "parser::parse");
+        assert_eq!(
+            value["data"]["surface"]["symbols"][0]["qualname"],
+            "parser::parse"
+        );
         assert_eq!(value["data"]["surface"]["symbols"][0]["kind"], "function");
     }
 
@@ -1625,8 +1670,11 @@ mod tests {
                 modified_count: 2,
             },
         };
-        let envelope =
-            scope_core::stub::surface_diff(RepoPath::from("src/before.rs"), RepoPath::from("src/after.rs"), diff);
+        let envelope = scope_core::stub::surface_diff(
+            RepoPath::from("src/before.rs"),
+            RepoPath::from("src/after.rs"),
+            diff,
+        );
         let output = serialize_output(&envelope, true).unwrap();
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -1656,8 +1704,14 @@ mod tests {
 
         assert_eq!(value["command"], "test-map-covers");
         assert_eq!(value["status"], "ok");
-        assert_eq!(value["data"]["result"]["source_file"], "src/auth/middleware.ts");
-        assert_eq!(value["data"]["result"]["tests"][0]["path"], "tests/auth/middleware.test.ts");
+        assert_eq!(
+            value["data"]["result"]["source_file"],
+            "src/auth/middleware.ts"
+        );
+        assert_eq!(
+            value["data"]["result"]["tests"][0]["path"],
+            "tests/auth/middleware.test.ts"
+        );
         assert_eq!(value["data"]["result"]["tests"][0]["distance"], 1);
         assert_eq!(value["data"]["result"]["summary"]["covering_tests"], 1);
     }
@@ -1711,7 +1765,10 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["target"], "parser::parse");
         assert_eq!(value["data"]["result"]["steps"][0]["path"], "src/parser.rs");
-        assert_eq!(value["data"]["result"]["steps"][0]["edits"][0]["after_text"], "parseToken");
+        assert_eq!(
+            value["data"]["result"]["steps"][0]["edits"][0]["after_text"],
+            "parseToken"
+        );
     }
 
     #[test]
@@ -1747,9 +1804,12 @@ mod tests {
             deleted: true,
         });
 
-        let save_value: serde_json::Value = serde_json::from_str(&serialize_output(&save, true).unwrap()).unwrap();
-        let list_value: serde_json::Value = serde_json::from_str(&serialize_output(&list, true).unwrap()).unwrap();
-        let delete_value: serde_json::Value = serde_json::from_str(&serialize_output(&delete, true).unwrap()).unwrap();
+        let save_value: serde_json::Value =
+            serde_json::from_str(&serialize_output(&save, true).unwrap()).unwrap();
+        let list_value: serde_json::Value =
+            serde_json::from_str(&serialize_output(&list, true).unwrap()).unwrap();
+        let delete_value: serde_json::Value =
+            serde_json::from_str(&serialize_output(&delete, true).unwrap()).unwrap();
 
         assert_eq!(save_value["command"], "snapshot-save");
         assert_eq!(save_value["data"]["result"]["snapshot"]["name"], "baseline");
@@ -1818,7 +1878,9 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let resolved = store.resolve_surface_target( "auth::middleware::verifyToken").unwrap();
+        let resolved = store
+            .resolve_surface_target("auth::middleware::verifyToken")
+            .unwrap();
         assert_eq!(resolved, RepoPath::from("src/auth/middleware.ts"));
 
         let _ = fs::remove_dir_all(repo);
@@ -1830,7 +1892,7 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let error = store.resolve_surface_target( "missing::symbol").unwrap_err();
+        let error = store.resolve_surface_target("missing::symbol").unwrap_err();
         assert!(error.to_string().contains("missing::symbol"));
 
         let _ = fs::remove_dir_all(repo);
@@ -1842,7 +1904,7 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let resolved = store.resolve_surface_target( "src/parser.rs").unwrap();
+        let resolved = store.resolve_surface_target("src/parser.rs").unwrap();
         assert_eq!(resolved, RepoPath::from("src/parser.rs"));
 
         let _ = fs::remove_dir_all(repo);
@@ -1870,12 +1932,20 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let path = store.resolve_surface_target( "auth::middleware::verifyToken").unwrap();
+        let path = store
+            .resolve_surface_target("auth::middleware::verifyToken")
+            .unwrap();
         let surface = store.query_public_surface(&path).unwrap();
         let envelope = scope_core::stub::surface(path.clone(), surface);
 
-        assert_eq!(envelope.data.target, RepoPath::from("src/auth/middleware.ts"));
-        assert_eq!(envelope.data.surface.file, RepoPath::from("src/auth/middleware.ts"));
+        assert_eq!(
+            envelope.data.target,
+            RepoPath::from("src/auth/middleware.ts")
+        );
+        assert_eq!(
+            envelope.data.surface.file,
+            RepoPath::from("src/auth/middleware.ts")
+        );
         assert!(envelope
             .data
             .surface
@@ -1892,8 +1962,8 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let before = store.resolve_surface_target( "src/auth/jwt.ts").unwrap();
-        let after = store.resolve_surface_target( "src/auth/aliases.ts").unwrap();
+        let before = store.resolve_surface_target("src/auth/jwt.ts").unwrap();
+        let after = store.resolve_surface_target("src/auth/aliases.ts").unwrap();
         let diff = store.diff_public_surface(&before, &after).unwrap();
         let envelope = scope_core::stub::surface_diff(before.clone(), after.clone(), diff);
 
@@ -1947,9 +2017,18 @@ mod tests {
         assert!(!plan.applied);
         assert_eq!(plan.summary.edits_planned, 2);
         assert!(!plan.summary.blocked);
-        assert!(plan.steps.iter().any(|step| step.path == RepoPath::from("src/auth/index.ts")));
-        assert!(plan.steps.iter().any(|step| step.path == RepoPath::from("src/auth/middleware.ts")));
-        assert!(!plan.steps.iter().any(|step| step.path == RepoPath::from("src/index.ts")));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|step| step.path == RepoPath::from("src/auth/index.ts")));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|step| step.path == RepoPath::from("src/auth/middleware.ts")));
+        assert!(!plan
+            .steps
+            .iter()
+            .any(|step| step.path == RepoPath::from("src/index.ts")));
 
         let _ = fs::remove_dir_all(repo);
     }

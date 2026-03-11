@@ -7,14 +7,18 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
+axum.workspace = true
 blake3.workspace = true
 glob.workspace = true
 ignore.workspace = true
+open.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zstd.workspace = true
+tokio.workspace = true

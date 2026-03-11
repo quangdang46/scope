@@ -16,3 +16,4 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 scope-core = { path = "../scope-core" }
+tokio.workspace = true
