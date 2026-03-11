@@ -1,4 +1,68 @@
-use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root should resolve")
+}
+
+fn fixture_root(name: &str) -> PathBuf {
+    workspace_root().join("fixtures").join(name)
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("scope-cli-{prefix}-{nanos}"))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type().unwrap();
+
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path);
+        } else {
+            if src_path
+                .strip_prefix(src)
+                .ok()
+                .and_then(|relative| relative.to_str())
+                == Some(".scope/index.db")
+            {
+                continue;
+            }
+            fs::copy(&src_path, &dst_path).unwrap();
+        }
+    }
+}
+
+fn prepare_fixture_copy(name: &str) -> PathBuf {
+    let src = fixture_root(name);
+    let dst = unique_temp_dir(name);
+    copy_dir_recursive(&src, &dst);
+    dst
+}
+
+fn run_scope(repo: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_scope"))
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .expect("scope binary should run")
+}
 
 #[test]
 fn pack_invalid_target_emits_json_error_on_stderr() {
@@ -131,4 +195,92 @@ fn test_map_covered_by_invalid_target_emits_json_error_on_stderr() {
     assert_eq!(value["command"], "cli");
     assert_eq!(value["status"], "error");
     assert_eq!(value["data"]["kind"], "invalid_input");
+}
+
+#[test]
+fn unused_command_returns_json_envelope_for_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["unused"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "unused");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["summary"]["exported_symbols"], 8);
+    assert_eq!(value["data"]["result"]["summary"]["unused_symbols"], 6);
+    assert_eq!(value["data"]["result"]["symbols"][0]["qualname"], "lib::parser");
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn cycles_command_returns_filtered_json_envelope_for_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["cycles", "--severity", "high"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "cycles");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["summary"]["cycle_count"], 0);
+    assert_eq!(value["data"]["result"]["severity"], "high");
+    assert!(value["data"]["result"]["cycles"]
+        .as_array()
+        .expect("cycles should be an array")
+        .is_empty());
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn tree_command_returns_recursive_json_envelope_for_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["tree", "src/lib.rs", "--depth", "2"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "tree");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["target"], "src/lib.rs");
+    assert_eq!(value["data"]["result"]["depth"], 2);
+    assert_eq!(value["data"]["result"]["summary"]["nodes"], 5);
+    assert_eq!(value["data"]["result"]["tree"]["path"], "src/lib.rs");
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn diff_command_reports_no_changes_for_clean_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["diff", "HEAD"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "diff");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["branch"], "HEAD");
+    assert_eq!(value["data"]["result"]["summary"]["changed_files"], 0);
+    assert_eq!(value["data"]["result"]["summary"]["affected_files"], 0);
+
+    fs::remove_dir_all(repo).unwrap();
 }
