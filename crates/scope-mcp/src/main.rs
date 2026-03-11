@@ -332,6 +332,20 @@ fn tool_registry() -> Vec<Value> {
             }),
         ),
         tool_definition(
+            "audit",
+            "Trace entry points that can reach a configured sensitive capability.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "capability": { "type": "string" }
+                },
+                "required": ["capability"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
             "stability",
             "Report Martin instability scores from indexed file dependencies.",
             json!({
@@ -535,6 +549,59 @@ fn tool_registry() -> Vec<Value> {
             }),
         ),
         tool_definition(
+            "entry_list",
+            "List detected entry points.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "entry_cone",
+            "Show files reachable from a detected entry point.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "target": { "type": "string" }
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "entry_reaches",
+            "Show which entry points can reach a target file.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "target": { "type": "string" }
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "entry_unreachable",
+            "Show indexed files reachable from no detected entry point.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "min_age_days": { "type": "integer", "minimum": 0 }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
             "doctor",
             "Inspect repository and index health.",
             json!({
@@ -646,6 +713,7 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, DispatchError>
         "context" => dispatch_context(arguments),
         "pack" => dispatch_pack(arguments),
         "arch_check" => dispatch_arch_check(arguments),
+        "audit" => dispatch_audit(arguments),
         "stability" => dispatch_stability(arguments),
         "risk" => dispatch_risk(arguments),
         "cochange" => dispatch_cochange(arguments),
@@ -660,6 +728,10 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, DispatchError>
         "cycles" => dispatch_cycles(arguments),
         "diff" => dispatch_diff(arguments),
         "tree" => dispatch_tree(arguments),
+        "entry_list" => dispatch_entry_list(arguments),
+        "entry_cone" => dispatch_entry_cone(arguments),
+        "entry_reaches" => dispatch_entry_reaches(arguments),
+        "entry_unreachable" => dispatch_entry_unreachable(arguments),
         "doctor" => dispatch_doctor(arguments),
         "benchmark" => dispatch_benchmark(arguments),
         "snapshot_save" => dispatch_snapshot_save(arguments),
@@ -859,6 +931,19 @@ fn dispatch_arch_check(arguments: &Value) -> String {
     }) {
         Ok(output) => output,
         Err(error) => render_domain_error("arch-check", &error),
+    }
+}
+
+fn dispatch_audit(arguments: &Value) -> String {
+    match required_string(arguments, "capability").and_then(|capability| {
+        bootstrap_from_arguments(arguments).and_then(|context| {
+            let config = load_arch_config(&context.paths.repo_root)?;
+            let result = context.store.query_audit(&config, &capability)?;
+            serialize_json(&scope_core::stub::audit(result))
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("audit", &error),
     }
 }
 
@@ -1073,6 +1158,55 @@ fn dispatch_tree(arguments: &Value) -> String {
     }
 }
 
+fn dispatch_entry_list(arguments: &Value) -> String {
+    match bootstrap_from_arguments(arguments).and_then(|context| {
+        let config = load_arch_config(&context.paths.repo_root)?;
+        let result = context.store.query_entry_list(&config)?;
+        serialize_json(&scope_core::stub::entry_list(result))
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("entry-list", &error),
+    }
+}
+
+fn dispatch_entry_cone(arguments: &Value) -> String {
+    match required_string(arguments, "target").and_then(|target| {
+        bootstrap_from_arguments(arguments).and_then(|context| {
+            let config = load_arch_config(&context.paths.repo_root)?;
+            let result = context.store.query_entry_cone(&config, &RepoPath::from(target))?;
+            serialize_json(&scope_core::stub::entry_cone(result))
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("entry-cone", &error),
+    }
+}
+
+fn dispatch_entry_reaches(arguments: &Value) -> String {
+    match required_string(arguments, "target").and_then(|target| {
+        bootstrap_from_arguments(arguments).and_then(|context| {
+            let config = load_arch_config(&context.paths.repo_root)?;
+            let result = context.store.query_entry_reaches(&config, &RepoPath::from(target))?;
+            serialize_json(&scope_core::stub::entry_reaches(result))
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("entry-reaches", &error),
+    }
+}
+
+fn dispatch_entry_unreachable(arguments: &Value) -> String {
+    match bootstrap_from_arguments(arguments).and_then(|context| {
+        let config = load_arch_config(&context.paths.repo_root)?;
+        let min_age_days = optional_u64(arguments, "min_age_days")?;
+        let result = context.store.query_entry_unreachable(&config, min_age_days)?;
+        serialize_json(&scope_core::stub::entry_unreachable(result))
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("entry-unreachable", &error),
+    }
+}
+
 fn dispatch_doctor(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
         let fix = optional_bool(arguments, "fix").unwrap_or(false);
@@ -1216,6 +1350,19 @@ fn optional_u32(arguments: &Value, key: &str) -> Result<Option<u32>, scope_core:
         .get(key)
         .map(|value| {
             value.as_u64().map(|value| value as u32).ok_or_else(|| {
+                scope_core::ScopeError::InvalidInput(format!(
+                    "mcp tool argument `{key}` must be a non-negative integer"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>, scope_core::ScopeError> {
+    arguments
+        .get(key)
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
                 scope_core::ScopeError::InvalidInput(format!(
                     "mcp tool argument `{key}` must be a non-negative integer"
                 ))
@@ -2023,6 +2170,7 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "impact"));
         assert!(tools.iter().any(|tool| tool["name"] == "pack"));
         assert!(tools.iter().any(|tool| tool["name"] == "arch_check"));
+        assert!(tools.iter().any(|tool| tool["name"] == "audit"));
         assert!(tools.iter().any(|tool| tool["name"] == "cochange"));
         assert!(tools.iter().any(|tool| tool["name"] == "surface"));
         assert!(tools.iter().any(|tool| tool["name"] == "surface_diff"));
@@ -2069,6 +2217,31 @@ mod tests {
         match error {
             DispatchError::Transport(message) => assert!(message.contains("unknown tool")),
         }
+    }
+
+    #[test]
+    fn dispatch_audit_returns_scope_json_envelope() {
+        let repo = prepare_fixture_copy("capability_audit");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "audit",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "capability": "network"
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "audit");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["capability"], "network");
+        assert_eq!(value["data"]["result"]["summary"]["unexpected_entry_points"], 1);
+        fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]

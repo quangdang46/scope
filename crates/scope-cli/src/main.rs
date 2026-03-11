@@ -10,12 +10,12 @@ use std::{
 
 use clap::Parser;
 use cli::{
-    ArchCommand, ChangeType, Cli, Commands, CycleSeverityArg, RiskSortArg, SnapshotCommand,
-    StabilitySortArg, SurfaceCommand, TestMapCommand,
+    ArchCommand, ChangeType, Cli, CochangeSortArg, Commands, CycleSeverityArg, RiskSortArg,
+    SnapshotCommand, StabilitySortArg, SurfaceCommand, TestMapCommand,
 };
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions,
-    CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind, Verbosity,
+    CochangeSort, CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind, Verbosity,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -271,6 +271,19 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 }
             }
         }
+        Commands::Audit(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let config = load_arch_config(&context.paths.repo_root)?;
+            let result = context.store.query_audit(&config, &args.capability)?;
+            if result.summary.unexpected_entry_points > 0 {
+                exit_code = 1;
+            }
+            serialize_output(&scope_core::stub::audit(result), compact)
+        }
         Commands::Surface(args) => {
             let bootstrap_options = BootstrapOptions {
                 repo_root_override: cli.repo_root.clone(),
@@ -336,6 +349,27 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 .store
                 .query_risk(file.as_ref(), args.days, args.threshold, args.top, sort)?;
             serialize_output(&scope_core::stub::risk(result), compact)
+        }
+        Commands::Cochange(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let _ = refresh_git_churn(&context.paths.repo_root, &context.store, args.days);
+            let sort = match args.sort {
+                CochangeSortArg::Score => CochangeSort::Score,
+                CochangeSortArg::SharedCommits => CochangeSort::SharedCommits,
+                CochangeSortArg::Path => CochangeSort::Path,
+            };
+            let result = context.store.query_cochange(
+                &RepoPath::from(args.target),
+                args.days,
+                args.min_shared_commits,
+                args.top,
+                sort,
+            )?;
+            serialize_output(&scope_core::stub::cochange(result), compact)
         }
         Commands::TestMap(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -454,6 +488,32 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 .query_tree(&RepoPath::from(args.path), args.reverse, args.depth)?;
             serialize_output(&scope_core::stub::tree(result), compact)
         }
+        Commands::Entry(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let config = load_arch_config(&context.paths.repo_root)?;
+            match args.command {
+                cli::EntryCommand::List => {
+                    let result = context.store.query_entry_list(&config)?;
+                    serialize_output(&scope_core::stub::entry_list(result), compact)
+                }
+                cli::EntryCommand::Cone(args) => {
+                    let result = context.store.query_entry_cone(&config, &RepoPath::from(args.target))?;
+                    serialize_output(&scope_core::stub::entry_cone(result), compact)
+                }
+                cli::EntryCommand::Reaches(args) => {
+                    let result = context.store.query_entry_reaches(&config, &RepoPath::from(args.target))?;
+                    serialize_output(&scope_core::stub::entry_reaches(result), compact)
+                }
+                cli::EntryCommand::Unreachable(args) => {
+                    let result = context.store.query_entry_unreachable(&config, args.min_age_days)?;
+                    serialize_output(&scope_core::stub::entry_unreachable(result), compact)
+                }
+            }
+        }
         Commands::Doctor(args) => {
             let bootstrap_options = BootstrapOptions {
                 repo_root_override: cli.repo_root.clone(),
@@ -510,7 +570,6 @@ fn refresh_git_churn(
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            current_commit = None;
             continue;
         }
         if let Some(header) = parse_git_log_header(trimmed) {
@@ -1164,11 +1223,11 @@ mod tests {
     };
     use scope_core::{
         BranchDiffAffectedFile, BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary,
-        Certainty, CycleRecord, CycleSeverity, CyclesResult, PublicSurface, PublicSurfaceDiff,
-        PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan,
-        RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, StabilityRecord,
-        StabilityResult, SymbolKind, TreeNode, TreeResult, TreeSummary, UnusedRecord,
-        UnusedResult, UnusedSummary, Visibility,
+        Certainty, CochangeRecord, CochangeResult, CycleRecord, CycleSeverity, CyclesResult,
+        PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
+        RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
+        RiskRecord, RiskResult, StabilityRecord, StabilityResult, SymbolKind, TreeNode,
+        TreeResult, TreeSummary, UnusedRecord, UnusedResult, UnusedSummary, Visibility,
     };
     use std::{
         fs,
@@ -1403,6 +1462,43 @@ mod tests {
         assert_eq!(value["data"]["result"]["summary"]["git_available"], true);
         assert!(value["data"]["result"].get("file").is_none());
         assert_eq!(value["data"]["result"]["top"], 1);
+    }
+
+    #[test]
+    fn serialize_output_cochange_command_uses_expected_envelope_shape() {
+        let envelope = scope_core::stub::cochange(CochangeResult {
+            target: RepoPath::from("src/parser.rs"),
+            top: Some(2),
+            days: 90,
+            min_shared_commits: 1,
+            sort: scope_core::CochangeSort::Score,
+            files: vec![CochangeRecord {
+                path: RepoPath::from("src/utils.rs"),
+                shared_commits: 2,
+                target_commits: 3,
+                candidate_commits: 4,
+                score: 0.6666666666666666,
+                normalized_score: 100,
+                reason: "2 shared commits out of 3 target commits in last 90 days".to_string(),
+            }],
+            summary: scope_core::CochangeSummary {
+                git_available: true,
+                target_commits: 3,
+                related_files: 1,
+                max_shared_commits: 2,
+                max_score: 0.6666666666666666,
+            },
+        });
+        let output = serialize_output(&envelope, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["target"], "src/parser.rs");
+        assert_eq!(value["data"]["result"]["files"][0]["path"], "src/utils.rs");
+        assert_eq!(value["data"]["result"]["files"][0]["shared_commits"], 2);
+        assert_eq!(value["data"]["result"]["sort"], "score");
+        assert_eq!(value["data"]["result"]["summary"]["target_commits"], 3);
     }
 
     #[test]

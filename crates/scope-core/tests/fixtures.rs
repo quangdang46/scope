@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -103,6 +104,21 @@ fn read_golden(name: &str) -> String {
 }
 
 #[test]
+fn cochange_fixture_contains_history_script() {
+    let root = fixture_root("cochange");
+    assert!(root.join("README.txt").is_file(), "missing cochange README");
+    let script = root.join("create_git_history.sh");
+    assert!(script.is_file(), "missing cochange history script");
+    let contents = fs::read_to_string(script).unwrap();
+    assert!(contents.contains("git init -q"));
+    assert!(contents.contains("src/parser.rs"));
+    assert!(contents.contains("src/utils.rs"));
+    assert!(contents.contains("src/resolver.rs"));
+    assert!(contents.contains("parser and utils evolve together"));
+    assert!(contents.contains("parser utils and resolver evolve together"));
+}
+
+#[test]
 fn planned_fixture_directories_exist() {
     for fixture in [
         "rust_small",
@@ -110,6 +126,8 @@ fn planned_fixture_directories_exist() {
         "dynamic_limits",
         "arch_violations",
         "test_map_ts",
+        "cochange",
+        "capability_audit",
     ] {
         assert!(
             fixture_root(fixture).is_dir(),
@@ -1029,6 +1047,261 @@ fn risk_query_reports_expected_scores_and_fallbacks() {
 }
 
 #[test]
+fn generated_cochange_fixture_creates_expected_commit_history() {
+    let fixture_root = fixture_root("cochange");
+    let script = fixture_root.join("create_git_history.sh");
+    let repo = unique_temp_dir("cochange-generated");
+
+    let status = Command::new(&script).arg(&repo).status().unwrap();
+    assert!(status.success());
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("log")
+        .arg("--format=%s")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let log = String::from_utf8(output.stdout).unwrap();
+    assert!(log.contains("parser and utils evolve together"));
+    assert!(log.contains("parser utils and resolver evolve together"));
+    assert!(log.contains("parser evolves alone"));
+    assert!(log.contains("resolver evolves alone"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn generated_cochange_fixture_persists_expected_file_churn() {
+    let fixture_root = fixture_root("cochange");
+    let script = fixture_root.join("create_git_history.sh");
+    let repo = unique_temp_dir("cochange-churn");
+
+    let status = Command::new(&script).arg(&repo).status().unwrap();
+    assert!(status.success());
+
+    let store = index_fixture(&repo);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("log")
+        .arg("--since=10000 days ago")
+        .arg("--format=%H|%ae|%ct")
+        .arg("--name-only")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let mut current_commit: Option<(String, String, i64)> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.split('|');
+        if let (Some(sha), Some(email), Some(timestamp)) = (parts.next(), parts.next(), parts.next()) {
+            if let Ok(timestamp) = timestamp.parse::<i64>() {
+                current_commit = Some((sha.to_string(), email.to_string(), timestamp));
+                continue;
+            }
+        }
+        let Some((sha, email, timestamp)) = current_commit.as_ref() else {
+            continue;
+        };
+        let inserted = store
+            .persist_file_churn(
+                &RepoPath::from(trimmed.to_string()),
+                sha,
+                Some(email.as_str()),
+                Some(*timestamp),
+            )
+            .unwrap();
+        if trimmed.ends_with(".rs") {
+            assert!(inserted, "expected churn row for {trimmed}");
+        }
+    }
+
+    let parser_churn = store
+        .query_risk(
+            Some(&RepoPath::from("src/parser.rs")),
+            10000,
+            None,
+            None,
+            scope_core::RiskSort::Score,
+        )
+        .unwrap();
+    assert!(parser_churn.summary.git_available);
+    assert!(parser_churn.files[0].churn_commits >= 3);
+
+    let result = store
+        .query_cochange(
+            &RepoPath::from("src/parser.rs"),
+            10000,
+            1,
+            None,
+            scope_core::CochangeSort::Score,
+        )
+        .unwrap();
+    assert!(result.summary.git_available);
+    assert_eq!(result.summary.target_commits, 4);
+    assert_eq!(result.files.len(), 2);
+    assert_eq!(result.files[0].path, RepoPath::from("src/utils.rs"));
+    assert_eq!(result.files[1].path, RepoPath::from("src/resolver.rs"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn cochange_query_reports_expected_scores_and_filters() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/parser.rs"),
+            "c1",
+            Some("agent@example.com"),
+            Some(1_700_000_000),
+        )
+        .unwrap();
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/parser.rs"),
+            "c2",
+            Some("agent@example.com"),
+            Some(1_700_000_100),
+        )
+        .unwrap();
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/parser.rs"),
+            "c3",
+            Some("agent@example.com"),
+            Some(1_700_000_200),
+        )
+        .unwrap();
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/utils.rs"),
+            "c1",
+            Some("agent@example.com"),
+            Some(1_700_000_000),
+        )
+        .unwrap();
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/utils.rs"),
+            "c2",
+            Some("agent@example.com"),
+            Some(1_700_000_100),
+        )
+        .unwrap();
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/resolver.rs"),
+            "c2",
+            Some("agent@example.com"),
+            Some(1_700_000_100),
+        )
+        .unwrap();
+    store
+        .persist_file_churn(
+            &RepoPath::from("src/resolver.rs"),
+            "c4",
+            Some("agent@example.com"),
+            Some(1_700_000_300),
+        )
+        .unwrap();
+
+    let result = store
+        .query_cochange(
+            &RepoPath::from("src/parser.rs"),
+            10_000,
+            1,
+            None,
+            scope_core::CochangeSort::Score,
+        )
+        .unwrap();
+    assert_eq!(result.target, RepoPath::from("src/parser.rs"));
+    assert_eq!(result.days, 10_000);
+    assert_eq!(result.min_shared_commits, 1);
+    assert_eq!(result.sort, scope_core::CochangeSort::Score);
+    assert!(result.summary.git_available);
+    assert_eq!(result.summary.target_commits, 3);
+    assert_eq!(result.files.len(), 2);
+    assert_eq!(result.files[0].path, RepoPath::from("src/utils.rs"));
+    assert_eq!(result.files[0].shared_commits, 2);
+    assert_eq!(result.files[0].target_commits, 3);
+    assert_eq!(result.files[0].candidate_commits, 2);
+    assert_eq!(result.files[0].normalized_score, 100);
+    assert_eq!(result.files[1].path, RepoPath::from("src/resolver.rs"));
+    assert_eq!(result.files[1].shared_commits, 1);
+
+    let actual = serde_json::to_string_pretty(&stub::cochange(result.clone())).unwrap();
+    let expected = read_golden("rust_small_parser_cochange.json");
+    assert_eq!(actual, expected);
+
+    let filtered = store
+        .query_cochange(
+            &RepoPath::from("src/parser.rs"),
+            10_000,
+            2,
+            Some(1),
+            scope_core::CochangeSort::SharedCommits,
+        )
+        .unwrap();
+    assert_eq!(filtered.files.len(), 1);
+    assert_eq!(filtered.files[0].path, RepoPath::from("src/utils.rs"));
+
+    store.clear_file_churn().unwrap();
+    let fallback = store
+        .query_cochange(
+            &RepoPath::from("src/parser.rs"),
+            30,
+            1,
+            None,
+            scope_core::CochangeSort::Score,
+        )
+        .unwrap();
+    assert!(!fallback.summary.git_available);
+    assert!(fallback.files.is_empty());
+
+    assert!(matches!(
+        store.query_cochange(
+            &RepoPath::from("src/parser.rs"),
+            0,
+            1,
+            None,
+            scope_core::CochangeSort::Score,
+        ),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        store.query_cochange(
+            &RepoPath::from("src/parser.rs"),
+            30,
+            0,
+            None,
+            scope_core::CochangeSort::Score,
+        ),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        store.query_cochange(
+            &RepoPath::from("src/missing.rs"),
+            30,
+            1,
+            None,
+            scope_core::CochangeSort::Score,
+        ),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn utility_queries_report_expected_results_for_rust_small_fixture() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
@@ -1491,6 +1764,38 @@ fn arch_violations_fixture_matches_expected_json() {
     let envelope = stub::arch_check(result);
     let actual = serde_json::to_string_pretty(&envelope).unwrap();
     let expected = read_golden("arch_violations_check.json");
+    assert_eq!(actual, expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn capability_audit_fixture_matches_golden_json() {
+    let repo = prepare_fixture_copy("capability_audit");
+    let store = index_fixture(&repo);
+    let config = load_arch_config(&repo).unwrap();
+    let result = store.query_audit(&config, "network").unwrap();
+
+    assert_eq!(result.summary.capability_sources, 1);
+    assert_eq!(result.summary.reaching_entry_points, 2);
+    assert_eq!(result.summary.expected_entry_points, 1);
+    assert_eq!(result.summary.unexpected_entry_points, 1);
+    assert_eq!(result.reaches[0].entry_point, RepoPath::from("src/workers/job.ts"));
+    assert!(result.reaches[0].expected);
+    assert_eq!(result.reaches[1].entry_point, RepoPath::from("src/cli/main.ts"));
+    assert!(!result.reaches[1].expected);
+    assert_eq!(
+        result.reaches[1].path,
+        vec![
+            RepoPath::from("src/cli/main.ts"),
+            RepoPath::from("src/shared/api.ts"),
+            RepoPath::from("src/http/client.ts"),
+        ]
+    );
+
+    let envelope = stub::audit(result);
+    let actual = serde_json::to_string_pretty(&envelope).unwrap();
+    let expected = read_golden("capability_audit_network.json");
     assert_eq!(actual, expected);
 
     fs::remove_dir_all(repo).unwrap();

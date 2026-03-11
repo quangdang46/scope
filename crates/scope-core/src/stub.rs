@@ -3,13 +3,15 @@ use serde::Serialize;
 use crate::{
     json::JsonEnvelope,
     model::{
-        ArchCheckResult, BranchDiffResult, Certainty, ContextResult, CyclesResult,
-        DependencyRecord, EdgeKind, ImpactChangeType, ImpactTraversalRule, NodeKind,
+        ArchCheckResult, AuditResult, BranchDiffResult, Certainty, CochangeResult,
+        ContextResult, CyclesResult, DependencyRecord, EdgeKind, EntryConeResult,
+        EntryListResult, EntryReachesResult, EntryUnreachableResult, GateResult,
+        HealthReportResult, ImpactChangeType, ImpactTraversalRule, MirrorResult, NodeKind,
         PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult,
         SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult, SnapshotSaveResult, Span,
-        StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult, TestMapCoveredByResult,
-        TestMapCoversResult, TestMapUncoveredResult, TraversalRecord, TreeResult, UnusedResult,
-        Visibility,
+        SplitResult, StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult,
+        TestMapCoveredByResult, TestMapCoversResult, TestMapUncoveredResult, TraversalRecord,
+        TreeResult, UnusedResult, Visibility,
     },
     DatabaseInfo, IndexHealthStats,
 };
@@ -160,6 +162,11 @@ pub struct ArchCheckData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AuditData {
+    pub result: AuditResult,
+}
+
+#[derive(Debug, Serialize)]
 pub struct StabilityData {
     pub result: StabilityResult,
 }
@@ -167,6 +174,21 @@ pub struct StabilityData {
 #[derive(Debug, Serialize)]
 pub struct RiskData {
     pub result: RiskResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CochangeData {
+    pub result: CochangeResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReportData {
+    pub result: HealthReportResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GateData {
+    pub result: GateResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,6 +209,36 @@ pub struct DiffData {
 #[derive(Debug, Serialize)]
 pub struct TreeData {
     pub result: TreeResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SplitData {
+    pub result: SplitResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MirrorData {
+    pub result: MirrorResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EntryListData {
+    pub result: EntryListResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EntryConeData {
+    pub result: EntryConeResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EntryReachesData {
+    pub result: EntryReachesResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EntryUnreachableData {
+    pub result: EntryUnreachableResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -635,12 +687,28 @@ pub fn arch_check(result: ArchCheckResult) -> JsonEnvelope<ArchCheckData> {
     )
 }
 
+pub fn audit(result: AuditResult) -> JsonEnvelope<AuditData> {
+    JsonEnvelope::success("audit", AuditData { result })
+}
+
 pub fn stability(result: StabilityResult) -> JsonEnvelope<StabilityData> {
     JsonEnvelope::success("stability", StabilityData { result })
 }
 
 pub fn risk(result: RiskResult) -> JsonEnvelope<RiskData> {
     JsonEnvelope::success("risk", RiskData { result })
+}
+
+pub fn cochange(result: CochangeResult) -> JsonEnvelope<CochangeData> {
+    JsonEnvelope::success("cochange", CochangeData { result })
+}
+
+pub fn report(result: HealthReportResult) -> JsonEnvelope<ReportData> {
+    JsonEnvelope::success("report", ReportData { result })
+}
+
+pub fn gate(result: GateResult) -> JsonEnvelope<GateData> {
+    JsonEnvelope::success("gate", GateData { result })
 }
 
 pub fn unused(result: UnusedResult) -> JsonEnvelope<UnusedData> {
@@ -657,6 +725,30 @@ pub fn diff(result: BranchDiffResult) -> JsonEnvelope<DiffData> {
 
 pub fn tree(result: TreeResult) -> JsonEnvelope<TreeData> {
     JsonEnvelope::success("tree", TreeData { result })
+}
+
+pub fn split(result: SplitResult) -> JsonEnvelope<SplitData> {
+    JsonEnvelope::success("split", SplitData { result })
+}
+
+pub fn mirror(result: MirrorResult) -> JsonEnvelope<MirrorData> {
+    JsonEnvelope::success("mirror", MirrorData { result })
+}
+
+pub fn entry_list(result: EntryListResult) -> JsonEnvelope<EntryListData> {
+    JsonEnvelope::success("entry-list", EntryListData { result })
+}
+
+pub fn entry_cone(result: EntryConeResult) -> JsonEnvelope<EntryConeData> {
+    JsonEnvelope::success("entry-cone", EntryConeData { result })
+}
+
+pub fn entry_reaches(result: EntryReachesResult) -> JsonEnvelope<EntryReachesData> {
+    JsonEnvelope::success("entry-reaches", EntryReachesData { result })
+}
+
+pub fn entry_unreachable(result: EntryUnreachableResult) -> JsonEnvelope<EntryUnreachableData> {
+    JsonEnvelope::success("entry-unreachable", EntryUnreachableData { result })
 }
 
 pub fn rename_plan(result: RenamePlan) -> JsonEnvelope<RenamePlanData> {
@@ -725,7 +817,7 @@ pub fn mcp_stub_message() -> JsonEnvelope<TraversalRecord> {
             qualname: Some("scope-mcp".to_string()),
             edge_kind: EdgeKind::Dynamic,
             certainty: Certainty::Dynamic,
-            reason: "scope-mcp is scaffolded but not implemented yet".to_string(),
+            reason: "scope-mcp exposes an early MCP/stdIO wrapper over scope-core and should be treated as an evolving integration surface".to_string(),
             distance: 0,
         },
     )

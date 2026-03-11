@@ -4,27 +4,33 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use glob::Pattern;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::{
-    arch_check_edges, snapshot, ArchConfig, ArchFileEdge, BranchDiffAffectedFile,
+    arch_check_edges, snapshot, ArchConfig, ArchFileEdge, AuditCapabilitySource,
+    AuditEntryReachRecord, AuditResult, AuditSummary, BranchDiffAffectedFile,
     BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary, Certainty, ContextFileRecord,
     ContextFileRole, ContextResult, ContextSummary, CycleRecord, CycleSeverity, CyclesResult,
-    CyclesSummary, DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind,
-    PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff,
-    PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan,
-    RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort,
-    RiskSummary, ScopeError, ScopeResult, SnapshotCentralityDelta, SnapshotDeleteResult,
+    CyclesSummary, DependencyRecord, EdgeKind, EntryConeResult, EntryConeSummary,
+    EntryListResult, EntryListSummary, EntryPointDetection, EntryPointRecord,
+    EntryReachableRecord, EntryReachesResult, EntryReachesSummary, EntryUnreachableRecord,
+    EntryUnreachableResult, ExtractResult, FileRecord, ImportPath, MirrorMatch, MirrorResult,
+    MirrorSignature, MirrorSummary, NodeKind, PublicSurface, PublicSurfaceChange,
+    PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
+    RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
+    RiskRecord, RiskResult, RiskSort, RiskSummary, CochangeRecord, CochangeResult,
+    CochangeSort, CochangeSummary, ScopeError, ScopeResult, SnapshotCentralityDelta, SnapshotDeleteResult,
     SnapshotDiffResult, SnapshotEdgeDelta, SnapshotEdgeRecord, SnapshotFileRecord,
     SnapshotGraph, SnapshotListResult, SnapshotListSummary, SnapshotMetadata,
     SnapshotSaveResult, SnapshotStabilityDelta, SnapshotStoredRecord, SnapshotSymbolRecord,
-    StabilityCategory, StabilityRecord, StabilityResult, StabilitySort, StabilitySummary,
-    SymbolKind, SymbolRecord, TestConfig, TestMapBuildResult, TestMapBuildSummary,
-    TestMapCoveredByResult, TestMapCoveredBySummary, TestMapCoversResult,
-    TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult, TestMapUncoveredSummary,
-    TraversalRecord, TreeNode, TreeResult, TreeSummary, UnusedRecord, UnusedResult,
-    UnusedSummary, Visibility,
+    SplitCluster, SplitClusterMember, SplitResult, SplitSummary, StabilityCategory,
+    StabilityRecord, StabilityResult, StabilitySort, StabilitySummary, SymbolKind, SymbolRecord,
+    TestConfig, TestMapBuildResult, TestMapBuildSummary, TestMapCoveredByResult,
+    TestMapCoveredBySummary, TestMapCoversResult, TestMapCoversSummary, TestMapRecord,
+    TestMapUncoveredResult, TestMapUncoveredSummary, TraversalRecord, TreeNode, TreeResult,
+    TreeSummary, UnusedRecord, UnusedResult, UnusedSummary, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
@@ -992,6 +998,147 @@ impl Store {
         })
     }
 
+    pub fn query_cochange(
+        &self,
+        target: &RepoPath,
+        days: u32,
+        min_shared_commits: usize,
+        top: Option<usize>,
+        sort: CochangeSort,
+    ) -> ScopeResult<CochangeResult> {
+        if days == 0 {
+            return Err(ScopeError::InvalidInput(
+                "cochange window days must be greater than 0".to_string(),
+            ));
+        }
+        if min_shared_commits == 0 {
+            return Err(ScopeError::InvalidInput(
+                "min_shared_commits must be greater than 0".to_string(),
+            ));
+        }
+        if let Some(top) = top {
+            if top == 0 {
+                return Err(ScopeError::InvalidInput(
+                    "top must be greater than 0".to_string(),
+                ));
+            }
+        }
+
+        let Some(target_file_id) = self.file_id(target)? else {
+            return Err(ScopeError::InvalidInput(format!("file not indexed: {}", target.0)));
+        };
+
+        let since = unix_timestamp() - (days as i64 * 24 * 60 * 60);
+        let mut target_statement = self.connection.prepare(
+            "SELECT DISTINCT commit_sha
+             FROM file_churn
+             WHERE file_id = ?1 AND (committed_at IS NULL OR committed_at >= ?2)
+             ORDER BY commit_sha ASC",
+        )?;
+        let target_rows = target_statement.query_map(params![target_file_id, since], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let target_commits = target_rows.collect::<Result<HashSet<_>, _>>()?;
+        let git_available = !target_commits.is_empty();
+
+        let mut candidate_statement = self.connection.prepare(
+            "SELECT files.path,
+                    COUNT(DISTINCT CASE WHEN file_churn.commit_sha IN (
+                        SELECT commit_sha
+                        FROM file_churn
+                        WHERE file_id = ?1 AND (committed_at IS NULL OR committed_at >= ?2)
+                    ) THEN file_churn.commit_sha END) AS shared_commits,
+                    COUNT(DISTINCT file_churn.commit_sha) AS candidate_commits
+             FROM files
+             LEFT JOIN file_churn ON file_churn.file_id = files.id AND (file_churn.committed_at IS NULL OR file_churn.committed_at >= ?2)
+             WHERE files.id != ?1
+             GROUP BY files.path
+             ORDER BY files.path ASC",
+        )?;
+        let candidate_rows = candidate_statement.query_map(params![target_file_id, since], |row| {
+            Ok((
+                RepoPath(row.get::<_, String>(0)?),
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as usize,
+            ))
+        })?;
+
+        let mut records = candidate_rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|(_, shared_commits, _)| *shared_commits >= min_shared_commits)
+            .map(|(path, shared_commits, candidate_commits)| {
+                let score = if git_available {
+                    shared_commits as f64 / target_commits.len() as f64
+                } else {
+                    0.0
+                };
+                let reason = if git_available {
+                    format!(
+                        "{} shared commits out of {} target commits in last {} days",
+                        shared_commits,
+                        target_commits.len(),
+                        days
+                    )
+                } else {
+                    format!(
+                        "git churn unavailable for target {}; no cochange relationships found in last {} days",
+                        target.0,
+                        days
+                    )
+                };
+                CochangeRecord {
+                    path,
+                    shared_commits,
+                    target_commits: target_commits.len(),
+                    candidate_commits,
+                    score,
+                    normalized_score: 0,
+                    reason,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let max_score = records.iter().map(|record| record.score).fold(0.0, f64::max);
+        for record in &mut records {
+            record.normalized_score = if max_score > 0.0 {
+                ((record.score / max_score) * 100.0).round() as u32
+            } else {
+                0
+            };
+        }
+
+        sort_cochange_records(&mut records, sort.clone());
+
+        if let Some(limit) = top {
+            records.truncate(limit);
+        }
+
+        let max_shared_commits = records
+            .iter()
+            .map(|record| record.shared_commits)
+            .max()
+            .unwrap_or(0);
+
+        let summary = CochangeSummary {
+            git_available,
+            target_commits: target_commits.len(),
+            related_files: records.len(),
+            max_shared_commits,
+            max_score,
+        };
+
+        Ok(CochangeResult {
+            target: target.clone(),
+            top,
+            days,
+            min_shared_commits,
+            sort,
+            files: records,
+            summary,
+        })
+    }
+
     pub fn query_unused(&self) -> ScopeResult<UnusedResult> {
         let mut statement = self.connection.prepare(
             "SELECT files.path, symbols.name, symbols.qualname, symbols.kind, symbols.visibility, symbols.start_line,
@@ -1181,6 +1328,451 @@ impl Store {
                 nodes: count_tree_nodes(&tree),
             },
             tree,
+        })
+    }
+
+    pub fn query_split(
+        &self,
+        target: &RepoPath,
+        requested_clusters: Option<usize>,
+    ) -> ScopeResult<SplitResult> {
+        if let Some(count) = requested_clusters {
+            if count == 0 {
+                return Err(ScopeError::InvalidInput(
+                    "split cluster count must be greater than 0".to_string(),
+                ));
+            }
+        }
+        if self.file_id(target)?.is_none() {
+            return Err(ScopeError::InvalidInput(format!("file not indexed: {}", target.0)));
+        }
+
+        let mut warnings = Vec::new();
+        let mut symbols = self.query_symbols(target, true, None)?;
+        if symbols.len() < 2 {
+            symbols = self.query_symbols(target, false, None)?;
+            if symbols.len() >= 2 {
+                warnings.push(
+                    "exported symbol set was too small for clustering; used all indexed symbols".to_string(),
+                );
+            }
+        }
+        symbols.retain(|symbol| symbol.kind != SymbolKind::Module);
+        symbols.sort_by(|left, right| left.span.start_line.cmp(&right.span.start_line).then(left.qualname.cmp(&right.qualname)));
+
+        let exported_symbols = symbols.iter().filter(|symbol| symbol.exported).count();
+        if symbols.is_empty() {
+            return Ok(SplitResult {
+                target: target.clone(),
+                requested_clusters,
+                warnings: vec!["target has no indexed symbols to cluster".to_string()],
+                clusters: Vec::new(),
+                summary: SplitSummary {
+                    target_symbols: 0,
+                    exported_symbols: 0,
+                    clusters: 0,
+                    isolated_symbols: 0,
+                },
+            });
+        }
+
+        let profiles = self.symbol_usage_profiles(&symbols)?;
+        let desired_clusters = requested_clusters
+            .unwrap_or_else(|| symbols.len().clamp(1, 3))
+            .min(symbols.len())
+            .max(1);
+        let groups = build_split_groups(&symbols, &profiles, desired_clusters);
+        let isolated_symbols = groups.iter().filter(|group| group.len() == 1).count();
+        let mut clusters = groups
+            .into_iter()
+            .enumerate()
+            .map(|(index, group)| {
+                let members = group
+                    .iter()
+                    .map(|symbol| {
+                        let profile = profiles.get(&symbol.qualname).cloned().unwrap_or_default();
+                        SplitClusterMember {
+                            qualname: symbol.qualname.clone(),
+                            name: symbol.name.clone(),
+                            kind: symbol.kind.clone(),
+                            exported: symbol.exported,
+                            inbound_calls: profile.inbound_calls,
+                            inbound_files: profile.inbound_files.len(),
+                            line: symbol.span.start_line,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let cohesion_score = split_group_cohesion(&group, &profiles);
+                let suggested_name = suggest_split_cluster_name(&members, index + 1);
+                let rationale = split_group_rationale(&group, &profiles);
+                SplitCluster {
+                    id: index + 1,
+                    members,
+                    cohesion_score,
+                    suggested_name,
+                    rationale,
+                }
+            })
+            .collect::<Vec<_>>();
+        clusters.sort_by(|left, right| left.id.cmp(&right.id));
+        if clusters.len() <= 1 {
+            warnings.push("target topology does not show a strong split signal yet".to_string());
+        }
+
+        Ok(SplitResult {
+            target: target.clone(),
+            requested_clusters,
+            warnings,
+            summary: SplitSummary {
+                target_symbols: symbols.len(),
+                exported_symbols,
+                clusters: clusters.len(),
+                isolated_symbols,
+            },
+            clusters,
+        })
+    }
+
+    pub fn query_mirror(
+        &self,
+        target: &RepoPath,
+        other: Option<&RepoPath>,
+        threshold: Option<u32>,
+        top: Option<usize>,
+    ) -> ScopeResult<MirrorResult> {
+        if self.file_id(target)?.is_none() {
+            return Err(ScopeError::InvalidInput(format!("file not indexed: {}", target.0)));
+        }
+        if let Some(top) = top {
+            if top == 0 {
+                return Err(ScopeError::InvalidInput(
+                    "mirror top must be greater than 0".to_string(),
+                ));
+            }
+        }
+        if let Some(threshold) = threshold {
+            if threshold > 100 {
+                return Err(ScopeError::InvalidInput(
+                    "mirror threshold must be between 0 and 100".to_string(),
+                ));
+            }
+        }
+
+        let target_signature = self.file_signature(target)?;
+        let target_language = target_signature.language.clone();
+        if let Some(other) = other {
+            if self.file_id(other)?.is_none() {
+                return Err(ScopeError::InvalidInput(format!("file not indexed: {}", other.0)));
+            }
+            let other_signature = self.file_signature(other)?;
+            let (score, reasons) = compare_signatures(&target_signature, &other_signature);
+            let passes = threshold.is_none_or(|minimum| ((score * 100.0).round() as u32) >= minimum);
+            let matches = if passes {
+                vec![MirrorMatch {
+                    path: other.clone(),
+                    score,
+                    normalized_score: (score * 100.0).round() as u32,
+                    reasons,
+                }]
+            } else {
+                Vec::new()
+            };
+            return Ok(MirrorResult {
+                target: target.clone(),
+                other: Some(other.clone()),
+                threshold,
+                top,
+                target_signature,
+                other_signature: Some(other_signature),
+                similarity_score: Some(score),
+                summary: MirrorSummary {
+                    candidates_considered: 1,
+                    matches_returned: matches.len(),
+                    threshold,
+                },
+                matches,
+            });
+        }
+
+        let mut matches = Vec::new();
+        let mut candidates_considered = 0usize;
+        for candidate in self.list_indexed_files()? {
+            if candidate == *target {
+                continue;
+            }
+            let signature = self.file_signature(&candidate)?;
+            if signature.language != target_language {
+                continue;
+            }
+            candidates_considered += 1;
+            let (score, reasons) = compare_signatures(&target_signature, &signature);
+            let normalized_score = (score * 100.0).round() as u32;
+            if threshold.is_some_and(|minimum| normalized_score < minimum) {
+                continue;
+            }
+            matches.push(MirrorMatch {
+                path: candidate,
+                score,
+                normalized_score,
+                reasons,
+            });
+        }
+        matches.sort_by(|left, right| right.normalized_score.cmp(&left.normalized_score).then_with(|| left.path.0.cmp(&right.path.0)));
+        if let Some(limit) = top {
+            matches.truncate(limit);
+        }
+
+        Ok(MirrorResult {
+            target: target.clone(),
+            other: None,
+            threshold,
+            top,
+            target_signature,
+            other_signature: None,
+            similarity_score: None,
+            summary: MirrorSummary {
+                candidates_considered,
+                matches_returned: matches.len(),
+                threshold,
+            },
+            matches,
+        })
+    }
+
+    pub fn query_entry_list(&self, config: &ArchConfig) -> ScopeResult<EntryListResult> {
+        let entry_points = self.entry_points(config)?;
+        Ok(EntryListResult {
+            summary: EntryListSummary {
+                entry_points: entry_points.len(),
+            },
+            entry_points,
+        })
+    }
+
+    pub fn query_entry_cone(
+        &self,
+        config: &ArchConfig,
+        entry: &RepoPath,
+    ) -> ScopeResult<EntryConeResult> {
+        let entry_points = self.entry_points(config)?;
+        if !entry_points.iter().any(|record| &record.file == entry) {
+            return Err(ScopeError::InvalidInput(format!(
+                "entry point not detected: {}",
+                entry.0
+            )));
+        }
+        let reachable = self.entry_cone_records(entry)?;
+        let max_distance = reachable.iter().map(|record| record.distance).max().unwrap_or(0);
+        Ok(EntryConeResult {
+            entry: entry.clone(),
+            summary: EntryConeSummary {
+                reachable_files: reachable.len(),
+                max_distance,
+            },
+            reachable,
+        })
+    }
+
+    pub fn query_entry_reaches(
+        &self,
+        config: &ArchConfig,
+        target: &RepoPath,
+    ) -> ScopeResult<EntryReachesResult> {
+        if self.file_id(target)?.is_none() {
+            return Err(ScopeError::InvalidInput(format!("file not indexed: {}", target.0)));
+        }
+        let mut entry_points = Vec::new();
+        for entry in self.entry_points(config)? {
+            if let Some(record) = self
+                .entry_cone_records(&entry.file)?
+                .into_iter()
+                .find(|record| &record.file == target)
+            {
+                entry_points.push(EntryReachableRecord {
+                    file: entry.file.clone(),
+                    distance: record.distance,
+                    certainty: record.certainty,
+                });
+            }
+        }
+        entry_points.sort_by(|left, right| {
+            left.distance
+                .cmp(&right.distance)
+                .then(left.file.0.cmp(&right.file.0))
+        });
+        Ok(EntryReachesResult {
+            target: target.clone(),
+            summary: EntryReachesSummary {
+                reaching_entry_points: entry_points.len(),
+                nearest_distance: entry_points.first().map(|record| record.distance),
+            },
+            entry_points,
+        })
+    }
+
+    pub fn query_audit(&self, config: &ArchConfig, capability: &str) -> ScopeResult<AuditResult> {
+        let capability_config = config
+            .capabilities
+            .iter()
+            .find(|item| item.name == capability)
+            .ok_or_else(|| {
+                ScopeError::InvalidInput(format!("unknown capability: {capability}"))
+            })?;
+
+        let all_files = self.list_indexed_files()?;
+        let mut source_files = Vec::new();
+        let mut capability_sources = Vec::new();
+        if let Some(pattern) = &capability_config.pattern {
+            let matcher = Pattern::new(pattern).map_err(|error| {
+                ScopeError::InvalidInput(format!("invalid capability pattern '{pattern}': {error}"))
+            })?;
+            for file in &all_files {
+                if matcher.matches(&file.0) {
+                    source_files.push(file.clone());
+                    capability_sources.push(AuditCapabilitySource {
+                        kind: "file_pattern".to_string(),
+                        value: file.0.clone(),
+                    });
+                }
+            }
+        }
+        for symbol in &capability_config.symbols {
+            if let Some(symbol_record) = self.resolve_symbol_by_name_or_qualname(symbol)? {
+                if !source_files.contains(&symbol_record.file) {
+                    source_files.push(symbol_record.file.clone());
+                }
+                capability_sources.push(AuditCapabilitySource {
+                    kind: "symbol".to_string(),
+                    value: symbol.clone(),
+                });
+            }
+        }
+        source_files.sort();
+        source_files.dedup();
+        capability_sources.sort_by(|left, right| left.kind.cmp(&right.kind).then(left.value.cmp(&right.value)));
+        capability_sources.dedup_by(|left, right| left.kind == right.kind && left.value == right.value);
+
+        let entry_points = self.entry_points(config)?;
+        let expected_patterns = capability_config
+            .expected_callers
+            .iter()
+            .map(|pattern| Pattern::new(pattern))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                ScopeError::InvalidInput(format!(
+                    "invalid capability expected_callers pattern: {error}"
+                ))
+            })?;
+
+        let adjacency = self.import_adjacency()?;
+        let certainty_map = self.import_certainty_map()?;
+        let mut reaches = Vec::new();
+        for entry in &entry_points {
+            let Some((distance, certainty, path)) = shortest_import_path_to_any(
+                &entry.file,
+                &source_files,
+                &adjacency,
+                &certainty_map,
+            ) else {
+                continue;
+            };
+            let expected = expected_patterns
+                .iter()
+                .any(|pattern| pattern.matches(&entry.file.0));
+            reaches.push(AuditEntryReachRecord {
+                entry_point: entry.file.clone(),
+                distance,
+                certainty,
+                expected,
+                path,
+            });
+        }
+        reaches.sort_by(|left, right| {
+            left.expected
+                .cmp(&right.expected)
+                .reverse()
+                .then(left.distance.cmp(&right.distance))
+                .then(left.entry_point.0.cmp(&right.entry_point.0))
+        });
+        let expected_entry_points = reaches.iter().filter(|record| record.expected).count();
+        let unexpected_entry_points = reaches.len().saturating_sub(expected_entry_points);
+
+        Ok(AuditResult {
+            capability: capability.to_string(),
+            capability_sources,
+            entry_points,
+            summary: AuditSummary {
+                capability_sources: source_files.len(),
+                reaching_entry_points: reaches.len(),
+                expected_entry_points,
+                unexpected_entry_points,
+            },
+            reaches,
+        })
+    }
+
+    pub fn query_entry_unreachable(
+        &self,
+        config: &ArchConfig,
+        min_age_days: Option<u64>,
+    ) -> ScopeResult<EntryUnreachableResult> {
+        let all_files = self.list_indexed_files()?;
+        let entry_points = self.entry_points(config)?;
+        let mut reachable = HashSet::new();
+        for entry in &entry_points {
+            for record in self.entry_cone_records(&entry.file)? {
+                reachable.insert(record.file);
+            }
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut unreachable = Vec::new();
+        for file in &all_files {
+            if reachable.contains(file) {
+                continue;
+            }
+            let Some(state) = self.file_state(file)? else {
+                continue;
+            };
+            let last_modified_days_ago = state.mtime_unix_seconds.and_then(|mtime| {
+                if mtime > now {
+                    None
+                } else {
+                    Some(((now - mtime) as u64) / 86_400)
+                }
+            });
+            if min_age_days.is_some_and(|min_age| {
+                last_modified_days_ago.is_none_or(|age| age < min_age)
+            }) {
+                continue;
+            }
+            let exported_symbols = self.query_symbols(file, true, None)?.len();
+            let certainty = self.file_certainty(file)?;
+            unreachable.push(EntryUnreachableRecord {
+                file: file.clone(),
+                last_modified_days_ago,
+                exported_symbols,
+                certainty: certainty.clone(),
+                certainty_note: entry_certainty_note(&certainty),
+            });
+        }
+        unreachable.sort_by(|left, right| {
+            left.last_modified_days_ago
+                .cmp(&right.last_modified_days_ago)
+                .reverse()
+                .then(left.file.0.cmp(&right.file.0))
+        });
+
+        Ok(EntryUnreachableResult {
+            entry_points,
+            total_files: all_files.len(),
+            reachable_files: reachable.len(),
+            unreachable_files: unreachable.len(),
+            min_age_days,
+            unreachable,
         })
     }
 
@@ -2088,6 +2680,73 @@ impl Store {
             .unwrap_or(64))
     }
 
+    fn symbol_usage_profiles(
+        &self,
+        symbols: &[SymbolRecord],
+    ) -> ScopeResult<HashMap<String, SymbolUsageProfile>> {
+        let mut profiles = HashMap::new();
+        for symbol in symbols {
+            let mut statement = self.connection.prepare(
+                "SELECT caller_files.path
+                 FROM symbol_edges
+                 JOIN symbols AS target_symbols ON target_symbols.id = symbol_edges.to_symbol_id
+                 JOIN symbols AS caller_symbols ON caller_symbols.id = symbol_edges.from_symbol_id
+                 JOIN files AS caller_files ON caller_files.id = caller_symbols.file_id
+                 WHERE target_symbols.qualname = ?1 AND symbol_edges.kind = 'call'
+                 ORDER BY caller_files.path ASC",
+            )?;
+            let rows = statement.query_map([symbol.qualname.as_str()], |row| {
+                Ok(RepoPath(row.get::<_, String>(0)?))
+            })?;
+            let inbound_files = rows.collect::<Result<HashSet<_>, _>>()?;
+            let inbound_calls = inbound_files.len();
+            profiles.insert(
+                symbol.qualname.clone(),
+                SymbolUsageProfile {
+                    inbound_calls,
+                    inbound_files,
+                },
+            );
+        }
+        Ok(profiles)
+    }
+
+    fn file_signature(&self, path: &RepoPath) -> ScopeResult<MirrorSignature> {
+        let language = self.connection.query_row(
+            "SELECT language FROM files WHERE path = ?1",
+            [path.0.as_str()],
+            |row| row.get::<_, String>(0),
+        )?;
+        let file_id = self
+            .file_id(path)?
+            .ok_or_else(|| ScopeError::InvalidInput(format!("file not indexed: {}", path.0)))?;
+
+        let mut import_statement = self.connection.prepare(
+            "SELECT raw_text FROM imports WHERE file_id = ?1 ORDER BY raw_text ASC",
+        )?;
+        let imports = import_statement
+            .query_map([file_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut exported_symbols = self.query_symbols(path, true, None)?;
+        exported_symbols.sort_by(|left, right| left.qualname.cmp(&right.qualname));
+        let exported_symbol_kinds = exported_symbols
+            .iter()
+            .map(|symbol| format!("{:?}", symbol.kind).to_lowercase())
+            .collect::<Vec<_>>();
+
+        let adjacency = self.import_adjacency()?;
+        let reverse = reverse_adjacency(&adjacency);
+        Ok(MirrorSignature {
+            language,
+            imports,
+            exported_symbol_kinds,
+            inbound_neighbor_count: reverse.get(path).map(|parents| parents.len()).unwrap_or(0),
+            outbound_neighbor_count: adjacency.get(path).map(|children| children.len()).unwrap_or(0),
+            exported_symbol_count: exported_symbols.len(),
+        })
+    }
+
     pub fn list_indexed_files(&self) -> ScopeResult<Vec<RepoPath>> {
         let mut statement = self
             .connection
@@ -2153,6 +2812,146 @@ impl Store {
             .map_err(Into::into)
     }
 
+    fn entry_points(&self, config: &ArchConfig) -> ScopeResult<Vec<EntryPointRecord>> {
+        let all_files = self.list_indexed_files()?;
+        if !config.entry_points.is_empty() {
+            let patterns = config
+                .entry_points
+                .iter()
+                .map(|entry| Pattern::new(&entry.pattern))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    ScopeError::InvalidInput(format!("invalid entry point pattern: {error}"))
+                })?;
+            let mut entry_points = all_files
+                .into_iter()
+                .filter(|path| patterns.iter().any(|pattern| pattern.matches(&path.0)))
+                .map(|file| EntryPointRecord {
+                    file,
+                    detection: EntryPointDetection::Config,
+                })
+                .collect::<Vec<_>>();
+            entry_points.sort_by(|left, right| left.file.0.cmp(&right.file.0));
+            entry_points.dedup_by(|left, right| left.file == right.file);
+            return Ok(entry_points);
+        }
+
+        let adjacency = self.import_adjacency()?;
+        let reverse_adjacency = reverse_adjacency(&adjacency);
+        let mut entry_points = all_files
+            .into_iter()
+            .filter(|path| reverse_adjacency.get(path).is_none_or(|parents| parents.is_empty()))
+            .filter(|path| adjacency.get(path).is_some_and(|children| !children.is_empty()))
+            .map(|file| EntryPointRecord {
+                file,
+                detection: EntryPointDetection::ZeroInDegree,
+            })
+            .collect::<Vec<_>>();
+        entry_points.sort_by(|left, right| left.file.0.cmp(&right.file.0));
+        Ok(entry_points)
+    }
+
+    fn entry_cone_records(&self, entry: &RepoPath) -> ScopeResult<Vec<EntryReachableRecord>> {
+        if self.file_id(entry)?.is_none() {
+            return Err(ScopeError::InvalidInput(format!("file not indexed: {}", entry.0)));
+        }
+        let adjacency = self.import_adjacency()?;
+        let certainty_map = self.import_certainty_map()?;
+        let mut visited = HashMap::new();
+        let mut queue = VecDeque::new();
+        visited.insert(entry.clone(), (0_u32, Certainty::Exact));
+        queue.push_back(entry.clone());
+
+        while let Some(current) = queue.pop_front() {
+            let (distance, certainty) = visited
+                .get(&current)
+                .cloned()
+                .expect("visited nodes should retain metadata");
+            for next in adjacency.get(&current).into_iter().flatten() {
+                let edge_certainty = certainty_map
+                    .get(&(current.clone(), next.clone()))
+                    .cloned()
+                    .unwrap_or(Certainty::Resolved);
+                let next_certainty = combine_certainty(&certainty, &edge_certainty);
+                let next_distance = distance + 1;
+                let should_enqueue = match visited.get(next) {
+                    Some((seen_distance, seen_certainty)) => {
+                        next_distance < *seen_distance
+                            || (next_distance == *seen_distance
+                                && certainty_rank(&next_certainty) < certainty_rank(seen_certainty))
+                    }
+                    None => true,
+                };
+                if should_enqueue {
+                    visited.insert(next.clone(), (next_distance, next_certainty));
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+
+        let mut reachable = visited
+            .into_iter()
+            .map(|(file, (distance, certainty))| EntryReachableRecord {
+                file,
+                distance,
+                certainty,
+            })
+            .collect::<Vec<_>>();
+        reachable.sort_by(|left, right| {
+            left.distance
+                .cmp(&right.distance)
+                .then(left.file.0.cmp(&right.file.0))
+        });
+        Ok(reachable)
+    }
+
+    fn import_adjacency(&self) -> ScopeResult<HashMap<RepoPath, Vec<RepoPath>>> {
+        let mut adjacency: HashMap<RepoPath, Vec<RepoPath>> = HashMap::new();
+        for path in self.list_indexed_files()? {
+            adjacency.entry(path).or_default();
+        }
+        for edge in self
+            .query_file_edges()?
+            .into_iter()
+            .filter(|edge| edge.edge_kind == EdgeKind::Import)
+        {
+            adjacency
+                .entry(edge.from_file)
+                .or_default()
+                .push(edge.to_file);
+        }
+        for children in adjacency.values_mut() {
+            children.sort();
+            children.dedup();
+        }
+        Ok(adjacency)
+    }
+
+    fn import_certainty_map(&self) -> ScopeResult<HashMap<(RepoPath, RepoPath), Certainty>> {
+        let mut map = HashMap::new();
+        for edge in self
+            .query_file_edges()?
+            .into_iter()
+            .filter(|edge| edge.edge_kind == EdgeKind::Import)
+        {
+            map.entry((edge.from_file, edge.to_file)).or_insert(edge.certainty);
+        }
+        Ok(map)
+    }
+
+    fn file_certainty(&self, path: &RepoPath) -> ScopeResult<Certainty> {
+        let language = self.connection.query_row(
+            "SELECT language FROM files WHERE path = ?1",
+            [path.0.as_str()],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(match language.as_str() {
+            "rust" | "typescript" => Certainty::Exact,
+            "javascript" => Certainty::Heuristic,
+            _ => Certainty::Heuristic,
+        })
+    }
+
     fn file_id(&self, path: &RepoPath) -> ScopeResult<Option<i64>> {
         self.connection
             .query_row(
@@ -2174,6 +2973,22 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    fn resolve_symbol_by_name_or_qualname(&self, symbol: &str) -> ScopeResult<Option<SymbolRecord>> {
+        if let Some(symbol_id) = self.symbol_id(symbol)? {
+            return self.symbol_record_by_id(symbol_id);
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM symbols WHERE qualname = ?1 OR name = ?1 ORDER BY CASE WHEN qualname = ?1 THEN 0 ELSE 1 END, qualname ASC LIMIT 1",
+        )?;
+        let symbol_id = statement
+            .query_row([symbol], |row| row.get::<_, i64>(0))
+            .optional()?;
+        match symbol_id {
+            Some(symbol_id) => self.symbol_record_by_id(symbol_id),
+            None => Ok(None),
+        }
     }
 
     fn insert_import(&self, file_id: i64, import: &crate::ImportRecord) -> ScopeResult<()> {
@@ -3718,6 +4533,308 @@ fn sort_risk_records(records: &mut [RiskRecord], sort: RiskSort) {
     }
 }
 
+fn sort_cochange_records(records: &mut [CochangeRecord], sort: CochangeSort) {
+    match sort {
+        CochangeSort::Score => records.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then(right.shared_commits.cmp(&left.shared_commits))
+                .then(left.path.0.cmp(&right.path.0))
+        }),
+        CochangeSort::SharedCommits => records.sort_by(|left, right| {
+            right
+                .shared_commits
+                .cmp(&left.shared_commits)
+                .then(right.score.total_cmp(&left.score))
+                .then(left.path.0.cmp(&right.path.0))
+        }),
+        CochangeSort::Path => records.sort_by(|left, right| left.path.0.cmp(&right.path.0)),
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SymbolUsageProfile {
+    inbound_calls: usize,
+    inbound_files: HashSet<RepoPath>,
+}
+
+fn build_split_groups<'a>(
+    symbols: &'a [SymbolRecord],
+    profiles: &HashMap<String, SymbolUsageProfile>,
+    desired_clusters: usize,
+) -> Vec<Vec<&'a SymbolRecord>> {
+    let mut groups: Vec<Vec<&SymbolRecord>> = symbols.iter().map(|symbol| vec![symbol]).collect();
+    while groups.len() > desired_clusters && groups.len() > 1 {
+        let mut best_pair = None;
+        let mut best_score = f64::MIN;
+        for left in 0..groups.len() {
+            for right in (left + 1)..groups.len() {
+                let score = split_group_similarity(&groups[left], &groups[right], profiles);
+                if score > best_score {
+                    best_score = score;
+                    best_pair = Some((left, right));
+                }
+            }
+        }
+        let Some((left, right)) = best_pair else {
+            break;
+        };
+        let mut merged = groups.remove(right);
+        groups[left].append(&mut merged);
+        groups[left].sort_by(|a, b| a.span.start_line.cmp(&b.span.start_line).then(a.qualname.cmp(&b.qualname)));
+    }
+    groups.sort_by(|left, right| {
+        left.first()
+            .map(|symbol| symbol.span.start_line)
+            .unwrap_or_default()
+            .cmp(&right.first().map(|symbol| symbol.span.start_line).unwrap_or_default())
+            .then(
+                left.first()
+                    .map(|symbol| symbol.qualname.as_str())
+                    .unwrap_or_default()
+                    .cmp(right.first().map(|symbol| symbol.qualname.as_str()).unwrap_or_default()),
+            )
+    });
+    groups
+}
+
+fn split_group_similarity(
+    left: &[&SymbolRecord],
+    right: &[&SymbolRecord],
+    profiles: &HashMap<String, SymbolUsageProfile>,
+) -> f64 {
+    let left_set = split_group_profile(left, profiles);
+    let right_set = split_group_profile(right, profiles);
+    jaccard(&left_set, &right_set)
+}
+
+fn split_group_profile(
+    group: &[&SymbolRecord],
+    profiles: &HashMap<String, SymbolUsageProfile>,
+) -> HashSet<RepoPath> {
+    let mut files = HashSet::new();
+    for symbol in group {
+        if let Some(profile) = profiles.get(&symbol.qualname) {
+            files.extend(profile.inbound_files.iter().cloned());
+        }
+    }
+    files
+}
+
+fn split_group_cohesion(
+    group: &[&SymbolRecord],
+    profiles: &HashMap<String, SymbolUsageProfile>,
+) -> f64 {
+    if group.len() <= 1 {
+        return 1.0;
+    }
+    let mut comparisons = 0usize;
+    let mut total = 0.0;
+    for left in 0..group.len() {
+        for right in (left + 1)..group.len() {
+            let left_set = profiles
+                .get(&group[left].qualname)
+                .map(|profile| profile.inbound_files.clone())
+                .unwrap_or_default();
+            let right_set = profiles
+                .get(&group[right].qualname)
+                .map(|profile| profile.inbound_files.clone())
+                .unwrap_or_default();
+            total += jaccard(&left_set, &right_set);
+            comparisons += 1;
+        }
+    }
+    if comparisons == 0 {
+        1.0
+    } else {
+        total / comparisons as f64
+    }
+}
+
+fn suggest_split_cluster_name(members: &[SplitClusterMember], ordinal: usize) -> String {
+    let mut by_kind: HashMap<&str, usize> = HashMap::new();
+    for member in members {
+        let label = match member.kind {
+            SymbolKind::Function => "functions",
+            SymbolKind::Struct => "structs",
+            SymbolKind::Enum => "enums",
+            SymbolKind::Trait => "traits",
+            SymbolKind::Method => "methods",
+            SymbolKind::Module => "modules",
+            SymbolKind::Constant => "constants",
+            SymbolKind::Variable => "variables",
+        };
+        *by_kind.entry(label).or_default() += 1;
+    }
+    let dominant = by_kind
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(right.0)))
+        .map(|(kind, _)| kind.to_string())
+        .unwrap_or_else(|| "symbols".to_string());
+    format!("cluster_{ordinal}_{dominant}")
+}
+
+fn split_group_rationale(
+    group: &[&SymbolRecord],
+    profiles: &HashMap<String, SymbolUsageProfile>,
+) -> String {
+    let profile = split_group_profile(group, profiles);
+    if profile.is_empty() {
+        return "symbols share little external call evidence and are grouped by local structure".to_string();
+    }
+    let mut files = profile.into_iter().map(|path| path.0).collect::<Vec<_>>();
+    files.sort();
+    files.truncate(2);
+    format!(
+        "symbols share inbound usage from {} indexed file(s), led by {}",
+        files.len(),
+        files.join(", ")
+    )
+}
+
+fn jaccard(left: &HashSet<RepoPath>, right: &HashSet<RepoPath>) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 1.0;
+    }
+    let union = left.union(right).count();
+    if union == 0 {
+        return 0.0;
+    }
+    let intersection = left.intersection(right).count();
+    intersection as f64 / union as f64
+}
+
+fn compare_signatures(left: &MirrorSignature, right: &MirrorSignature) -> (f64, Vec<String>) {
+    let left_imports = left.imports.iter().cloned().map(RepoPath::from).collect::<HashSet<_>>();
+    let right_imports = right.imports.iter().cloned().map(RepoPath::from).collect::<HashSet<_>>();
+    let left_kinds = left
+        .exported_symbol_kinds
+        .iter()
+        .cloned()
+        .map(RepoPath::from)
+        .collect::<HashSet<_>>();
+    let right_kinds = right
+        .exported_symbol_kinds
+        .iter()
+        .cloned()
+        .map(RepoPath::from)
+        .collect::<HashSet<_>>();
+    let import_score = jaccard(&left_imports, &right_imports);
+    let kind_score = jaccard(&left_kinds, &right_kinds);
+    let fan_score = 1.0
+        - (((left.inbound_neighbor_count as i64 - right.inbound_neighbor_count as i64).abs()
+            + (left.outbound_neighbor_count as i64 - right.outbound_neighbor_count as i64).abs())
+            as f64
+            / 10.0)
+            .min(1.0);
+    let export_score = 1.0
+        - ((left.exported_symbol_count as i64 - right.exported_symbol_count as i64).abs() as f64 / 6.0)
+            .min(1.0);
+    let score = (import_score * 0.45) + (kind_score * 0.25) + (fan_score * 0.15) + (export_score * 0.15);
+    let mut reasons = Vec::new();
+    reasons.push(format!("shared import profile {:.0}%", import_score * 100.0));
+    reasons.push(format!("shared exported symbol kinds {:.0}%", kind_score * 100.0));
+    reasons.push(format!(
+        "neighbor counts {}/{} vs {}/{}",
+        left.inbound_neighbor_count,
+        left.outbound_neighbor_count,
+        right.inbound_neighbor_count,
+        right.outbound_neighbor_count
+    ));
+    reasons.push(format!(
+        "exported symbol counts {} vs {}",
+        left.exported_symbol_count, right.exported_symbol_count
+    ));
+    (score.clamp(0.0, 1.0), reasons)
+}
+
+fn shortest_import_path_to_any(
+    start: &RepoPath,
+    goals: &[RepoPath],
+    adjacency: &HashMap<RepoPath, Vec<RepoPath>>,
+    certainty_map: &HashMap<(RepoPath, RepoPath), Certainty>,
+) -> Option<(u32, Certainty, Vec<RepoPath>)> {
+    if goals.contains(start) {
+        return Some((0, Certainty::Exact, vec![start.clone()]));
+    }
+
+    let goal_set: HashSet<_> = goals.iter().cloned().collect();
+    let mut visited = HashSet::from([start.clone()]);
+    let mut queue = VecDeque::from([(start.clone(), 0_u32, Certainty::Exact)]);
+    let mut predecessors = HashMap::<RepoPath, RepoPath>::new();
+
+    while let Some((current, distance, certainty)) = queue.pop_front() {
+        for next in adjacency.get(&current).into_iter().flatten() {
+            if !visited.insert(next.clone()) {
+                continue;
+            }
+            predecessors.insert(next.clone(), current.clone());
+            let edge_certainty = certainty_map
+                .get(&(current.clone(), next.clone()))
+                .cloned()
+                .unwrap_or(Certainty::Resolved);
+            let next_certainty = combine_certainty(&certainty, &edge_certainty);
+            let next_distance = distance + 1;
+            if goal_set.contains(next) {
+                let mut path = vec![start.clone()];
+                let mut cursor = next.clone();
+                let mut middle = Vec::new();
+                while cursor != *start {
+                    middle.push(cursor.clone());
+                    cursor = predecessors.get(&cursor)?.clone();
+                }
+                middle.reverse();
+                path.extend(middle);
+                return Some((next_distance, next_certainty, path));
+            }
+            queue.push_back((next.clone(), next_distance, next_certainty));
+        }
+    }
+
+    None
+}
+
+fn reverse_adjacency(
+    adjacency: &HashMap<RepoPath, Vec<RepoPath>>,
+) -> HashMap<RepoPath, Vec<RepoPath>> {
+    let mut reverse = HashMap::new();
+    for (from, children) in adjacency {
+        reverse.entry(from.clone()).or_insert_with(Vec::new);
+        for child in children {
+            reverse
+                .entry(child.clone())
+                .or_insert_with(Vec::new)
+                .push(from.clone());
+        }
+    }
+    for parents in reverse.values_mut() {
+        parents.sort();
+        parents.dedup();
+    }
+    reverse
+}
+
+fn combine_certainty(left: &Certainty, right: &Certainty) -> Certainty {
+    if certainty_rank(left) >= certainty_rank(right) {
+        left.clone()
+    } else {
+        right.clone()
+    }
+}
+
+fn entry_certainty_note(certainty: &Certainty) -> Option<String> {
+    match certainty {
+        Certainty::Exact => Some(
+            "Higher confidence — static imports are exhaustively detected.".to_string(),
+        ),
+        Certainty::Heuristic => Some(
+            "Dynamic imports may create edges not captured by static analysis.".to_string(),
+        ),
+        _ => None,
+    }
+}
+
 fn cycle_records_from_file_edges(all_files: &[RepoPath], edges: &[ArchFileEdge]) -> Vec<CycleRecord> {
     let mut adjacency: HashMap<RepoPath, Vec<RepoPath>> = HashMap::new();
     let mut reverse_adjacency: HashMap<RepoPath, Vec<RepoPath>> = HashMap::new();
@@ -4375,6 +5492,24 @@ mod tests {
         }
     }
 
+    fn import_extract(source: &FileRecord, target: &FileRecord) -> ExtractResult {
+        ExtractResult {
+            file: source.clone(),
+            imports: vec![ImportRecord {
+                file: source.path.clone(),
+                raw_text: format!("use {};", target.path.0),
+                import_path: ImportPath::Relative(target.path.clone()),
+                span: sample_span(1),
+                certainty: Certainty::Exact,
+            }],
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: Vec::new(),
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        }
+    }
+
     #[test]
     fn opens_and_bootstraps_new_database() {
         let dir = unique_temp_dir("db-open");
@@ -4727,6 +5862,122 @@ mod tests {
             reverse[0].import_text.as_deref(),
             Some("use crate::parser;")
         );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn entry_queries_detect_zero_in_degree_entries_and_unreachable_files() {
+        let dir = unique_temp_dir("db-entry-queries");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let entry = sample_file("src/main.rs");
+        let parser = sample_file("src/parser.rs");
+        let leaf = sample_file("src/leaf.rs");
+        let mut dead = sample_file("src/dead.rs");
+        dead.mtime_unix_seconds = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        );
+        store.upsert_file(&entry).unwrap();
+        store.upsert_file(&parser).unwrap();
+        store.upsert_file(&leaf).unwrap();
+        store.upsert_file(&dead).unwrap();
+        store.persist_extract_result(&import_extract(&entry, &parser)).unwrap();
+        store.persist_extract_result(&import_extract(&parser, &leaf)).unwrap();
+        store
+            .persist_extract_result(&ExtractResult {
+                file: dead.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/dead.rs",
+                    "dead_api",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            })
+            .unwrap();
+
+        let config = ArchConfig::default();
+        let list = store.query_entry_list(&config).unwrap();
+        assert_eq!(list.entry_points.len(), 1);
+        assert_eq!(list.entry_points[0].file, entry.path);
+        assert_eq!(list.entry_points[0].detection, EntryPointDetection::ZeroInDegree);
+
+        let cone = store.query_entry_cone(&config, &entry.path).unwrap();
+        assert_eq!(cone.summary.reachable_files, 3);
+        assert_eq!(cone.summary.max_distance, 2);
+        let cone_files = cone
+            .reachable
+            .iter()
+            .map(|record| (record.file.clone(), record.distance))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cone_files,
+            vec![
+                (entry.path.clone(), 0),
+                (parser.path.clone(), 1),
+                (leaf.path.clone(), 2),
+            ]
+        );
+
+        let reaches = store.query_entry_reaches(&config, &leaf.path).unwrap();
+        assert_eq!(reaches.summary.reaching_entry_points, 1);
+        assert_eq!(reaches.summary.nearest_distance, Some(2));
+        assert_eq!(reaches.entry_points[0].file, entry.path);
+
+        let unreachable = store.query_entry_unreachable(&config, None).unwrap();
+        assert_eq!(unreachable.total_files, 4);
+        assert_eq!(unreachable.reachable_files, 3);
+        assert_eq!(unreachable.unreachable_files, 1);
+        assert_eq!(unreachable.unreachable[0].file, dead.path);
+        assert_eq!(unreachable.unreachable[0].exported_symbols, 1);
+        assert_eq!(unreachable.unreachable[0].certainty, Certainty::Exact);
+
+        let filtered = store.query_entry_unreachable(&config, Some(10)).unwrap();
+        assert_eq!(filtered.unreachable_files, 0);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn entry_queries_honor_configured_entry_points() {
+        let dir = unique_temp_dir("db-entry-config");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let server = sample_file("src/server.rs");
+        let cli = sample_file("src/cli.rs");
+        let shared = sample_file("src/shared.rs");
+        store.upsert_file(&server).unwrap();
+        store.upsert_file(&cli).unwrap();
+        store.upsert_file(&shared).unwrap();
+        store.persist_extract_result(&import_extract(&server, &shared)).unwrap();
+        store.persist_extract_result(&import_extract(&cli, &shared)).unwrap();
+
+        let config = ArchConfig {
+            entry_points: vec![crate::EntryPointConfig {
+                pattern: "src/cli.rs".to_string(),
+            }],
+            ..ArchConfig::default()
+        };
+
+        let list = store.query_entry_list(&config).unwrap();
+        assert_eq!(list.entry_points.len(), 1);
+        assert_eq!(list.entry_points[0].file, cli.path);
+        assert_eq!(list.entry_points[0].detection, EntryPointDetection::Config);
+
+        let reaches = store.query_entry_reaches(&config, &shared.path).unwrap();
+        assert_eq!(reaches.entry_points.len(), 1);
+        assert_eq!(reaches.entry_points[0].file, cli.path);
+        assert_eq!(reaches.entry_points[0].distance, 1);
 
         std::fs::remove_dir_all(dir).unwrap();
     }

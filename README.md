@@ -171,7 +171,7 @@ Compact mode is intended for agent loops and transport efficiency, not for human
 - `scope` is currently Rust-first in the main CLI path
 - several traversal-oriented commands still return stub JSON while implementation is in progress
 - results are static approximations and may omit dynamic behavior
-- `scope-mcp` is still a stub, so the supported integration surface today is the CLI
+- `scope-mcp` now provides an early MCP/stdIO wrapper over `scope-core`, but the CLI remains the more mature integration surface today
 
 ## Example Current Output
 

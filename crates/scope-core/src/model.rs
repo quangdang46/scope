@@ -521,12 +521,31 @@ pub struct ArchRule {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryPointConfig {
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityConfig {
+    pub name: String,
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub expected_callers: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ArchConfig {
     #[serde(default, rename = "layer")]
     pub layers: Vec<ArchLayer>,
     #[serde(default, rename = "rule")]
     pub rules: Vec<ArchRule>,
+    #[serde(default, rename = "entry_point")]
+    pub entry_points: Vec<EntryPointConfig>,
+    #[serde(default, rename = "capability")]
+    pub capabilities: Vec<CapabilityConfig>,
     #[serde(default, rename = "tests")]
     pub tests: TestConfig,
 }
@@ -554,6 +573,245 @@ pub struct ArchCheckResult {
     pub checked_edges: usize,
     pub checked_layered_edges: usize,
     pub violations: Vec<ArchViolation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryPointDetection {
+    Config,
+    ZeroInDegree,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryPointRecord {
+    pub file: RepoPath,
+    pub detection: EntryPointDetection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryReachableRecord {
+    pub file: RepoPath,
+    pub distance: u32,
+    pub certainty: Certainty,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryListSummary {
+    pub entry_points: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryListResult {
+    pub entry_points: Vec<EntryPointRecord>,
+    pub summary: EntryListSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryConeSummary {
+    pub reachable_files: usize,
+    pub max_distance: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryConeResult {
+    pub entry: RepoPath,
+    pub reachable: Vec<EntryReachableRecord>,
+    pub summary: EntryConeSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryReachesSummary {
+    pub reaching_entry_points: usize,
+    pub nearest_distance: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryReachesResult {
+    pub target: RepoPath,
+    pub entry_points: Vec<EntryReachableRecord>,
+    pub summary: EntryReachesSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryUnreachableRecord {
+    pub file: RepoPath,
+    pub last_modified_days_ago: Option<u64>,
+    pub exported_symbols: usize,
+    pub certainty: Certainty,
+    pub certainty_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntryUnreachableResult {
+    pub entry_points: Vec<EntryPointRecord>,
+    pub total_files: usize,
+    pub reachable_files: usize,
+    pub unreachable_files: usize,
+    pub min_age_days: Option<u64>,
+    pub unreachable: Vec<EntryUnreachableRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditCapabilitySource {
+    pub kind: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditEntryReachRecord {
+    pub entry_point: RepoPath,
+    pub distance: u32,
+    pub certainty: Certainty,
+    pub expected: bool,
+    pub path: Vec<RepoPath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditSummary {
+    pub capability_sources: usize,
+    pub reaching_entry_points: usize,
+    pub expected_entry_points: usize,
+    pub unexpected_entry_points: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditResult {
+    pub capability: String,
+    pub capability_sources: Vec<AuditCapabilitySource>,
+    pub entry_points: Vec<EntryPointRecord>,
+    pub reaches: Vec<AuditEntryReachRecord>,
+    pub summary: AuditSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GateSeverity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GateMetric {
+    LayerViolations,
+    Cycles,
+    MaxFileFanIn,
+    ParseErrors,
+    UnreachableFiles,
+    UnusedExports,
+    HealthScore,
+    HealthScoreDelta,
+    ImportsUnresolvedPct,
+    ImportsResolvedPct,
+    PublicSurfaceRemoved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateConfig {
+    pub metric: GateMetric,
+    pub max: Option<f64>,
+    pub min: Option<f64>,
+    pub max_delta: Option<f64>,
+    pub min_delta: Option<f64>,
+    pub severity: GateSeverity,
+    pub message: Option<String>,
+    #[serde(default)]
+    pub skip: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GatesConfig {
+    #[serde(default, rename = "gate")]
+    pub gates: Vec<GateConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HealthReportMetrics {
+    pub total_files: usize,
+    pub total_symbols: usize,
+    pub total_imports: usize,
+    pub unresolved_imports: usize,
+    pub imports_unresolved_pct: f64,
+    pub imports_resolved_pct: f64,
+    pub parse_errors: usize,
+    pub layer_violations: usize,
+    pub cycles: usize,
+    pub max_file_fan_in: usize,
+    pub avg_instability: f64,
+    pub unreachable_files: usize,
+    pub unused_exports: usize,
+    pub public_surface_removed: usize,
+    pub health_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HealthReportComparison {
+    pub target: String,
+    pub baseline_health_score: f64,
+    pub health_score_delta: f64,
+    pub baseline_layer_violations: usize,
+    pub layer_violations_delta: isize,
+    pub baseline_cycles: usize,
+    pub cycles_delta: isize,
+    pub baseline_unreachable_files: usize,
+    pub unreachable_files_delta: isize,
+    pub baseline_public_surface_removed: usize,
+    pub public_surface_removed_delta: isize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HealthReportResult {
+    pub generated_at: i64,
+    pub compare: Option<HealthReportComparison>,
+    pub metrics: HealthReportMetrics,
+    pub risk_hotspots: Vec<RiskRecord>,
+    pub arch_violations: Vec<ArchViolation>,
+    pub cycles_detail: Vec<CycleRecord>,
+    pub unreachable_detail: Vec<EntryUnreachableRecord>,
+    pub unused_export_detail: Vec<UnusedRecord>,
+    pub recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GateStatus {
+    Pass,
+    Warning,
+    Fail,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateEvaluation {
+    pub metric: GateMetric,
+    pub status: GateStatus,
+    pub severity: GateSeverity,
+    pub current_value: f64,
+    pub baseline_value: Option<f64>,
+    pub delta: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub min_delta: Option<f64>,
+    pub max_delta: Option<f64>,
+    pub message: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateSummary {
+    pub total: usize,
+    pub passed: usize,
+    pub warnings: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateResult {
+    pub compare: Option<String>,
+    pub report: HealthReportResult,
+    pub summary: GateSummary,
+    pub evaluations: Vec<GateEvaluation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -724,6 +982,45 @@ pub struct RiskResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CochangeSort {
+    Score,
+    SharedCommits,
+    Path,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CochangeRecord {
+    pub path: RepoPath,
+    pub shared_commits: usize,
+    pub target_commits: usize,
+    pub candidate_commits: usize,
+    pub score: f64,
+    pub normalized_score: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CochangeSummary {
+    pub git_available: bool,
+    pub target_commits: usize,
+    pub related_files: usize,
+    pub max_shared_commits: usize,
+    pub max_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CochangeResult {
+    pub target: RepoPath,
+    pub top: Option<usize>,
+    pub days: u32,
+    pub min_shared_commits: usize,
+    pub sort: CochangeSort,
+    pub files: Vec<CochangeRecord>,
+    pub summary: CochangeSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnusedRecord {
     pub file: RepoPath,
     pub name: String,
@@ -827,4 +1124,79 @@ pub struct TreeResult {
     pub depth: Option<usize>,
     pub tree: TreeNode,
     pub summary: TreeSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SplitClusterMember {
+    pub qualname: String,
+    pub name: String,
+    pub kind: SymbolKind,
+    pub exported: bool,
+    pub inbound_calls: usize,
+    pub inbound_files: usize,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SplitCluster {
+    pub id: usize,
+    pub members: Vec<SplitClusterMember>,
+    pub cohesion_score: f64,
+    pub suggested_name: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SplitSummary {
+    pub target_symbols: usize,
+    pub exported_symbols: usize,
+    pub clusters: usize,
+    pub isolated_symbols: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SplitResult {
+    pub target: RepoPath,
+    pub requested_clusters: Option<usize>,
+    pub warnings: Vec<String>,
+    pub clusters: Vec<SplitCluster>,
+    pub summary: SplitSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MirrorSignature {
+    pub language: String,
+    pub imports: Vec<String>,
+    pub exported_symbol_kinds: Vec<String>,
+    pub inbound_neighbor_count: usize,
+    pub outbound_neighbor_count: usize,
+    pub exported_symbol_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MirrorMatch {
+    pub path: RepoPath,
+    pub score: f64,
+    pub normalized_score: u32,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MirrorSummary {
+    pub candidates_considered: usize,
+    pub matches_returned: usize,
+    pub threshold: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MirrorResult {
+    pub target: RepoPath,
+    pub other: Option<RepoPath>,
+    pub threshold: Option<u32>,
+    pub top: Option<usize>,
+    pub target_signature: MirrorSignature,
+    pub other_signature: Option<MirrorSignature>,
+    pub similarity_score: Option<f64>,
+    pub matches: Vec<MirrorMatch>,
+    pub summary: MirrorSummary,
 }

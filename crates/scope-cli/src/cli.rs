@@ -44,12 +44,16 @@ pub enum Commands {
     Pack(PackArgs),
     /// Check architecture rules against indexed file dependencies
     Arch(ArchArgs),
+    /// Trace entry points that can reach a configured sensitive capability
+    Audit(AuditArgs),
     /// Query the public API surface for a file or symbol target
     Surface(SurfaceArgs),
     /// Report Martin instability scores from indexed file dependencies
     Stability(StabilityArgs),
     /// Report churn-weighted risk scores from indexed file dependencies
     Risk(RiskArgs),
+    /// Report files that frequently change with a target file across recent commits
+    Cochange(CochangeArgs),
     /// Build static test coverage topology from file imports
     TestMap(TestMapArgs),
     /// Build a conservative rename execution plan for a file or symbol target
@@ -66,6 +70,8 @@ pub enum Commands {
     Diff(DiffArgs),
     /// Render a recursive dependency tree for an indexed file
     Tree(TreeArgs),
+    /// Detect entry points and analyze file reachability
+    Entry(EntryArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
@@ -201,6 +207,12 @@ pub enum ArchCommand {
 pub struct ArchCheckArgs {}
 
 #[derive(Debug, clap::Args)]
+pub struct AuditArgs {
+    #[arg(long)]
+    pub capability: String,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct SurfaceArgs {
     #[command(subcommand)]
     pub command: Option<SurfaceCommand>,
@@ -257,6 +269,26 @@ pub struct RiskArgs {
     pub top: Option<usize>,
     #[arg(long, value_enum, default_value_t = RiskSortArg::Score)]
     pub sort: RiskSortArg,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum CochangeSortArg {
+    Score,
+    SharedCommits,
+    Path,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CochangeArgs {
+    pub target: String,
+    #[arg(long, default_value_t = 90)]
+    pub days: u32,
+    #[arg(long, default_value_t = 1)]
+    pub min_shared_commits: usize,
+    #[arg(long)]
+    pub top: Option<usize>,
+    #[arg(long, value_enum, default_value_t = CochangeSortArg::Score)]
+    pub sort: CochangeSortArg,
 }
 
 #[derive(Debug, clap::Args)]
@@ -353,6 +385,35 @@ pub struct TreeArgs {
     pub reverse: bool,
     #[arg(long)]
     pub depth: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct EntryArgs {
+    #[command(subcommand)]
+    pub command: EntryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EntryCommand {
+    /// List detected entry points
+    List,
+    /// Show files reachable from an entry point
+    Cone(EntryTargetArgs),
+    /// Show which entry points can reach a target file
+    Reaches(EntryTargetArgs),
+    /// Show indexed files reachable from no detected entry point
+    Unreachable(EntryUnreachableArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct EntryTargetArgs {
+    pub target: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct EntryUnreachableArgs {
+    #[arg(long)]
+    pub min_age_days: Option<u64>,
 }
 
 #[derive(Debug, clap::Args)]

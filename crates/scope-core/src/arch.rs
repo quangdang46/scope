@@ -88,6 +88,8 @@ pub fn arch_check_edges(
 
 fn validate_arch_config(config: &ArchConfig) -> ScopeResult<()> {
     validate_test_config(&config.tests)?;
+    validate_entry_point_config(&config.entry_points)?;
+    validate_capability_config(&config.capabilities)?;
 
     if config.layers.is_empty() {
         return Ok(());
@@ -143,6 +145,58 @@ pub fn validate_test_config(config: &TestConfig) -> ScopeResult<()> {
     Ok(())
 }
 
+pub fn validate_entry_point_config(config: &[crate::EntryPointConfig]) -> ScopeResult<()> {
+    for entry_point in config {
+        Pattern::new(&entry_point.pattern).map_err(|error| {
+            ScopeError::InvalidInput(format!(
+                "invalid entry point pattern '{}': {error}",
+                entry_point.pattern
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+pub fn validate_capability_config(config: &[crate::CapabilityConfig]) -> ScopeResult<()> {
+    let mut names = HashSet::new();
+    for capability in config {
+        if capability.name.trim().is_empty() {
+            return Err(ScopeError::InvalidInput(
+                "capability name may not be empty".to_string(),
+            ));
+        }
+        if !names.insert(capability.name.as_str()) {
+            return Err(ScopeError::InvalidInput(format!(
+                "duplicate capability name: {}",
+                capability.name
+            )));
+        }
+        if capability.pattern.is_none() && capability.symbols.is_empty() {
+            return Err(ScopeError::InvalidInput(format!(
+                "capability '{}' must declare a pattern or symbols",
+                capability.name
+            )));
+        }
+        if let Some(pattern) = &capability.pattern {
+            Pattern::new(pattern).map_err(|error| {
+                ScopeError::InvalidInput(format!(
+                    "invalid capability pattern '{}': {error}",
+                    pattern
+                ))
+            })?;
+        }
+        for pattern in &capability.expected_callers {
+            Pattern::new(pattern).map_err(|error| {
+                ScopeError::InvalidInput(format!(
+                    "invalid capability expected_callers pattern '{}': {error}",
+                    pattern
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn resolve_layer<'a>(
     layers: &'a [ArchLayer],
     path: &RepoPath,
@@ -167,6 +221,7 @@ fn _edge(_edge: &ArchFileEdge, _rule: &ArchRule) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CapabilityConfig;
 
     #[test]
     fn validates_unknown_rule_layer() {
@@ -181,6 +236,8 @@ mod tests {
                 may_not_import: vec!["services".to_string()],
                 message: None,
             }],
+            entry_points: Vec::new(),
+            capabilities: Vec::new(),
             tests: TestConfig::default(),
         };
 
@@ -218,5 +275,45 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("invalid test pattern"));
+    }
+
+    #[test]
+    fn validates_invalid_entry_point_pattern() {
+        let error = validate_entry_point_config(&[crate::EntryPointConfig {
+            pattern: "[".to_string(),
+        }])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid entry point pattern"));
+    }
+
+    #[test]
+    fn validates_capability_requirements() {
+        let error = validate_capability_config(&[CapabilityConfig {
+            name: "network".to_string(),
+            pattern: None,
+            symbols: Vec::new(),
+            expected_callers: Vec::new(),
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("must declare a pattern or symbols"));
+
+        let error = validate_capability_config(&[CapabilityConfig {
+            name: "network".to_string(),
+            pattern: Some("[".to_string()),
+            symbols: Vec::new(),
+            expected_callers: Vec::new(),
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid capability pattern"));
+
+        let error = validate_capability_config(&[CapabilityConfig {
+            name: "network".to_string(),
+            pattern: Some("src/**".to_string()),
+            symbols: Vec::new(),
+            expected_callers: vec!["[".to_string()],
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid capability expected_callers pattern"));
     }
 }
