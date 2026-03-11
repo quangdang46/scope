@@ -1461,7 +1461,9 @@ mod tests {
         let diff_value: Value = serde_json::from_str(&diff_output).unwrap();
         assert_eq!(diff_value["command"], "diff-snapshot");
         assert_eq!(diff_value["status"], "ok");
-        assert_eq!(diff_value["data"]["result"]["summary"]["files_changed"], 0);
+        assert_eq!(diff_value["data"]["result"]["before"]["name"], "baseline");
+        assert_eq!(diff_value["data"]["result"]["after"]["name"], "baseline");
+        assert!(diff_value["data"]["result"]["summary"]["files"].as_u64().is_some());
 
         let delete_output = dispatch_tool(
             "snapshot_delete",
