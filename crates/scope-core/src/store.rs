@@ -8,20 +8,23 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::{
-    arch_check_edges, snapshot, ArchConfig, ArchFileEdge, Certainty, ContextFileRecord,
-    ContextFileRole, ContextResult, ContextSummary, DependencyRecord, EdgeKind, ExtractResult,
-    FileRecord, ImportPath, NodeKind, PublicSurface, PublicSurfaceChange,
-    PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
-    RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
-    RiskRecord, RiskResult, RiskSort, RiskSummary, ScopeError, ScopeResult,
-    SnapshotCentralityDelta, SnapshotDeleteResult, SnapshotDiffResult, SnapshotEdgeDelta,
-    SnapshotEdgeRecord, SnapshotFileRecord, SnapshotGraph, SnapshotListResult,
-    SnapshotListSummary, SnapshotMetadata, SnapshotSaveResult, SnapshotStabilityDelta, SnapshotStoredRecord,
-    SnapshotSymbolRecord, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
-    StabilitySummary, SymbolKind, SymbolRecord, TestConfig, TestMapBuildResult,
-    TestMapBuildSummary, TestMapCoveredByResult, TestMapCoveredBySummary,
-    TestMapCoversResult, TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult,
-    TestMapUncoveredSummary, TraversalRecord, Visibility,
+    arch_check_edges, snapshot, ArchConfig, ArchFileEdge, BranchDiffAffectedFile,
+    BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary, Certainty, ContextFileRecord,
+    ContextFileRole, ContextResult, ContextSummary, CycleRecord, CycleSeverity, CyclesResult,
+    CyclesSummary, DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind,
+    PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff,
+    PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan,
+    RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort,
+    RiskSummary, ScopeError, ScopeResult, SnapshotCentralityDelta, SnapshotDeleteResult,
+    SnapshotDiffResult, SnapshotEdgeDelta, SnapshotEdgeRecord, SnapshotFileRecord,
+    SnapshotGraph, SnapshotListResult, SnapshotListSummary, SnapshotMetadata,
+    SnapshotSaveResult, SnapshotStabilityDelta, SnapshotStoredRecord, SnapshotSymbolRecord,
+    StabilityCategory, StabilityRecord, StabilityResult, StabilitySort, StabilitySummary,
+    SymbolKind, SymbolRecord, TestConfig, TestMapBuildResult, TestMapBuildSummary,
+    TestMapCoveredByResult, TestMapCoveredBySummary, TestMapCoversResult,
+    TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult, TestMapUncoveredSummary,
+    TraversalRecord, TreeNode, TreeResult, TreeSummary, UnusedRecord, UnusedResult,
+    UnusedSummary, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
@@ -986,6 +989,198 @@ impl Store {
             sort,
             files: records,
             summary,
+        })
+    }
+
+    pub fn query_unused(&self) -> ScopeResult<UnusedResult> {
+        let mut statement = self.connection.prepare(
+            "SELECT files.path, symbols.name, symbols.qualname, symbols.kind, symbols.visibility, symbols.start_line,
+                    COUNT(DISTINCT symbol_edges.from_symbol_id) AS inbound_calls
+             FROM symbols
+             JOIN files ON files.id = symbols.file_id
+             LEFT JOIN symbol_edges ON symbol_edges.to_symbol_id = symbols.id AND symbol_edges.kind = 'call'
+             WHERE symbols.exported = 1
+             GROUP BY files.path, symbols.name, symbols.qualname, symbols.kind, symbols.visibility, symbols.start_line
+             ORDER BY files.path ASC, symbols.start_line ASC, symbols.qualname ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(UnusedRecord {
+                file: RepoPath(row.get::<_, String>(0)?),
+                name: row.get(1)?,
+                qualname: row.get(2)?,
+                kind: symbol_kind_from_db(&row.get::<_, String>(3)?),
+                visibility: visibility_from_db(&row.get::<_, String>(4)?),
+                line: row.get::<_, i64>(5)? as u32,
+                inbound_references: row.get::<_, i64>(6)? as usize,
+                reason: String::new(),
+            })
+        })?;
+
+        let exported_symbols = rows.collect::<Result<Vec<_>, _>>()?;
+        let symbols = exported_symbols
+            .iter()
+            .filter(|record| record.inbound_references == 0)
+            .map(|record| UnusedRecord {
+                reason: format!(
+                    "exported symbol `{}` has no indexed inbound call edges",
+                    record.qualname
+                ),
+                ..record.clone()
+            })
+            .collect::<Vec<_>>();
+
+        Ok(UnusedResult {
+            summary: UnusedSummary {
+                exported_symbols: exported_symbols.len(),
+                unused_symbols: symbols.len(),
+            },
+            symbols,
+        })
+    }
+
+    pub fn query_cycles(&self, severity: Option<CycleSeverity>) -> ScopeResult<CyclesResult> {
+        let all_files = self.list_indexed_files()?;
+        let edges = self.query_file_edges()?;
+        let cycles = cycle_records_from_file_edges(&all_files, &edges);
+        let summary = cycles_summary(&cycles);
+        let cycles = match severity.clone() {
+            Some(level) => cycles
+                .into_iter()
+                .filter(|record| record.severity == level)
+                .collect(),
+            None => cycles,
+        };
+        Ok(CyclesResult {
+            severity,
+            cycles,
+            summary,
+        })
+    }
+
+    pub fn query_branch_diff(&self, repo_root: &Path, branch: &str) -> ScopeResult<BranchDiffResult> {
+        if branch.trim().is_empty() {
+            return Err(ScopeError::InvalidInput(
+                "diff branch may not be empty".to_string(),
+            ));
+        }
+
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .arg("diff")
+            .arg("--name-only")
+            .arg(branch)
+            .output()
+            .map_err(|error| ScopeError::io(repo_root, error))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.contains("Not a git repository") {
+                return Ok(BranchDiffResult {
+                    branch: branch.to_string(),
+                    summary: BranchDiffSummary {
+                        changed_files: 0,
+                        affected_files: 0,
+                    },
+                    changed_files: Vec::new(),
+                    affected_files: Vec::new(),
+                });
+            }
+            return Err(ScopeError::InvalidInput(if stderr.is_empty() {
+                format!("git diff --name-only {branch} failed")
+            } else {
+                format!("git diff --name-only {branch} failed: {stderr}")
+            }));
+        }
+
+        let changed_paths = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| RepoPath::from(line.to_string()))
+            .collect::<Vec<_>>();
+
+        let mut changed_files = Vec::new();
+        let mut affected_by_path: HashMap<RepoPath, HashSet<RepoPath>> = HashMap::new();
+        for path in changed_paths {
+            if self.file_id(&path)?.is_none() {
+                continue;
+            }
+            let dependents = self.reverse_dependency_closure(std::slice::from_ref(&path))?;
+            changed_files.push(BranchDiffChangedFile {
+                path: path.clone(),
+                dependents: dependents.len(),
+            });
+            for dependent in dependents {
+                affected_by_path
+                    .entry(dependent)
+                    .or_default()
+                    .insert(path.clone());
+            }
+        }
+
+        changed_files.sort_by(|left, right| left.path.0.cmp(&right.path.0));
+        let mut affected_files = affected_by_path
+            .into_iter()
+            .map(|(path, changed_roots)| {
+                let mut changed_roots = changed_roots.into_iter().collect::<Vec<_>>();
+                changed_roots.sort();
+                BranchDiffAffectedFile { path, changed_roots }
+            })
+            .collect::<Vec<_>>();
+        affected_files.sort_by(|left, right| left.path.0.cmp(&right.path.0));
+
+        Ok(BranchDiffResult {
+            branch: branch.to_string(),
+            summary: BranchDiffSummary {
+                changed_files: changed_files.len(),
+                affected_files: affected_files.len(),
+            },
+            changed_files,
+            affected_files,
+        })
+    }
+
+    pub fn query_tree(
+        &self,
+        target: &RepoPath,
+        reverse: bool,
+        depth: Option<usize>,
+    ) -> ScopeResult<TreeResult> {
+        if self.file_id(target)?.is_none() {
+            return Err(ScopeError::InvalidInput(format!("file not indexed: {}", target.0)));
+        }
+
+        let mut adjacency: HashMap<RepoPath, Vec<RepoPath>> = HashMap::new();
+        for edge in self
+            .query_file_edges()?
+            .into_iter()
+            .filter(|edge| matches!(edge.edge_kind, EdgeKind::Import | EdgeKind::Contain))
+        {
+            let (from, to) = if reverse {
+                (edge.to_file, edge.from_file)
+            } else {
+                (edge.from_file, edge.to_file)
+            };
+            adjacency.entry(from).or_default().push(to);
+        }
+        for children in adjacency.values_mut() {
+            children.sort();
+            children.dedup();
+        }
+
+        let mut active = HashSet::new();
+        let tree = build_tree_node(target, &adjacency, depth, &mut active);
+        Ok(TreeResult {
+            target: target.clone(),
+            reverse,
+            depth,
+            summary: TreeSummary {
+                reverse,
+                depth,
+                nodes: count_tree_nodes(&tree),
+            },
+            tree,
         })
     }
 
@@ -3521,6 +3716,220 @@ fn sort_risk_records(records: &mut [RiskRecord], sort: RiskSort) {
         }),
         RiskSort::Path => records.sort_by(|left, right| left.path.0.cmp(&right.path.0)),
     }
+}
+
+fn cycle_records_from_file_edges(all_files: &[RepoPath], edges: &[ArchFileEdge]) -> Vec<CycleRecord> {
+    let mut adjacency: HashMap<RepoPath, Vec<RepoPath>> = HashMap::new();
+    let mut reverse_adjacency: HashMap<RepoPath, Vec<RepoPath>> = HashMap::new();
+    for path in all_files {
+        adjacency.entry(path.clone()).or_default();
+        reverse_adjacency.entry(path.clone()).or_default();
+    }
+    for edge in edges.iter().filter(|edge| edge.edge_kind == EdgeKind::Import) {
+        adjacency
+            .entry(edge.from_file.clone())
+            .or_default()
+            .push(edge.to_file.clone());
+        reverse_adjacency
+            .entry(edge.to_file.clone())
+            .or_default()
+            .push(edge.from_file.clone());
+    }
+    for children in adjacency.values_mut() {
+        children.sort();
+        children.dedup();
+    }
+    for parents in reverse_adjacency.values_mut() {
+        parents.sort();
+        parents.dedup();
+    }
+
+    let components = strongly_connected_components(all_files, &adjacency, &reverse_adjacency);
+    let mut cycles = components
+        .into_iter()
+        .filter(|component| component.len() > 1 || component_has_self_loop(component, &adjacency))
+        .map(|mut component| {
+            component.sort();
+            let component_set: HashSet<_> = component.iter().cloned().collect();
+            let edge_count = component
+                .iter()
+                .map(|path| {
+                    adjacency
+                        .get(path)
+                        .into_iter()
+                        .flatten()
+                        .filter(|target| component_set.contains(*target))
+                        .count()
+                })
+                .sum::<usize>();
+            let external_dependents = component
+                .iter()
+                .flat_map(|path| reverse_adjacency.get(path).into_iter().flatten())
+                .filter(|path| !component_set.contains(*path))
+                .cloned()
+                .collect::<HashSet<_>>()
+                .len();
+            let severity = cycle_severity(component.len(), external_dependents);
+            let reason = format!(
+                "{} file cycle with {} internal edges and {} external dependents",
+                component.len(),
+                edge_count,
+                external_dependents
+            );
+            CycleRecord {
+                files: component,
+                edge_count,
+                external_dependents,
+                severity,
+                reason,
+            }
+        })
+        .collect::<Vec<_>>();
+    cycles.sort_by(|left, right| {
+        right
+            .severity
+            .cmp(&left.severity)
+            .then(right.external_dependents.cmp(&left.external_dependents))
+            .then(right.files.len().cmp(&left.files.len()))
+            .then(left.files.cmp(&right.files))
+    });
+    cycles
+}
+
+fn cycles_summary(records: &[CycleRecord]) -> CyclesSummary {
+    let mut summary = CyclesSummary {
+        cycle_count: records.len(),
+        low_count: 0,
+        medium_count: 0,
+        high_count: 0,
+    };
+    for record in records {
+        match record.severity {
+            CycleSeverity::Low => summary.low_count += 1,
+            CycleSeverity::Medium => summary.medium_count += 1,
+            CycleSeverity::High => summary.high_count += 1,
+        }
+    }
+    summary
+}
+
+fn cycle_severity(size: usize, external_dependents: usize) -> CycleSeverity {
+    if size >= 4 || external_dependents >= 3 {
+        CycleSeverity::High
+    } else if size >= 3 || external_dependents >= 1 {
+        CycleSeverity::Medium
+    } else {
+        CycleSeverity::Low
+    }
+}
+
+fn component_has_self_loop(component: &[RepoPath], adjacency: &HashMap<RepoPath, Vec<RepoPath>>) -> bool {
+    component.iter().any(|path| {
+        adjacency
+            .get(path)
+            .into_iter()
+            .flatten()
+            .any(|target| target == path)
+    })
+}
+
+fn strongly_connected_components(
+    all_files: &[RepoPath],
+    adjacency: &HashMap<RepoPath, Vec<RepoPath>>,
+    reverse_adjacency: &HashMap<RepoPath, Vec<RepoPath>>,
+) -> Vec<Vec<RepoPath>> {
+    fn dfs(
+        node: &RepoPath,
+        graph: &HashMap<RepoPath, Vec<RepoPath>>,
+        visited: &mut HashSet<RepoPath>,
+        order: &mut Vec<RepoPath>,
+    ) {
+        if !visited.insert(node.clone()) {
+            return;
+        }
+        if let Some(neighbors) = graph.get(node) {
+            for neighbor in neighbors {
+                dfs(neighbor, graph, visited, order);
+            }
+        }
+        order.push(node.clone());
+    }
+
+    let mut visited = HashSet::new();
+    let mut order = Vec::new();
+    for node in all_files {
+        dfs(node, adjacency, &mut visited, &mut order);
+    }
+
+    fn collect(
+        node: &RepoPath,
+        graph: &HashMap<RepoPath, Vec<RepoPath>>,
+        visited: &mut HashSet<RepoPath>,
+        component: &mut Vec<RepoPath>,
+    ) {
+        if !visited.insert(node.clone()) {
+            return;
+        }
+        component.push(node.clone());
+        if let Some(neighbors) = graph.get(node) {
+            for neighbor in neighbors {
+                collect(neighbor, graph, visited, component);
+            }
+        }
+    }
+
+    let mut assigned = HashSet::new();
+    let mut components = Vec::new();
+    while let Some(node) = order.pop() {
+        if assigned.contains(&node) {
+            continue;
+        }
+        let mut component = Vec::new();
+        collect(&node, reverse_adjacency, &mut assigned, &mut component);
+        components.push(component);
+    }
+    components
+}
+
+fn build_tree_node(
+    path: &RepoPath,
+    adjacency: &HashMap<RepoPath, Vec<RepoPath>>,
+    depth: Option<usize>,
+    active: &mut HashSet<RepoPath>,
+) -> TreeNode {
+    let truncated = matches!(depth, Some(0));
+    if !active.insert(path.clone()) {
+        return TreeNode {
+            path: path.clone(),
+            children: Vec::new(),
+            truncated: false,
+            cycle: true,
+        };
+    }
+
+    let children = if truncated {
+        Vec::new()
+    } else {
+        adjacency
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|child| build_tree_node(&child, adjacency, depth.map(|value| value.saturating_sub(1)), active))
+            .collect()
+    };
+    active.remove(path);
+
+    TreeNode {
+        path: path.clone(),
+        children,
+        truncated,
+        cycle: false,
+    }
+}
+
+fn count_tree_nodes(node: &TreeNode) -> usize {
+    1 + node.children.iter().map(count_tree_nodes).sum::<usize>()
 }
 
 fn visibility_from_db(value: &str) -> Visibility {

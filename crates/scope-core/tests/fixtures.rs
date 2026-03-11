@@ -5,10 +5,10 @@ use std::{
 };
 
 use scope_core::{
-    adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty, EdgeKind,
-    NodeKind, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceSymbol, RepoPath,
-    ScanConfig, SnapshotDeleteResult, SnapshotListSummary, Store, SupportedLanguage,
-    SymbolKind, TraversalRecord, Visibility,
+    adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty,
+    CycleSeverity, EdgeKind, NodeKind, PublicSurfaceChange, PublicSurfaceChangeKind,
+    PublicSurfaceSymbol, RepoPath, ScanConfig, SnapshotDeleteResult, SnapshotListSummary,
+    Store, SupportedLanguage, SymbolKind, TraversalRecord, Visibility,
 };
 
 fn repo_root() -> PathBuf {
@@ -1022,6 +1022,55 @@ fn risk_query_reports_expected_scores_and_fallbacks() {
             None,
             scope_core::RiskSort::Score,
         ),
+        Err(scope_core::ScopeError::InvalidInput(_))
+    ));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn utility_queries_report_expected_results_for_rust_small_fixture() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+
+    let unused = store.query_unused().unwrap();
+    assert_eq!(unused.summary.exported_symbols, 8);
+    assert_eq!(unused.summary.unused_symbols, 6);
+    assert_eq!(unused.symbols[0].qualname, "lib::parser");
+    let unused_actual = serde_json::to_string_pretty(&stub::unused(unused.clone())).unwrap();
+    let unused_expected = read_golden("rust_small_unused.json");
+    assert_eq!(unused_actual, unused_expected);
+
+    let cycles = store.query_cycles(None).unwrap();
+    assert_eq!(cycles.summary.cycle_count, 0);
+    assert!(cycles.cycles.is_empty());
+    let cycles_actual = serde_json::to_string_pretty(&stub::cycles(cycles.clone())).unwrap();
+    let cycles_expected = read_golden("rust_small_cycles.json");
+    assert_eq!(cycles_actual, cycles_expected);
+
+    let tree = store
+        .query_tree(&RepoPath::from("src/lib.rs"), false, Some(2))
+        .unwrap();
+    assert_eq!(tree.target, RepoPath::from("src/lib.rs"));
+    assert_eq!(tree.summary.nodes, 5);
+    let tree_actual = serde_json::to_string_pretty(&stub::tree(tree.clone())).unwrap();
+    let tree_expected = read_golden("rust_small_tree.json");
+    assert_eq!(tree_actual, tree_expected);
+
+    let diff = store.query_branch_diff(&repo, "HEAD").unwrap();
+    assert_eq!(diff.branch, "HEAD");
+    assert_eq!(diff.summary.changed_files, 0);
+    assert!(diff.affected_files.is_empty());
+    let diff_actual = serde_json::to_string_pretty(&stub::diff(diff.clone())).unwrap();
+    let diff_expected = read_golden("rust_small_diff_head.json");
+    assert_eq!(diff_actual, diff_expected);
+
+    assert!(matches!(
+        store.query_cycles(Some(CycleSeverity::High)).unwrap().severity,
+        Some(CycleSeverity::High)
+    ));
+    assert!(matches!(
+        store.query_tree(&RepoPath::from("src/missing.rs"), false, None),
         Err(scope_core::ScopeError::InvalidInput(_))
     ));
 

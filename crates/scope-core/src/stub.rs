@@ -3,12 +3,13 @@ use serde::Serialize;
 use crate::{
     json::JsonEnvelope,
     model::{
-        ArchCheckResult, Certainty, ContextResult, DependencyRecord, EdgeKind, ImpactChangeType,
-        ImpactTraversalRule, NodeKind, PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath,
-        RiskResult, SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult,
-        SnapshotSaveResult, Span, StabilityResult, SymbolKind, SymbolRecord,
-        TestMapBuildResult, TestMapCoveredByResult, TestMapCoversResult,
-        TestMapUncoveredResult, TraversalRecord, Visibility,
+        ArchCheckResult, BranchDiffResult, Certainty, ContextResult, CyclesResult,
+        DependencyRecord, EdgeKind, ImpactChangeType, ImpactTraversalRule, NodeKind,
+        PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult,
+        SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult, SnapshotSaveResult, Span,
+        StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult, TestMapCoveredByResult,
+        TestMapCoversResult, TestMapUncoveredResult, TraversalRecord, TreeResult, UnusedResult,
+        Visibility,
     },
     DatabaseInfo, IndexHealthStats,
 };
@@ -166,6 +167,26 @@ pub struct StabilityData {
 #[derive(Debug, Serialize)]
 pub struct RiskData {
     pub result: RiskResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnusedData {
+    pub result: UnusedResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CyclesData {
+    pub result: CyclesResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiffData {
+    pub result: BranchDiffResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TreeData {
+    pub result: TreeResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -620,6 +641,22 @@ pub fn stability(result: StabilityResult) -> JsonEnvelope<StabilityData> {
 
 pub fn risk(result: RiskResult) -> JsonEnvelope<RiskData> {
     JsonEnvelope::success("risk", RiskData { result })
+}
+
+pub fn unused(result: UnusedResult) -> JsonEnvelope<UnusedData> {
+    JsonEnvelope::success("unused", UnusedData { result })
+}
+
+pub fn cycles(result: CyclesResult) -> JsonEnvelope<CyclesData> {
+    JsonEnvelope::success("cycles", CyclesData { result })
+}
+
+pub fn diff(result: BranchDiffResult) -> JsonEnvelope<DiffData> {
+    JsonEnvelope::success("diff", DiffData { result })
+}
+
+pub fn tree(result: TreeResult) -> JsonEnvelope<TreeData> {
+    JsonEnvelope::success("tree", TreeData { result })
 }
 
 pub fn rename_plan(result: RenamePlan) -> JsonEnvelope<RenamePlanData> {

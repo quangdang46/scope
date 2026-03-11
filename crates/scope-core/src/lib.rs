@@ -18,16 +18,13 @@ pub use config::{BootstrapOptions, RuntimePaths};
 pub use error::{ScopeError, ScopeResult};
 pub use json::{JsonEnvelope, JsonStatus, SCHEMA_VERSION};
 pub use model::{
-    ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation, CallSiteRecord,
-    Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary, DependencyRecord,
-    DiagnosticSeverity, EdgeKind, ExportRecord, ExtractResult, FileRecord, ImpactChangeType,
-    ImpactTraversalRule, ImportPath, ImportRecord, ModuleRecord, NodeKind, ParseDiagnostic,
+    ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation,
     BranchDiffAffectedFile, BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary,
     CallSiteRecord, Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary,
-    CycleRecord, CycleSeverity, CyclesResult, CyclesSummary, DependencyRecord, DiagnosticSeverity,
-    EdgeKind, ExportRecord, ExtractResult, FileRecord, ImpactChangeType, ImpactTraversalRule,
-    ImportPath, ImportRecord, ModuleRecord, NodeKind, ParseDiagnostic, ParseStatus,
-    PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff,
+    CycleRecord, CycleSeverity, CyclesResult, CyclesSummary, DependencyRecord,
+    DiagnosticSeverity, EdgeKind, ExportRecord, ExtractResult, FileRecord, ImpactChangeType,
+    ImpactTraversalRule, ImportPath, ImportRecord, ModuleRecord, NodeKind, ParseDiagnostic,
+    ParseStatus, PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff,
     PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan,
     RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort, RiskSummary,
     SnapshotCentralityDelta, SnapshotDeleteResult, SnapshotDiffResult, SnapshotDiffSummary,

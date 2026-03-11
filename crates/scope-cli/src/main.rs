@@ -10,12 +10,12 @@ use std::{
 
 use clap::Parser;
 use cli::{
-    ArchCommand, ChangeType, Cli, Commands, RiskSortArg, SnapshotCommand, StabilitySortArg,
-    SurfaceCommand, TestMapCommand,
+    ArchCommand, ChangeType, Cli, Commands, CycleSeverityArg, RiskSortArg, SnapshotCommand,
+    StabilitySortArg, SurfaceCommand, TestMapCommand,
 };
 use scope_core::{
-    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, DatabaseInfo,
-    RiskSort, ScanConfig, SymbolKind, Verbosity,
+    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions,
+    CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind, Verbosity,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -34,6 +34,14 @@ fn render_cli_error(error: &scope_core::ScopeError) -> String {
     serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| {
         "{\n  \"schema_version\": 1,\n  \"command\": \"cli\",\n  \"status\": \"error\",\n  \"data\": {\n    \"kind\": \"serialization\",\n    \"message\": \"failed to serialize CLI error envelope\"\n  },\n  \"warnings\": []\n}".to_string()
     })
+}
+
+fn cycle_severity_name(value: CycleSeverityArg) -> CycleSeverity {
+    match value {
+        CycleSeverityArg::Low => CycleSeverity::Low,
+        CycleSeverityArg::Medium => CycleSeverity::Medium,
+        CycleSeverityArg::High => CycleSeverity::High,
+    }
 }
 
 fn serialize_output<T: serde::Serialize>(
@@ -406,6 +414,45 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             let config = load_arch_config(&context.paths.repo_root)?;
             let result = context.store.diff_snapshot(&args.before, &args.after, &config)?;
             serialize_output(&scope_core::stub::diff_snapshot(result), compact)
+        }
+        Commands::Unused => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let result = context.store.query_unused()?;
+            serialize_output(&scope_core::stub::unused(result), compact)
+        }
+        Commands::Cycles(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let severity = args.severity.map(cycle_severity_name);
+            let result = context.store.query_cycles(severity)?;
+            serialize_output(&scope_core::stub::cycles(result), compact)
+        }
+        Commands::Diff(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let result = context.store.query_branch_diff(&context.paths.repo_root, &args.branch)?;
+            serialize_output(&scope_core::stub::diff(result), compact)
+        }
+        Commands::Tree(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let result = context
+                .store
+                .query_tree(&RepoPath::from(args.path), args.reverse, args.depth)?;
+            serialize_output(&scope_core::stub::tree(result), compact)
         }
         Commands::Doctor(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -1116,9 +1163,12 @@ mod tests {
         serialize_output,
     };
     use scope_core::{
-        Certainty, PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
-        RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
-        RiskRecord, RiskResult, StabilityRecord, StabilityResult, SymbolKind, Visibility,
+        BranchDiffAffectedFile, BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary,
+        Certainty, CycleRecord, CycleSeverity, CyclesResult, PublicSurface, PublicSurfaceDiff,
+        PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan,
+        RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, StabilityRecord,
+        StabilityResult, SymbolKind, TreeNode, TreeResult, TreeSummary, UnusedRecord,
+        UnusedResult, UnusedSummary, Visibility,
     };
     use std::{
         fs,
@@ -1353,6 +1403,94 @@ mod tests {
         assert_eq!(value["data"]["result"]["summary"]["git_available"], true);
         assert!(value["data"]["result"].get("file").is_none());
         assert_eq!(value["data"]["result"]["top"], 1);
+    }
+
+    #[test]
+    fn serialize_output_utility_commands_use_expected_envelope_shapes() {
+        let unused = scope_core::stub::unused(UnusedResult {
+            symbols: vec![UnusedRecord {
+                file: RepoPath::from("src/lib.rs"),
+                name: "greet".to_string(),
+                qualname: "lib::greet".to_string(),
+                kind: SymbolKind::Function,
+                visibility: Visibility::Public,
+                line: 3,
+                inbound_references: 0,
+                reason: "exported symbol `lib::greet` has no indexed inbound call edges".to_string(),
+            }],
+            summary: UnusedSummary {
+                exported_symbols: 4,
+                unused_symbols: 1,
+            },
+        });
+        let unused_value: serde_json::Value = serde_json::from_str(&serialize_output(&unused, true).unwrap()).unwrap();
+        assert_eq!(unused_value["command"], "unused");
+        assert_eq!(unused_value["status"], "ok");
+        assert_eq!(unused_value["data"]["result"]["symbols"][0]["qualname"], "lib::greet");
+
+        let cycles = scope_core::stub::cycles(CyclesResult {
+            severity: Some(CycleSeverity::Medium),
+            cycles: vec![CycleRecord {
+                files: vec![RepoPath::from("src/a.rs"), RepoPath::from("src/b.rs")],
+                edge_count: 2,
+                external_dependents: 1,
+                severity: CycleSeverity::Medium,
+                reason: "2 file cycle with 2 internal edges and 1 external dependents".to_string(),
+            }],
+            summary: scope_core::CyclesSummary {
+                cycle_count: 1,
+                low_count: 0,
+                medium_count: 1,
+                high_count: 0,
+            },
+        });
+        let cycles_value: serde_json::Value = serde_json::from_str(&serialize_output(&cycles, true).unwrap()).unwrap();
+        assert_eq!(cycles_value["command"], "cycles");
+        assert_eq!(cycles_value["data"]["result"]["severity"], "medium");
+
+        let diff = scope_core::stub::diff(BranchDiffResult {
+            branch: "main".to_string(),
+            changed_files: vec![BranchDiffChangedFile {
+                path: RepoPath::from("src/lib.rs"),
+                dependents: 2,
+            }],
+            affected_files: vec![BranchDiffAffectedFile {
+                path: RepoPath::from("src/parser.rs"),
+                changed_roots: vec![RepoPath::from("src/lib.rs")],
+            }],
+            summary: BranchDiffSummary {
+                changed_files: 1,
+                affected_files: 1,
+            },
+        });
+        let diff_value: serde_json::Value = serde_json::from_str(&serialize_output(&diff, true).unwrap()).unwrap();
+        assert_eq!(diff_value["command"], "diff");
+        assert_eq!(diff_value["data"]["result"]["branch"], "main");
+
+        let tree = scope_core::stub::tree(TreeResult {
+            target: RepoPath::from("src/lib.rs"),
+            reverse: false,
+            depth: Some(2),
+            tree: TreeNode {
+                path: RepoPath::from("src/lib.rs"),
+                children: vec![TreeNode {
+                    path: RepoPath::from("src/parser.rs"),
+                    children: Vec::new(),
+                    truncated: false,
+                    cycle: false,
+                }],
+                truncated: false,
+                cycle: false,
+            },
+            summary: TreeSummary {
+                reverse: false,
+                depth: Some(2),
+                nodes: 2,
+            },
+        });
+        let tree_value: serde_json::Value = serde_json::from_str(&serialize_output(&tree, true).unwrap()).unwrap();
+        assert_eq!(tree_value["command"], "tree");
+        assert_eq!(tree_value["data"]["result"]["target"], "src/lib.rs");
     }
 
     #[test]

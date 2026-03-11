@@ -58,6 +58,14 @@ pub enum Commands {
     Snapshot(SnapshotArgs),
     /// Compare two saved architectural snapshots
     DiffSnapshot(DiffSnapshotArgs),
+    /// Report exported symbols with no indexed inbound references
+    Unused,
+    /// Report circular file dependency chains
+    Cycles(CyclesArgs),
+    /// Report blast radius for files changed relative to a git branch/ref
+    Diff(DiffArgs),
+    /// Render a recursive dependency tree for an indexed file
+    Tree(TreeArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
@@ -318,6 +326,33 @@ pub struct SnapshotDeleteArgs {
 pub struct DiffSnapshotArgs {
     pub before: String,
     pub after: String,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum CycleSeverityArg {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CyclesArgs {
+    #[arg(long, value_enum)]
+    pub severity: Option<CycleSeverityArg>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DiffArgs {
+    pub branch: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TreeArgs {
+    pub path: String,
+    #[arg(long)]
+    pub reverse: bool,
+    #[arg(long)]
+    pub depth: Option<usize>,
 }
 
 #[derive(Debug, clap::Args)]

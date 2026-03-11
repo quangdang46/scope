@@ -11,5 +11,7 @@ name = "scope-mcp"
 path = "src/main.rs"
 
 [dependencies]
+blake3.workspace = true
 scope-core = { path = "../scope-core" }
+serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "command": "tree",
+  "status": "ok",
+  "data": {
+    "result": {
+      "target": "src/lib.rs",
+      "reverse": false,
+      "depth": 2,
+      "tree": {
+        "path": "src/lib.rs",
+        "children": [
+          {
+            "path": "src/parser.rs",
+            "children": [],
+            "truncated": false,
+            "cycle": false
+          },
+          {
+            "path": "src/resolver.rs",
+            "children": [
+              {
+                "path": "src/parser.rs",
+                "children": [],
+                "truncated": true,
+                "cycle": false
+              }
+            ],
+            "truncated": false,
+            "cycle": false
+          },
+          {
+            "path": "src/utils.rs",
+            "children": [],
+            "truncated": false,
+            "cycle": false
+          }
+        ],
+        "truncated": false,
+        "cycle": false
+      },
+      "summary": {
+        "reverse": false,
+        "depth": 2,
+        "nodes": 5
+      }
+    }
+  },
+  "warnings": []
+}

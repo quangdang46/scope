@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "command": "unused",
+  "status": "ok",
+  "data": {
+    "result": {
+      "symbols": [
+        {
+          "file": "src/lib.rs",
+          "name": "parser",
+          "qualname": "lib::parser",
+          "kind": "module",
+          "visibility": "public",
+          "line": 1,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::parser` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/lib.rs",
+          "name": "resolver",
+          "qualname": "lib::resolver",
+          "kind": "module",
+          "visibility": "public",
+          "line": 2,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::resolver` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/lib.rs",
+          "name": "utils",
+          "qualname": "lib::utils",
+          "kind": "module",
+          "visibility": "public",
+          "line": 3,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::utils` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/lib.rs",
+          "name": "greet",
+          "qualname": "lib::greet",
+          "kind": "function",
+          "visibility": "public",
+          "line": 5,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::greet` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/lib.rs",
+          "name": "farewell",
+          "qualname": "lib::farewell",
+          "kind": "function",
+          "visibility": "public",
+          "line": 10,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::farewell` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/resolver.rs",
+          "name": "resolve",
+          "qualname": "resolver::resolve",
+          "kind": "function",
+          "visibility": "public",
+          "line": 3,
+          "inbound_references": 0,
+          "reason": "exported symbol `resolver::resolve` has no indexed inbound call edges"
+        }
+      ],
+      "summary": {
+        "exported_symbols": 8,
+        "unused_symbols": 6
+      }
+    }
+  },
+  "warnings": []
+}

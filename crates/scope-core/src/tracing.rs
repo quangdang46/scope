@@ -1,10 +1,11 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, Once, OnceLock};
 
 use tracing_subscriber::EnvFilter;
 
 use crate::{ScopeError, ScopeResult};
 
-static TRACING_INIT: OnceLock<()> = OnceLock::new();
+static TRACING_INIT: Once = Once::new();
+static TRACING_RESULT: OnceLock<Mutex<Option<ScopeResult<()>>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verbosity {
@@ -14,28 +15,41 @@ pub enum Verbosity {
 }
 
 pub fn init_tracing(verbosity: Verbosity) -> ScopeResult<()> {
-    if TRACING_INIT.get().is_some() {
-        return Ok(());
+    let result_cell = TRACING_RESULT.get_or_init(|| Mutex::new(None));
+    TRACING_INIT.call_once(|| {
+        let filter = match verbosity {
+            Verbosity::Quiet => EnvFilter::new("error"),
+            Verbosity::Normal => {
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+            }
+            Verbosity::Verbose => {
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"))
+            }
+        };
+
+        let result = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .try_init()
+            .map_err(|error| ScopeError::Tracing(error.to_string()))
+            .or_else(|error| match error {
+                ScopeError::Tracing(message)
+                    if message.contains("a global default trace dispatcher has already been set") =>
+                {
+                    Ok(())
+                }
+                other => Err(other),
+            });
+
+        *result_cell.lock().expect("tracing init mutex poisoned") = Some(result);
+    });
+
+    let guard = result_cell.lock().expect("tracing init mutex poisoned");
+    match guard.as_ref() {
+        Some(Ok(())) | None => Ok(()),
+        Some(Err(ScopeError::Tracing(message))) => Err(ScopeError::Tracing(message.clone())),
+        Some(Err(other)) => Err(ScopeError::Tracing(other.to_string())),
     }
-
-    let filter = match verbosity {
-        Verbosity::Quiet => EnvFilter::new("error"),
-        Verbosity::Normal => {
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
-        }
-        Verbosity::Verbose => {
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"))
-        }
-    };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init()
-        .map_err(|error| ScopeError::Tracing(error.to_string()))?;
-
-    let _ = TRACING_INIT.set(());
-    Ok(())
 }
 
 #[cfg(test)]
