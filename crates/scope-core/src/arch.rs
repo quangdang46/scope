@@ -23,11 +23,25 @@ pub fn load_arch_config(repo_root: &Path) -> ScopeResult<ArchConfig> {
 }
 
 pub fn arch_check(store: &Store, config: &ArchConfig) -> ScopeResult<ArchCheckResult> {
-    let mut violations = Vec::new();
     let edges = store.query_file_edges()?;
+    let (checked_layered_edges, violations) = arch_check_edges(config, &edges)?;
+
+    Ok(ArchCheckResult {
+        config_path: RepoPath::from(".scope/arch.toml"),
+        checked_edges: edges.len(),
+        checked_layered_edges,
+        violations,
+    })
+}
+
+pub fn arch_check_edges(
+    config: &ArchConfig,
+    edges: &[ArchFileEdge],
+) -> ScopeResult<(usize, Vec<ArchViolation>)> {
+    let mut violations = Vec::new();
     let mut checked_layered_edges = 0;
 
-    for edge in &edges {
+    for edge in edges {
         let Some(from_layer) = resolve_layer(&config.layers, &edge.from_file)? else {
             continue;
         };
@@ -69,12 +83,7 @@ pub fn arch_check(store: &Store, config: &ArchConfig) -> ScopeResult<ArchCheckRe
             .then(left.message.cmp(&right.message))
     });
 
-    Ok(ArchCheckResult {
-        config_path: RepoPath::from(".scope/arch.toml"),
-        checked_edges: edges.len(),
-        checked_layered_edges,
-        violations,
-    })
+    Ok((checked_layered_edges, violations))
 }
 
 fn validate_arch_config(config: &ArchConfig) -> ScopeResult<()> {

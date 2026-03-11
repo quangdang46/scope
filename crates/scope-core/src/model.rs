@@ -39,7 +39,7 @@ pub enum DiagnosticSeverity {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Certainty {
     Exact,
@@ -295,6 +295,130 @@ pub struct PublicSurfaceDiff {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotFileRecord {
+    pub path: RepoPath,
+    pub language: String,
+    pub content_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotSymbolRecord {
+    pub file: RepoPath,
+    pub name: String,
+    pub qualname: String,
+    pub kind: SymbolKind,
+    pub visibility: Visibility,
+    pub exported: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SnapshotEdgeRecord {
+    pub from: String,
+    pub to: String,
+    pub kind: EdgeKind,
+    pub certainty: Certainty,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotGraph {
+    pub schema_version: u32,
+    pub snapshot_version: u32,
+    pub created_at: i64,
+    pub files: Vec<SnapshotFileRecord>,
+    pub symbols: Vec<SnapshotSymbolRecord>,
+    pub file_edges: Vec<SnapshotEdgeRecord>,
+    pub symbol_edges: Vec<SnapshotEdgeRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SnapshotMetadata {
+    pub name: String,
+    pub created_at: i64,
+    pub commit: Option<String>,
+    pub schema_version: u32,
+    pub snapshot_version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotStoredRecord {
+    pub metadata: SnapshotMetadata,
+    pub graph: SnapshotGraph,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotSaveResult {
+    pub snapshot: SnapshotMetadata,
+    pub replaced_existing: bool,
+    pub summary: SnapshotDiffSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotListResult {
+    pub snapshots: Vec<SnapshotMetadata>,
+    pub summary: SnapshotListSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotListSummary {
+    pub snapshot_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotDeleteResult {
+    pub name: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotEdgeDelta {
+    pub file_edges_added: usize,
+    pub file_edges_removed: usize,
+    pub symbol_edges_added: usize,
+    pub symbol_edges_removed: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotCentralityDelta {
+    pub path: RepoPath,
+    pub before_fan_in: usize,
+    pub after_fan_in: usize,
+    pub delta: isize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotStabilityDelta {
+    pub before_avg_instability: f64,
+    pub after_avg_instability: f64,
+    pub delta: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotDiffSummary {
+    pub files: usize,
+    pub symbols: usize,
+    pub file_edges: usize,
+    pub symbol_edges: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotDiffResult {
+    pub before: SnapshotMetadata,
+    pub after: SnapshotMetadata,
+    pub edge_delta: SnapshotEdgeDelta,
+    pub added_file_edges: Vec<SnapshotEdgeRecord>,
+    pub removed_file_edges: Vec<SnapshotEdgeRecord>,
+    pub added_symbol_edges: Vec<SnapshotEdgeRecord>,
+    pub removed_symbol_edges: Vec<SnapshotEdgeRecord>,
+    pub newly_central_files: Vec<SnapshotCentralityDelta>,
+    pub introduced_violations: Vec<ArchViolation>,
+    pub resolved_violations: Vec<ArchViolation>,
+    pub stability: SnapshotStabilityDelta,
+    pub surface_diff: PublicSurfaceDiff,
+    pub summary: SnapshotDiffSummary,
+    pub omitted: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RenameEditKind {
     Definition,
@@ -415,7 +539,7 @@ pub struct ArchFileEdge {
     pub certainty: Certainty,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ArchViolation {
     pub from_file: RepoPath,
     pub to_file: RepoPath,
@@ -597,4 +721,110 @@ pub struct RiskResult {
     pub sort: RiskSort,
     pub files: Vec<RiskRecord>,
     pub summary: RiskSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnusedRecord {
+    pub file: RepoPath,
+    pub name: String,
+    pub qualname: String,
+    pub kind: SymbolKind,
+    pub visibility: Visibility,
+    pub line: u32,
+    pub inbound_references: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnusedSummary {
+    pub exported_symbols: usize,
+    pub unused_symbols: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnusedResult {
+    pub symbols: Vec<UnusedRecord>,
+    pub summary: UnusedSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleSeverity {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleRecord {
+    pub files: Vec<RepoPath>,
+    pub edge_count: usize,
+    pub external_dependents: usize,
+    pub severity: CycleSeverity,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CyclesSummary {
+    pub cycle_count: usize,
+    pub low_count: usize,
+    pub medium_count: usize,
+    pub high_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CyclesResult {
+    pub severity: Option<CycleSeverity>,
+    pub cycles: Vec<CycleRecord>,
+    pub summary: CyclesSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BranchDiffChangedFile {
+    pub path: RepoPath,
+    pub dependents: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BranchDiffAffectedFile {
+    pub path: RepoPath,
+    pub changed_roots: Vec<RepoPath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BranchDiffSummary {
+    pub changed_files: usize,
+    pub affected_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BranchDiffResult {
+    pub branch: String,
+    pub changed_files: Vec<BranchDiffChangedFile>,
+    pub affected_files: Vec<BranchDiffAffectedFile>,
+    pub summary: BranchDiffSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TreeNode {
+    pub path: RepoPath,
+    pub children: Vec<TreeNode>,
+    pub truncated: bool,
+    pub cycle: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TreeSummary {
+    pub reverse: bool,
+    pub depth: Option<usize>,
+    pub nodes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TreeResult {
+    pub target: RepoPath,
+    pub reverse: bool,
+    pub depth: Option<usize>,
+    pub tree: TreeNode,
+    pub summary: TreeSummary,
 }

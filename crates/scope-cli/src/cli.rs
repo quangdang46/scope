@@ -54,6 +54,10 @@ pub enum Commands {
     TestMap(TestMapArgs),
     /// Build a conservative rename execution plan for a file or symbol target
     RenamePlan(RenamePlanArgs),
+    /// Save, list, or delete stored architectural snapshots
+    Snapshot(SnapshotArgs),
+    /// Compare two saved architectural snapshots
+    DiffSnapshot(DiffSnapshotArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
@@ -279,6 +283,41 @@ pub struct RenamePlanArgs {
     pub apply: bool,
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SnapshotArgs {
+    #[command(subcommand)]
+    pub command: SnapshotCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SnapshotCommand {
+    /// Save the current indexed graph as a named snapshot
+    Save(SnapshotSaveArgs),
+    /// List saved snapshots
+    List,
+    /// Delete a saved snapshot by name
+    Delete(SnapshotDeleteArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SnapshotSaveArgs {
+    #[arg(long)]
+    pub name: String,
+    #[arg(long)]
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SnapshotDeleteArgs {
+    pub name: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DiffSnapshotArgs {
+    pub before: String,
+    pub after: String,
 }
 
 #[derive(Debug, clap::Args)]

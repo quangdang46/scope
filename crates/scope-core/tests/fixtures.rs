@@ -7,7 +7,8 @@ use std::{
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty, EdgeKind,
     NodeKind, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceSymbol, RepoPath,
-    ScanConfig, Store, SupportedLanguage, SymbolKind, TraversalRecord, Visibility,
+    ScanConfig, SnapshotDeleteResult, SnapshotListSummary, Store, SupportedLanguage,
+    SymbolKind, TraversalRecord, Visibility,
 };
 
 fn repo_root() -> PathBuf {
@@ -133,6 +134,36 @@ fn rust_small_fixture_has_expected_files() {
             "missing rust_small file: {relative}"
         );
     }
+}
+
+#[test]
+fn snapshot_round_trip_and_diff_work_for_rust_small_fixture() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let first = store.save_snapshot("baseline", Some("HEAD".to_string())).unwrap();
+    let list = store.list_snapshots().unwrap();
+
+    assert_eq!(first.snapshot.name, "baseline");
+    assert_eq!(list.summary, SnapshotListSummary { snapshot_count: 1 });
+    assert_eq!(list.snapshots[0].name, "baseline");
+
+    let parser_path = repo.join("src/parser.rs");
+    let updated = fs::read_to_string(&parser_path).unwrap().replace("pub fn parse", "pub fn parse_token");
+    fs::write(&parser_path, updated).unwrap();
+    let _ = index_fixture(&repo);
+    let second = store.save_snapshot("after", Some("HEAD~0".to_string())).unwrap();
+    let config = load_arch_config(&repo).unwrap();
+    let diff = store.diff_snapshot("baseline", "after", &config).unwrap();
+
+    assert_eq!(second.snapshot.name, "after");
+    assert_eq!(diff.before.name, "baseline");
+    assert_eq!(diff.after.name, "after");
+    assert!(!diff.omitted.is_empty());
+
+    let deleted = store.delete_snapshot("baseline").unwrap();
+    assert_eq!(deleted, SnapshotDeleteResult { name: "baseline".to_string(), deleted: true });
+
+    fs::remove_dir_all(repo).unwrap();
 }
 
 #[test]

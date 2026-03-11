@@ -8,21 +8,25 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::{
-    ArchFileEdge, Certainty, ContextFileRecord, ContextFileRole, ContextResult, ContextSummary,
-    DependencyRecord, EdgeKind, ExtractResult, FileRecord, ImportPath, NodeKind, PublicSurface,
-    PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary,
-    PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep,
-    RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort, RiskSummary, ScopeError,
-    ScopeResult, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
+    arch_check_edges, snapshot, ArchConfig, ArchFileEdge, Certainty, ContextFileRecord,
+    ContextFileRole, ContextResult, ContextSummary, DependencyRecord, EdgeKind, ExtractResult,
+    FileRecord, ImportPath, NodeKind, PublicSurface, PublicSurfaceChange,
+    PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
+    RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
+    RiskRecord, RiskResult, RiskSort, RiskSummary, ScopeError, ScopeResult,
+    SnapshotCentralityDelta, SnapshotDeleteResult, SnapshotDiffResult, SnapshotEdgeDelta,
+    SnapshotEdgeRecord, SnapshotFileRecord, SnapshotGraph, SnapshotListResult,
+    SnapshotListSummary, SnapshotMetadata, SnapshotSaveResult, SnapshotStabilityDelta, SnapshotStoredRecord,
+    SnapshotSymbolRecord, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
     StabilitySummary, SymbolKind, SymbolRecord, TestConfig, TestMapBuildResult,
-    TestMapBuildSummary, TestMapCoveredByResult, TestMapCoveredBySummary, TestMapCoversResult,
-    TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult, TestMapUncoveredSummary,
-    TraversalRecord, Visibility,
+    TestMapBuildSummary, TestMapCoveredByResult, TestMapCoveredBySummary,
+    TestMapCoversResult, TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult,
+    TestMapUncoveredSummary, TraversalRecord, Visibility,
 };
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
 
-pub const INDEX_SCHEMA_VERSION: u32 = 5;
+pub const INDEX_SCHEMA_VERSION: u32 = 6;
 
 const INITIAL_MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS index_meta (
@@ -126,6 +130,19 @@ CREATE TABLE IF NOT EXISTS file_churn (
 
 CREATE INDEX IF NOT EXISTS idx_file_churn_file_id ON file_churn(file_id);
 CREATE INDEX IF NOT EXISTS idx_file_churn_committed_at ON file_churn(committed_at);
+"#;
+
+const SNAPSHOTS_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS snapshots (
+    name TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    commit_sha TEXT,
+    schema_version INTEGER NOT NULL,
+    snapshot_version INTEGER NOT NULL,
+    payload BLOB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_created_at ON snapshots(created_at);
 "#;
 
 #[derive(Debug)]
@@ -428,6 +445,141 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn save_snapshot(
+        &self,
+        name: &str,
+        commit: Option<String>,
+    ) -> ScopeResult<SnapshotSaveResult> {
+        if name.trim().is_empty() {
+            return Err(ScopeError::InvalidInput(
+                "snapshot name may not be empty".to_string(),
+            ));
+        }
+
+        let replaced_existing = self.snapshot_exists(name)?;
+        let metadata = SnapshotMetadata {
+            name: name.to_string(),
+            created_at: unix_timestamp(),
+            commit,
+            schema_version: INDEX_SCHEMA_VERSION,
+            snapshot_version: snapshot::SNAPSHOT_VERSION,
+        };
+        let graph = self.build_snapshot_graph(metadata.created_at)?;
+        let summary = snapshot::snapshot_summary(&graph);
+        let record = SnapshotStoredRecord {
+            metadata: metadata.clone(),
+            graph,
+        };
+        let payload = snapshot::encode_snapshot(&record)?;
+        self.connection.execute(
+            "INSERT INTO snapshots (name, created_at, commit_sha, schema_version, snapshot_version, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(name) DO UPDATE SET
+                 created_at = excluded.created_at,
+                 commit_sha = excluded.commit_sha,
+                 schema_version = excluded.schema_version,
+                 snapshot_version = excluded.snapshot_version,
+                 payload = excluded.payload",
+            params![
+                metadata.name,
+                metadata.created_at,
+                metadata.commit,
+                metadata.schema_version as i64,
+                metadata.snapshot_version as i64,
+                payload,
+            ],
+        )?;
+        Ok(SnapshotSaveResult {
+            snapshot: metadata,
+            replaced_existing,
+            summary,
+        })
+    }
+
+    pub fn list_snapshots(&self) -> ScopeResult<SnapshotListResult> {
+        let mut statement = self.connection.prepare(
+            "SELECT name, created_at, commit_sha, schema_version, snapshot_version
+             FROM snapshots
+             ORDER BY created_at DESC, name ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SnapshotMetadata {
+                name: row.get(0)?,
+                created_at: row.get(1)?,
+                commit: row.get(2)?,
+                schema_version: row.get::<_, i64>(3)? as u32,
+                snapshot_version: row.get::<_, i64>(4)? as u32,
+            })
+        })?;
+        let snapshots = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok(SnapshotListResult {
+            summary: SnapshotListSummary {
+                snapshot_count: snapshots.len(),
+            },
+            snapshots,
+        })
+    }
+
+    pub fn delete_snapshot(&self, name: &str) -> ScopeResult<SnapshotDeleteResult> {
+        let deleted = self
+            .connection
+            .execute("DELETE FROM snapshots WHERE name = ?1", [name])?
+            > 0;
+        Ok(SnapshotDeleteResult {
+            name: name.to_string(),
+            deleted,
+        })
+    }
+
+    pub fn diff_snapshot(
+        &self,
+        before_name: &str,
+        after_name: &str,
+        config: &ArchConfig,
+    ) -> ScopeResult<SnapshotDiffResult> {
+        let before = self.load_snapshot(before_name)?;
+        let after = self.load_snapshot(after_name)?;
+
+        let added_file_edges = diff_edge_records(&before.graph.file_edges, &after.graph.file_edges);
+        let removed_file_edges = diff_edge_records(&after.graph.file_edges, &before.graph.file_edges);
+        let added_symbol_edges = diff_edge_records(&before.graph.symbol_edges, &after.graph.symbol_edges);
+        let removed_symbol_edges = diff_edge_records(&after.graph.symbol_edges, &before.graph.symbol_edges);
+
+        let before_file_edges = snapshot_file_edges(&before.graph);
+        let after_file_edges = snapshot_file_edges(&after.graph);
+        let (_, before_violations) = arch_check_edges(config, &before_file_edges)?;
+        let (_, after_violations) = arch_check_edges(config, &after_file_edges)?;
+        let introduced_violations = diff_violations(&before_violations, &after_violations);
+        let resolved_violations = diff_violations(&after_violations, &before_violations);
+
+        let before_surface = snapshot_public_surface(&before.graph);
+        let after_surface = snapshot_public_surface(&after.graph);
+        let surface_diff = diff_public_surfaces(&before_surface, &after_surface);
+        let omitted = vec!["cycle detection delta not implemented yet".to_string()];
+
+        Ok(SnapshotDiffResult {
+            before: before.metadata,
+            after: after.metadata,
+            edge_delta: SnapshotEdgeDelta {
+                file_edges_added: added_file_edges.len(),
+                file_edges_removed: removed_file_edges.len(),
+                symbol_edges_added: added_symbol_edges.len(),
+                symbol_edges_removed: removed_symbol_edges.len(),
+            },
+            added_file_edges,
+            removed_file_edges,
+            added_symbol_edges,
+            removed_symbol_edges,
+            newly_central_files: diff_snapshot_centrality(&before.graph, &after.graph),
+            introduced_violations,
+            resolved_violations,
+            stability: diff_snapshot_stability(&before.graph, &after.graph),
+            surface_diff,
+            summary: snapshot::snapshot_summary(&after.graph),
+            omitted,
+        })
+    }
+
     pub fn build_test_map(&self, tests: &TestConfig) -> ScopeResult<TestMapBuildResult> {
         let test_files = self.detect_test_files(tests)?;
         let coverage_map = self.compute_test_coverage_map(&test_files)?;
@@ -668,44 +820,7 @@ impl Store {
 
         let all_files = self.list_indexed_files()?;
         let edges = self.query_file_edges()?;
-        let mut fan_in: HashMap<RepoPath, usize> = HashMap::new();
-        let mut fan_out: HashMap<RepoPath, usize> = HashMap::new();
-
-        for edge in edges
-            .into_iter()
-            .filter(|edge| edge.edge_kind == EdgeKind::Import)
-        {
-            *fan_out.entry(edge.from_file.clone()).or_default() += 1;
-            *fan_in.entry(edge.to_file.clone()).or_default() += 1;
-        }
-
-        let mut records = all_files
-            .into_iter()
-            .map(|path| {
-                let incoming = fan_in.get(&path).copied().unwrap_or(0);
-                let outgoing = fan_out.get(&path).copied().unwrap_or(0);
-                let total = incoming + outgoing;
-                let instability = if total == 0 {
-                    0.0
-                } else {
-                    outgoing as f64 / total as f64
-                };
-                let category = stability_category(incoming, outgoing, instability);
-                let flagged = incoming > 10 && instability > flag_threshold.unwrap_or(0.5);
-                let reason = stability_reason(incoming, outgoing, instability, &category, flagged);
-
-                StabilityRecord {
-                    path,
-                    fan_in: incoming,
-                    fan_out: outgoing,
-                    instability,
-                    category,
-                    flagged,
-                    reason,
-                }
-            })
-            .collect::<Vec<_>>();
-
+        let mut records = stability_records_from_file_edges(&all_files, &edges, flag_threshold);
         let summary = stability_summary(&records);
 
         if let Some(path) = file {
@@ -1103,6 +1218,133 @@ impl Store {
                 applied_edits,
                 blocked,
             },
+        })
+    }
+
+    fn build_snapshot_graph(&self, created_at: i64) -> ScopeResult<SnapshotGraph> {
+        let mut file_statement = self.connection.prepare(
+            "SELECT path, language, content_hash FROM files ORDER BY path ASC",
+        )?;
+        let files = file_statement
+            .query_map([], |row| {
+                Ok(SnapshotFileRecord {
+                    path: RepoPath(row.get::<_, String>(0)?),
+                    language: row.get(1)?,
+                    content_hash: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut symbol_statement = self.connection.prepare(
+            "SELECT files.path, symbols.name, symbols.qualname, symbols.kind, symbols.visibility, symbols.exported
+             FROM symbols
+             JOIN files ON files.id = symbols.file_id
+             ORDER BY files.path ASC, symbols.qualname ASC",
+        )?;
+        let symbols = symbol_statement
+            .query_map([], |row| {
+                Ok(SnapshotSymbolRecord {
+                    file: RepoPath(row.get::<_, String>(0)?),
+                    name: row.get(1)?,
+                    qualname: row.get(2)?,
+                    kind: symbol_kind_from_db(&row.get::<_, String>(3)?),
+                    visibility: visibility_from_db(&row.get::<_, String>(4)?),
+                    exported: row.get::<_, i64>(5)? != 0,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut file_edge_statement = self.connection.prepare(
+            "SELECT from_files.path, to_files.path, file_edges.kind, file_edges.certainty
+             FROM file_edges
+             JOIN files AS from_files ON from_files.id = file_edges.from_file_id
+             JOIN files AS to_files ON to_files.id = file_edges.to_file_id
+             ORDER BY from_files.path ASC, to_files.path ASC, file_edges.kind ASC",
+        )?;
+        let file_edges = file_edge_statement
+            .query_map([], |row| {
+                Ok(SnapshotEdgeRecord {
+                    from: row.get(0)?,
+                    to: row.get(1)?,
+                    kind: edge_kind_from_db(&row.get::<_, String>(2)?),
+                    certainty: certainty_from_db(&row.get::<_, String>(3)?),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut symbol_edge_statement = self.connection.prepare(
+            "SELECT from_symbols.qualname, to_symbols.qualname, symbol_edges.kind, symbol_edges.certainty
+             FROM symbol_edges
+             JOIN symbols AS from_symbols ON from_symbols.id = symbol_edges.from_symbol_id
+             JOIN symbols AS to_symbols ON to_symbols.id = symbol_edges.to_symbol_id
+             ORDER BY from_symbols.qualname ASC, to_symbols.qualname ASC, symbol_edges.kind ASC, symbol_edges.call_line ASC",
+        )?;
+        let symbol_edges = symbol_edge_statement
+            .query_map([], |row| {
+                Ok(SnapshotEdgeRecord {
+                    from: row.get(0)?,
+                    to: row.get(1)?,
+                    kind: match row.get::<_, String>(2)?.as_str() {
+                        "call" => EdgeKind::Call,
+                        "export" => EdgeKind::Export,
+                        "define" => EdgeKind::Define,
+                        "contain" => EdgeKind::Contain,
+                        "dynamic" => EdgeKind::Dynamic,
+                        _ => EdgeKind::Import,
+                    },
+                    certainty: certainty_from_db(&row.get::<_, String>(3)?),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(SnapshotGraph {
+            schema_version: INDEX_SCHEMA_VERSION,
+            snapshot_version: snapshot::SNAPSHOT_VERSION,
+            created_at,
+            files,
+            symbols,
+            file_edges,
+            symbol_edges,
+        })
+    }
+
+    fn snapshot_exists(&self, name: &str) -> ScopeResult<bool> {
+        let exists = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM snapshots WHERE name = ?1)",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    fn load_snapshot(&self, name: &str) -> ScopeResult<SnapshotStoredRecord> {
+        let payload = self
+            .connection
+            .query_row(
+                "SELECT payload FROM snapshots WHERE name = ?1",
+                [name],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        let payload = payload.ok_or_else(|| ScopeError::NotFound {
+            kind: "snapshot",
+            value: name.to_string(),
+        })?;
+        snapshot::decode_snapshot(&payload)
+    }
+
+    pub fn target_file_for_target(&self, target: &str) -> ScopeResult<Option<RepoPath>> {
+        if looks_like_symbol(target) {
+            let result = self.query_context(&[target.to_string()], "body", None)?;
+            Ok(result.must_read.first().map(|record| record.path.clone()))
+        } else {
+            Ok(Some(RepoPath::from(target.to_string())))
+        }
+    }
+
+    pub fn resolve_surface_target(&self, target: &str) -> ScopeResult<RepoPath> {
+        self.target_file_for_target(target)?.ok_or_else(|| {
+            ScopeError::InvalidInput(format!("missing indexed file for target: {target}"))
         })
     }
 
@@ -2777,6 +3019,11 @@ fn run_migrations(connection: &Connection) -> ScopeResult<()> {
 
     if current_version < 5 {
         connection.execute_batch(FILE_CHURN_MIGRATION)?;
+        connection.pragma_update(None, "user_version", 5)?;
+    }
+
+    if current_version < 6 {
+        connection.execute_batch(SNAPSHOTS_MIGRATION)?;
         connection.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)?;
     }
 
@@ -2804,6 +3051,10 @@ fn reconcile_schema(connection: &Connection) -> ScopeResult<()> {
 
     if !has_required_tables(connection, &["file_churn"])? {
         connection.execute_batch(FILE_CHURN_MIGRATION)?;
+    }
+
+    if !has_required_tables(connection, &["snapshots"])? {
+        connection.execute_batch(SNAPSHOTS_MIGRATION)?;
     }
 
     add_file_metadata_columns(connection)?;
@@ -3100,6 +3351,48 @@ fn all_files_set(records: &[StabilityRecord]) -> HashSet<RepoPath> {
     records.iter().map(|record| record.path.clone()).collect()
 }
 
+fn stability_records_from_file_edges(
+    all_files: &[RepoPath],
+    edges: &[ArchFileEdge],
+    flag_threshold: Option<f64>,
+) -> Vec<StabilityRecord> {
+    let mut fan_in: HashMap<RepoPath, usize> = HashMap::new();
+    let mut fan_out: HashMap<RepoPath, usize> = HashMap::new();
+
+    for edge in edges.iter().filter(|edge| edge.edge_kind == EdgeKind::Import) {
+        *fan_out.entry(edge.from_file.clone()).or_default() += 1;
+        *fan_in.entry(edge.to_file.clone()).or_default() += 1;
+    }
+
+    all_files
+        .iter()
+        .cloned()
+        .map(|path| {
+            let incoming = fan_in.get(&path).copied().unwrap_or(0);
+            let outgoing = fan_out.get(&path).copied().unwrap_or(0);
+            let total = incoming + outgoing;
+            let instability = if total == 0 {
+                0.0
+            } else {
+                outgoing as f64 / total as f64
+            };
+            let category = stability_category(incoming, outgoing, instability);
+            let flagged = incoming > 10 && instability > flag_threshold.unwrap_or(0.5);
+            let reason = stability_reason(incoming, outgoing, instability, &category, flagged);
+
+            StabilityRecord {
+                path,
+                fan_in: incoming,
+                fan_out: outgoing,
+                instability,
+                category,
+                flagged,
+                reason,
+            }
+        })
+        .collect()
+}
+
 fn stability_category(fan_in: usize, fan_out: usize, instability: f64) -> StabilityCategory {
     if fan_in == 0 && fan_out == 0 {
         StabilityCategory::Isolated
@@ -3275,6 +3568,205 @@ fn transitive_dependents_count(
     visited.len()
 }
 
+fn snapshot_file_edges(graph: &SnapshotGraph) -> Vec<ArchFileEdge> {
+    let mut edges = graph
+        .file_edges
+        .iter()
+        .map(|edge| ArchFileEdge {
+            from_file: RepoPath::from(edge.from.clone()),
+            to_file: RepoPath::from(edge.to.clone()),
+            edge_kind: edge.kind.clone(),
+            certainty: edge.certainty.clone(),
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| {
+        left.from_file
+            .cmp(&right.from_file)
+            .then_with(|| left.to_file.cmp(&right.to_file))
+            .then_with(|| format!("{:?}", left.edge_kind).cmp(&format!("{:?}", right.edge_kind)))
+    });
+    edges
+}
+
+fn snapshot_public_surface(graph: &SnapshotGraph) -> PublicSurface {
+    let file = graph
+        .symbols
+        .first()
+        .map(|symbol| symbol.file.clone())
+        .or_else(|| graph.files.first().map(|file| file.path.clone()))
+        .unwrap_or_else(|| RepoPath::from("snapshot"));
+    let mut symbols = graph
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.exported)
+        .enumerate()
+        .map(|(index, symbol)| PublicSurfaceSymbol {
+            file: symbol.file.clone(),
+            name: symbol.name.clone(),
+            qualname: symbol.qualname.clone(),
+            kind: symbol.kind.clone(),
+            visibility: symbol.visibility.clone(),
+            line: index as u32 + 1,
+        })
+        .collect::<Vec<_>>();
+    symbols.sort_by(|left, right| left.qualname.cmp(&right.qualname));
+    PublicSurface { file, symbols }
+}
+
+fn diff_public_surfaces(before: &PublicSurface, after: &PublicSurface) -> PublicSurfaceDiff {
+    let before_by_identity: HashMap<_, _> = before
+        .symbols
+        .iter()
+        .cloned()
+        .map(|symbol| (public_surface_identity(&symbol), symbol))
+        .collect();
+    let after_by_identity: HashMap<_, _> = after
+        .symbols
+        .iter()
+        .cloned()
+        .map(|symbol| (public_surface_identity(&symbol), symbol))
+        .collect();
+
+    let mut identities: Vec<_> = before_by_identity
+        .keys()
+        .chain(after_by_identity.keys())
+        .cloned()
+        .collect();
+    identities.sort();
+    identities.dedup();
+
+    let mut changes = Vec::new();
+    for identity in identities {
+        match (
+            before_by_identity.get(&identity),
+            after_by_identity.get(&identity),
+        ) {
+            (Some(before_symbol), None) => changes.push(PublicSurfaceChange {
+                kind: PublicSurfaceChangeKind::Removed,
+                before: Some(before_symbol.clone()),
+                after: None,
+            }),
+            (None, Some(after_symbol)) => changes.push(PublicSurfaceChange {
+                kind: PublicSurfaceChangeKind::Added,
+                before: None,
+                after: Some(after_symbol.clone()),
+            }),
+            (Some(before_symbol), Some(after_symbol)) if before_symbol != after_symbol => {
+                changes.push(PublicSurfaceChange {
+                    kind: PublicSurfaceChangeKind::Modified,
+                    before: Some(before_symbol.clone()),
+                    after: Some(after_symbol.clone()),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let summary = PublicSurfaceDiffSummary {
+        added_count: changes
+            .iter()
+            .filter(|change| change.kind == PublicSurfaceChangeKind::Added)
+            .count(),
+        removed_count: changes
+            .iter()
+            .filter(|change| change.kind == PublicSurfaceChangeKind::Removed)
+            .count(),
+        modified_count: changes
+            .iter()
+            .filter(|change| change.kind == PublicSurfaceChangeKind::Modified)
+            .count(),
+    };
+
+    PublicSurfaceDiff {
+        before_file: before.file.clone(),
+        after_file: after.file.clone(),
+        changes,
+        summary,
+    }
+}
+
+fn diff_snapshot_stability(before: &SnapshotGraph, after: &SnapshotGraph) -> SnapshotStabilityDelta {
+    let before_files = before.files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    let after_files = after.files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    let before_edges = snapshot_file_edges(before);
+    let after_edges = snapshot_file_edges(after);
+    let before_records = stability_records_from_file_edges(&before_files, &before_edges, None);
+    let after_records = stability_records_from_file_edges(&after_files, &after_edges, None);
+    let before_avg = stability_summary(&before_records).avg_instability;
+    let after_avg = stability_summary(&after_records).avg_instability;
+    SnapshotStabilityDelta {
+        before_avg_instability: before_avg,
+        after_avg_instability: after_avg,
+        delta: after_avg - before_avg,
+    }
+}
+
+fn diff_snapshot_centrality(
+    before: &SnapshotGraph,
+    after: &SnapshotGraph,
+) -> Vec<SnapshotCentralityDelta> {
+    let fan_in_map = |graph: &SnapshotGraph| -> HashMap<RepoPath, usize> {
+        let mut fan_in = HashMap::new();
+        for edge in graph.file_edges.iter().filter(|edge| edge.kind == EdgeKind::Import) {
+            *fan_in.entry(RepoPath::from(edge.to.clone())).or_default() += 1;
+        }
+        fan_in
+    };
+
+    let before_fan_in = fan_in_map(before);
+    let after_fan_in = fan_in_map(after);
+    let mut paths = before
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .chain(after.files.iter().map(|file| file.path.clone()))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+
+    let mut deltas = paths
+        .into_iter()
+        .filter_map(|path| {
+            let before_value = before_fan_in.get(&path).copied().unwrap_or(0);
+            let after_value = after_fan_in.get(&path).copied().unwrap_or(0);
+            let delta = after_value as isize - before_value as isize;
+            (delta > 0).then_some(SnapshotCentralityDelta {
+                path,
+                before_fan_in: before_value,
+                after_fan_in: after_value,
+                delta,
+            })
+        })
+        .collect::<Vec<_>>();
+    deltas.sort_by(|left, right| right.delta.cmp(&left.delta).then_with(|| left.path.cmp(&right.path)));
+    deltas
+}
+
+fn diff_edge_records(before: &[SnapshotEdgeRecord], after: &[SnapshotEdgeRecord]) -> Vec<SnapshotEdgeRecord> {
+    let before_set = before.iter().cloned().collect::<HashSet<_>>();
+    let mut diff = after
+        .iter()
+        .filter(|edge| !before_set.contains(*edge))
+        .cloned()
+        .collect::<Vec<_>>();
+    diff.sort_by(|left, right| {
+        left.from
+            .cmp(&right.from)
+            .then_with(|| left.to.cmp(&right.to))
+            .then_with(|| format!("{:?}", left.kind).cmp(&format!("{:?}", right.kind)))
+    });
+    diff
+}
+
+fn diff_violations(before: &[crate::ArchViolation], after: &[crate::ArchViolation]) -> Vec<crate::ArchViolation> {
+    let before_set = before.iter().cloned().collect::<HashSet<_>>();
+    after
+        .iter()
+        .filter(|violation| !before_set.contains(*violation))
+        .cloned()
+        .collect()
+}
+
 fn import_mentions_symbol(raw_text: &str, symbol_name: &str) -> bool {
     raw_text.contains(symbol_name)
 }
@@ -3293,6 +3785,13 @@ fn default_depth_for_change_type(change_type: &str) -> u32 {
     } else {
         DEFAULT_TRANSITIVE_DEPTH
     }
+}
+
+fn looks_like_symbol(target: &str) -> bool {
+    target.contains("::")
+        && !target.ends_with(".rs")
+        && !target.ends_with(".ts")
+        && !target.ends_with(".js")
 }
 
 fn matches_test_patterns(path: &RepoPath, tests: &TestConfig) -> bool {

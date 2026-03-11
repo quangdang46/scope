@@ -5,9 +5,10 @@ use crate::{
     model::{
         ArchCheckResult, Certainty, ContextResult, DependencyRecord, EdgeKind, ImpactChangeType,
         ImpactTraversalRule, NodeKind, PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath,
-        RiskResult, Span, StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult,
-        TestMapCoveredByResult, TestMapCoversResult, TestMapUncoveredResult, TraversalRecord,
-        Visibility,
+        RiskResult, SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult,
+        SnapshotSaveResult, Span, StabilityResult, SymbolKind, SymbolRecord,
+        TestMapBuildResult, TestMapCoveredByResult, TestMapCoversResult,
+        TestMapUncoveredResult, TraversalRecord, Visibility,
     },
     DatabaseInfo, IndexHealthStats,
 };
@@ -183,6 +184,26 @@ pub struct SurfaceDiffData {
 #[derive(Debug, Serialize)]
 pub struct RenamePlanData {
     pub result: RenamePlan,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnapshotSaveData {
+    pub result: SnapshotSaveResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnapshotListData {
+    pub result: SnapshotListResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnapshotDeleteData {
+    pub result: SnapshotDeleteResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnapshotDiffData {
+    pub result: SnapshotDiffResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -603,6 +624,22 @@ pub fn risk(result: RiskResult) -> JsonEnvelope<RiskData> {
 
 pub fn rename_plan(result: RenamePlan) -> JsonEnvelope<RenamePlanData> {
     JsonEnvelope::success("rename-plan", RenamePlanData { result })
+}
+
+pub fn snapshot_save(result: SnapshotSaveResult) -> JsonEnvelope<SnapshotSaveData> {
+    JsonEnvelope::success("snapshot-save", SnapshotSaveData { result })
+}
+
+pub fn snapshot_list(result: SnapshotListResult) -> JsonEnvelope<SnapshotListData> {
+    JsonEnvelope::success("snapshot-list", SnapshotListData { result })
+}
+
+pub fn snapshot_delete(result: SnapshotDeleteResult) -> JsonEnvelope<SnapshotDeleteData> {
+    JsonEnvelope::success("snapshot-delete", SnapshotDeleteData { result })
+}
+
+pub fn diff_snapshot(result: SnapshotDiffResult) -> JsonEnvelope<SnapshotDiffData> {
+    JsonEnvelope::success("diff-snapshot", SnapshotDiffData { result })
 }
 
 pub fn test_map_build(result: TestMapBuildResult) -> JsonEnvelope<TestMapBuildData> {

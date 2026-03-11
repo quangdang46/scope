@@ -10,8 +10,8 @@ use std::{
 
 use clap::Parser;
 use cli::{
-    ArchCommand, ChangeType, Cli, Commands, RiskSortArg, StabilitySortArg, SurfaceCommand,
-    TestMapCommand,
+    ArchCommand, ChangeType, Cli, Commands, RiskSortArg, SnapshotCommand, StabilitySortArg,
+    SurfaceCommand, TestMapCommand,
 };
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, DatabaseInfo,
@@ -271,13 +271,13 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             match (args.command, args.target) {
                 (Some(SurfaceCommand::Diff(diff_args)), None) => {
-                    let before = resolve_surface_target(&context.store, &diff_args.before)?;
-                    let after = resolve_surface_target(&context.store, &diff_args.after)?;
+                    let before = context.store.resolve_surface_target(&diff_args.before)?;
+                    let after = context.store.resolve_surface_target(&diff_args.after)?;
                     let diff = context.store.diff_public_surface(&before, &after)?;
                     serialize_output(&scope_core::stub::surface_diff(before, after, diff), compact)
                 }
                 (None, Some(target)) => {
-                    let path = resolve_surface_target(&context.store, &target)?;
+                    let path = context.store.resolve_surface_target(&target)?;
                     let surface = context.store.query_public_surface(&path)?;
                     serialize_output(&scope_core::stub::surface(path, surface), compact)
                 }
@@ -375,6 +375,37 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 exit_code = 1;
             }
             serialize_output(&scope_core::stub::rename_plan(plan), compact)
+        }
+        Commands::Snapshot(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            match args.command {
+                SnapshotCommand::Save(args) => {
+                    let result = context.store.save_snapshot(&args.name, args.commit)?;
+                    serialize_output(&scope_core::stub::snapshot_save(result), compact)
+                }
+                SnapshotCommand::List => {
+                    let result = context.store.list_snapshots()?;
+                    serialize_output(&scope_core::stub::snapshot_list(result), compact)
+                }
+                SnapshotCommand::Delete(args) => {
+                    let result = context.store.delete_snapshot(&args.name)?;
+                    serialize_output(&scope_core::stub::snapshot_delete(result), compact)
+                }
+            }
+        }
+        Commands::DiffSnapshot(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let config = load_arch_config(&context.paths.repo_root)?;
+            let result = context.store.diff_snapshot(&args.before, &args.after, &config)?;
+            serialize_output(&scope_core::stub::diff_snapshot(result), compact)
         }
         Commands::Doctor(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -600,7 +631,7 @@ fn format_public_surface(
     store: &scope_core::Store,
     target: &str,
 ) -> Result<String, scope_core::ScopeError> {
-    let path = target_file_for_target(store, target)?;
+    let path = store.target_file_for_target(target)?;
     let Some(path) = path else {
         return Ok(String::new());
     };
@@ -736,27 +767,6 @@ fn format_context_record_line(record: &ContextFileRecord) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
-}
-
-fn target_file_for_target(
-    store: &scope_core::Store,
-    target: &str,
-) -> Result<Option<RepoPath>, scope_core::ScopeError> {
-    if looks_like_symbol(target) {
-        let result = store.query_context(&[target.to_string()], "body", None)?;
-        Ok(result.must_read.first().map(|record| record.path.clone()))
-    } else {
-        Ok(Some(RepoPath::from(target.to_string())))
-    }
-}
-
-fn resolve_surface_target(
-    store: &scope_core::Store,
-    target: &str,
-) -> Result<RepoPath, scope_core::ScopeError> {
-    target_file_for_target(store, target)?.ok_or_else(|| {
-        scope_core::ScopeError::InvalidInput(format!("missing indexed file for target: {target}"))
-    })
 }
 
 fn validate_new_name(new_name: &str) -> Result<(), scope_core::ScopeError> {
@@ -1102,8 +1112,8 @@ fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_context_pack, format_public_surface, index_repo, render_cli_error,
-        resolve_surface_target, run_benchmark, serialize_output,
+        build_context_pack, format_public_surface, index_repo, render_cli_error, run_benchmark,
+        serialize_output,
     };
     use scope_core::{
         Certainty, PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
@@ -1471,6 +1481,51 @@ mod tests {
     }
 
     #[test]
+    fn serialize_output_snapshot_commands_use_expected_envelope_shape() {
+        let save = scope_core::stub::snapshot_save(scope_core::SnapshotSaveResult {
+            snapshot: scope_core::SnapshotMetadata {
+                name: "baseline".to_string(),
+                created_at: 123,
+                commit: Some("HEAD".to_string()),
+                schema_version: 6,
+                snapshot_version: 1,
+            },
+            replaced_existing: false,
+            summary: scope_core::SnapshotDiffSummary {
+                files: 2,
+                symbols: 3,
+                file_edges: 1,
+                symbol_edges: 1,
+            },
+        });
+        let list = scope_core::stub::snapshot_list(scope_core::SnapshotListResult {
+            snapshots: vec![scope_core::SnapshotMetadata {
+                name: "baseline".to_string(),
+                created_at: 123,
+                commit: None,
+                schema_version: 6,
+                snapshot_version: 1,
+            }],
+            summary: scope_core::SnapshotListSummary { snapshot_count: 1 },
+        });
+        let delete = scope_core::stub::snapshot_delete(scope_core::SnapshotDeleteResult {
+            name: "baseline".to_string(),
+            deleted: true,
+        });
+
+        let save_value: serde_json::Value = serde_json::from_str(&serialize_output(&save, true).unwrap()).unwrap();
+        let list_value: serde_json::Value = serde_json::from_str(&serialize_output(&list, true).unwrap()).unwrap();
+        let delete_value: serde_json::Value = serde_json::from_str(&serialize_output(&delete, true).unwrap()).unwrap();
+
+        assert_eq!(save_value["command"], "snapshot-save");
+        assert_eq!(save_value["data"]["result"]["snapshot"]["name"], "baseline");
+        assert_eq!(list_value["command"], "snapshot-list");
+        assert_eq!(list_value["data"]["result"]["summary"]["snapshot_count"], 1);
+        assert_eq!(delete_value["command"], "snapshot-delete");
+        assert_eq!(delete_value["data"]["result"]["deleted"], true);
+    }
+
+    #[test]
     fn rust_small_parse_pack_body_matches_golden() {
         let repo = prepare_fixture_copy("rust_small");
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
@@ -1485,7 +1540,7 @@ mod tests {
         assert!(actual.contains("--- BODY IMPACT ---"));
         assert!(actual.contains("truncated: no"));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1504,7 +1559,7 @@ mod tests {
         assert!(actual.contains("--- RENAME IMPACT ---"));
         assert!(actual.contains("truncated: no"));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1520,7 +1575,7 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(actual.contains("truncated: yes"));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1529,10 +1584,10 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let resolved = resolve_surface_target(&store, "auth::middleware::verifyToken").unwrap();
+        let resolved = store.resolve_surface_target( "auth::middleware::verifyToken").unwrap();
         assert_eq!(resolved, RepoPath::from("src/auth/middleware.ts"));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1541,10 +1596,10 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let error = resolve_surface_target(&store, "missing::symbol").unwrap_err();
+        let error = store.resolve_surface_target( "missing::symbol").unwrap_err();
         assert!(error.to_string().contains("missing::symbol"));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1553,10 +1608,10 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let resolved = resolve_surface_target(&store, "src/parser.rs").unwrap();
+        let resolved = store.resolve_surface_target( "src/parser.rs").unwrap();
         assert_eq!(resolved, RepoPath::from("src/parser.rs"));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1572,7 +1627,7 @@ mod tests {
             "--- PUBLIC SURFACE (src/parser.rs) ---\nparser::parse | function | public | line 1"
         );
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1581,7 +1636,7 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let path = resolve_surface_target(&store, "auth::middleware::verifyToken").unwrap();
+        let path = store.resolve_surface_target( "auth::middleware::verifyToken").unwrap();
         let surface = store.query_public_surface(&path).unwrap();
         let envelope = scope_core::stub::surface(path.clone(), surface);
 
@@ -1594,7 +1649,7 @@ mod tests {
             .iter()
             .any(|symbol| symbol.qualname == "auth::middleware::verifyToken"));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1603,8 +1658,8 @@ mod tests {
         let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
         let _ = index_repo(&repo, &store).unwrap();
 
-        let before = resolve_surface_target(&store, "src/auth/jwt.ts").unwrap();
-        let after = resolve_surface_target(&store, "src/auth/aliases.ts").unwrap();
+        let before = store.resolve_surface_target( "src/auth/jwt.ts").unwrap();
+        let after = store.resolve_surface_target( "src/auth/aliases.ts").unwrap();
         let diff = store.diff_public_surface(&before, &after).unwrap();
         let envelope = scope_core::stub::surface_diff(before.clone(), after.clone(), diff);
 
@@ -1614,7 +1669,7 @@ mod tests {
         assert_eq!(envelope.data.diff.summary.removed_count, 2);
         assert_eq!(envelope.data.diff.summary.modified_count, 0);
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1662,7 +1717,7 @@ mod tests {
         assert!(plan.steps.iter().any(|step| step.path == RepoPath::from("src/auth/middleware.ts")));
         assert!(!plan.steps.iter().any(|step| step.path == RepoPath::from("src/index.ts")));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1696,7 +1751,7 @@ mod tests {
             .unwrap()
             .contains("export function verifySession(token: string): boolean"));
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1714,7 +1769,7 @@ mod tests {
         assert_eq!(plan.new_name, "parser2");
         assert!(!plan.warnings.is_empty());
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1737,7 +1792,7 @@ mod tests {
         assert!(plan.applied);
         assert!(plan.skipped.is_empty());
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -1802,7 +1857,7 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 }
 
