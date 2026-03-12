@@ -268,6 +268,36 @@ fn tree_command_returns_recursive_json_envelope_for_fixture_repo() {
 }
 
 #[test]
+fn tree_reverse_command_returns_reverse_dependency_json_for_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["tree", "src/parser.rs", "--reverse", "--depth", "2"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "tree");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["target"], "src/parser.rs");
+    assert_eq!(value["data"]["result"]["reverse"], true);
+    assert_eq!(value["data"]["result"]["depth"], 2);
+    assert_eq!(value["data"]["result"]["summary"]["reverse"], true);
+    assert_eq!(value["data"]["result"]["summary"]["nodes"], 4);
+    assert_eq!(value["data"]["result"]["tree"]["path"], "src/parser.rs");
+    assert_eq!(value["data"]["result"]["tree"]["children"][0]["path"], "src/lib.rs");
+    assert_eq!(value["data"]["result"]["tree"]["children"][1]["path"], "src/resolver.rs");
+    assert_eq!(
+        value["data"]["result"]["tree"]["children"][1]["children"][0]["path"],
+        "src/lib.rs"
+    );
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn diff_command_reports_no_changes_for_clean_fixture_repo() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);
@@ -286,6 +316,28 @@ fn diff_command_reports_no_changes_for_clean_fixture_repo() {
     assert_eq!(value["data"]["result"]["summary"]["affected_files"], 0);
 
     fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn diff_command_empty_branch_emits_json_error_on_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["diff", ""])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("diff branch may not be empty"));
 }
 
 #[test]

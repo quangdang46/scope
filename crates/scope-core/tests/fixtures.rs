@@ -123,6 +123,7 @@ fn planned_fixture_directories_exist() {
     for fixture in [
         "rust_small",
         "ts_small",
+        "mixed_repo",
         "dynamic_limits",
         "arch_violations",
         "test_map_ts",
@@ -311,6 +312,83 @@ fn ts_small_is_scanned_and_indexed_by_fixture_indexer() {
             .map(|dep| dep.path.0.clone())
             .collect::<Vec<_>>(),
         vec!["src/auth/index.ts", "src/utils/formatter.ts"]
+    );
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn mixed_repo_fixture_has_expected_files() {
+    let root = fixture_root("mixed_repo");
+    for relative in [
+        "Cargo.toml",
+        "package.json",
+        "src/lib.rs",
+        "src/parser.rs",
+        "web/index.ts",
+        "web/auth.ts",
+    ] {
+        assert!(
+            root.join(relative).is_file(),
+            "missing mixed_repo file: {relative}"
+        );
+    }
+}
+
+#[test]
+fn mixed_repo_scans_and_indexes_rust_and_typescript_together() {
+    let entries = scan_repo(&fixture_root("mixed_repo"), &ScanConfig::default()).unwrap();
+    assert_eq!(entries.len(), 4);
+    assert!(entries.iter().any(|entry| entry.path == RepoPath::from("src/lib.rs")
+        && entry.language == SupportedLanguage::Rust));
+    assert!(entries.iter().any(|entry| entry.path == RepoPath::from("src/parser.rs")
+        && entry.language == SupportedLanguage::Rust));
+    assert!(entries.iter().any(|entry| entry.path == RepoPath::from("web/index.ts")
+        && entry.language == SupportedLanguage::TypeScript));
+    assert!(entries.iter().any(|entry| entry.path == RepoPath::from("web/auth.ts")
+        && entry.language == SupportedLanguage::TypeScript));
+
+    let repo = prepare_fixture_copy("mixed_repo");
+    let store = index_fixture(&repo);
+
+    let rust_deps = store.query_deps(&RepoPath::from("src/lib.rs")).unwrap();
+    assert_eq!(
+        rust_deps
+            .iter()
+            .map(|dep| dep.path.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["src/parser.rs"]
+    );
+
+    let ts_deps = store.query_deps(&RepoPath::from("web/index.ts")).unwrap();
+    assert_eq!(
+        ts_deps
+            .iter()
+            .map(|dep| dep.path.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["web/auth.ts"]
+    );
+
+    let rust_symbols = store
+        .query_symbols(&RepoPath::from("src/lib.rs"), false, None)
+        .unwrap();
+    assert_eq!(
+        rust_symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["parser", "greet"]
+    );
+
+    let ts_symbols = store
+        .query_symbols(&RepoPath::from("web/auth.ts"), false, None)
+        .unwrap();
+    assert_eq!(
+        ts_symbols
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["verifyToken"]
     );
 
     fs::remove_dir_all(repo).unwrap();
