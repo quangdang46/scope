@@ -243,6 +243,55 @@ fn cochange_command_returns_json_envelope_for_generated_git_fixture() {
 }
 
 #[test]
+fn cochange_command_honors_filters_and_sort_for_generated_git_fixture() {
+    let fixture_root = fixture_root("cochange");
+    let script = fixture_root.join("create_git_history.sh");
+    let repo = unique_temp_dir("cochange-cli-filtered");
+
+    let status = Command::new(&script).arg(&repo).status().unwrap();
+    assert!(status.success());
+
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(
+        &repo,
+        &[
+            "cochange",
+            "src/parser.rs",
+            "--days",
+            "10000",
+            "--min-shared-commits",
+            "2",
+            "--top",
+            "1",
+            "--sort",
+            "shared-commits",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "cochange");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["target"], "src/parser.rs");
+    assert_eq!(value["data"]["result"]["min_shared_commits"], 2);
+    assert_eq!(value["data"]["result"]["top"], 1);
+    assert_eq!(value["data"]["result"]["sort"], "shared_commits");
+    assert_eq!(value["data"]["result"]["summary"]["related_files"], 1);
+    let files = value["data"]["result"]["files"]
+        .as_array()
+        .expect("files should be an array");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "src/utils.rs");
+    assert_eq!(files[0]["shared_commits"], 3);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn tree_invalid_target_emits_json_error_on_stderr() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .args(["tree", "does/not/exist.rs"])

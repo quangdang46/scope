@@ -192,7 +192,7 @@ fn simulate_extract_rejects_duplicate_symbols() {
         .to_string()
         .contains("received duplicate symbol `lib::parser`"));
 
-    fs::remove_dir_all(repo).unwrap();
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
