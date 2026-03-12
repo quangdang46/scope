@@ -104,7 +104,7 @@ fn simulate_extract_command_returns_json_envelope_for_fixture_repo() {
     );
     assert_eq!(value["data"]["result"]["recommendation"], "neutral");
 
-    fs::remove_dir_all(repo).unwrap();
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn simulate_extract_command_rejects_existing_target_file_with_json_error() {
         .expect("error message should be a string")
         .contains("target file `src/parser.rs` already exists in the index"));
 
-    fs::remove_dir_all(repo).unwrap();
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -194,5 +194,5 @@ fn simulate_extract_command_rejects_unresolved_symbol_with_json_error() {
         .expect("error message should be a string")
         .contains("could not resolve symbol `lib::missing_symbol`"));
 
-    fs::remove_dir_all(repo).unwrap();
+    let _ = fs::remove_dir_all(repo);
 }

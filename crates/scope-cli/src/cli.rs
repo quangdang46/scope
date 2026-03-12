@@ -72,6 +72,10 @@ pub enum Commands {
     Diff(DiffArgs),
     /// Render a recursive dependency tree for an indexed file
     Tree(TreeArgs),
+    /// Suggest decomposition clusters for a large indexed file
+    Split(SplitArgs),
+    /// Compare a file against structurally similar indexed files
+    Mirror(MirrorArgs),
     /// Detect entry points and analyze file reachability
     Entry(EntryArgs),
     /// Start a local HTTP API server with a minimal embedded UI
@@ -410,6 +414,24 @@ pub struct TreeArgs {
     pub reverse: bool,
     #[arg(long)]
     pub depth: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SplitArgs {
+    pub target: String,
+    #[arg(long)]
+    pub clusters: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct MirrorArgs {
+    pub target: String,
+    #[arg(long)]
+    pub other: Option<String>,
+    #[arg(long)]
+    pub threshold: Option<u32>,
+    #[arg(long)]
+    pub top: Option<usize>,
 }
 
 #[derive(Debug, clap::Args)]

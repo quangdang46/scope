@@ -171,7 +171,7 @@ fn simulate_extract_rejects_existing_target_file() {
         .to_string()
         .contains("target file `src/parser.rs` already exists in the index"));
 
-    fs::remove_dir_all(repo).unwrap();
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]

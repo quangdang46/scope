@@ -518,6 +518,32 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     .query_tree(&RepoPath::from(args.path), args.reverse, args.depth)?;
             serialize_output(&scope_core::stub::tree(result), compact)
         }
+        Commands::Split(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let result = context
+                .store
+                .query_split(&RepoPath::from(args.target), args.clusters)?;
+            serialize_output(&scope_core::stub::split(result), compact)
+        }
+        Commands::Mirror(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let other = args.other.as_deref().map(RepoPath::from);
+            let result = context.store.query_mirror(
+                &RepoPath::from(args.target),
+                other.as_ref(),
+                args.threshold,
+                args.top,
+            )?;
+            serialize_output(&scope_core::stub::mirror(result), compact)
+        }
         Commands::Entry(args) => {
             let bootstrap_options = BootstrapOptions {
                 repo_root_override: cli.repo_root.clone(),

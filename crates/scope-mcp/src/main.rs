@@ -571,6 +571,38 @@ fn tool_registry() -> Vec<Value> {
             }),
         ),
         tool_definition(
+            "split",
+            "Suggest decomposition clusters for a large indexed file.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "target": { "type": "string" },
+                    "clusters": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "mirror",
+            "Compare a file against structurally similar indexed files.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "target": { "type": "string" },
+                    "other": { "type": "string" },
+                    "threshold": { "type": "integer", "minimum": 0, "maximum": 100 },
+                    "top": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
             "entry_list",
             "List detected entry points.",
             json!({
@@ -751,6 +783,8 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, DispatchError>
         "cycles" => dispatch_cycles(arguments),
         "diff" => dispatch_diff(arguments),
         "tree" => dispatch_tree(arguments),
+        "split" => dispatch_split(arguments),
+        "mirror" => dispatch_mirror(arguments),
         "entry_list" => dispatch_entry_list(arguments),
         "entry_cone" => dispatch_entry_cone(arguments),
         "entry_reaches" => dispatch_entry_reaches(arguments),
@@ -1212,6 +1246,36 @@ fn dispatch_tree(arguments: &Value) -> String {
     }) {
         Ok(output) => output,
         Err(error) => render_domain_error("tree", &error),
+    }
+}
+
+fn dispatch_split(arguments: &Value) -> String {
+    match required_string(arguments, "target").and_then(|target| {
+        bootstrap_from_arguments(arguments).and_then(|context| {
+            let clusters = optional_usize(arguments, "clusters")?;
+            let result = context.store.query_split(&RepoPath::from(target), clusters)?;
+            serialize_json(&scope_core::stub::split(result))
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("split", &error),
+    }
+}
+
+fn dispatch_mirror(arguments: &Value) -> String {
+    match required_string(arguments, "target").and_then(|target| {
+        bootstrap_from_arguments(arguments).and_then(|context| {
+            let other = optional_string(arguments, "other").map(RepoPath::from);
+            let threshold = optional_u32(arguments, "threshold")?;
+            let top = optional_usize(arguments, "top")?;
+            let result = context
+                .store
+                .query_mirror(&RepoPath::from(target), other.as_ref(), threshold, top)?;
+            serialize_json(&scope_core::stub::mirror(result))
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("mirror", &error),
     }
 }
 
@@ -2449,6 +2513,50 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_split_and_mirror_return_scope_json_envelopes() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let split_output = dispatch_tool(
+            "split",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/lib.rs",
+                "clusters": 2
+            }),
+        )
+        .unwrap();
+        let split_value: Value = serde_json::from_str(&split_output).unwrap();
+        assert_eq!(split_value["command"], "split");
+        assert_eq!(split_value["status"], "ok");
+        assert_eq!(split_value["data"]["result"]["target"], "src/lib.rs");
+        assert_eq!(split_value["data"]["result"]["requested_clusters"], 2);
+
+        let mirror_output = dispatch_tool(
+            "mirror",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/lib.rs",
+                "other": "src/parser.rs",
+                "threshold": 0
+            }),
+        )
+        .unwrap();
+        let mirror_value: Value = serde_json::from_str(&mirror_output).unwrap();
+        assert_eq!(mirror_value["command"], "mirror");
+        assert_eq!(mirror_value["status"], "ok");
+        assert_eq!(mirror_value["data"]["result"]["target"], "src/lib.rs");
+        assert_eq!(mirror_value["data"]["result"]["other"], "src/parser.rs");
+        assert!(mirror_value["data"]["result"]["similarity_score"].is_number());
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
     fn dispatch_test_map_returns_scope_json_envelope() {
         let repo = prepare_fixture_copy("test_map_ts");
         let index_output = dispatch_tool(
@@ -2589,7 +2697,7 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["target"], "src/parser.rs");
         assert_eq!(value["data"]["result"]["files"][0]["path"], "src/utils.rs");
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -2618,7 +2726,7 @@ mod tests {
             .as_str()
             .expect("error message should be a string")
             .contains("min_shared_commits must be greater than 0"));
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -2647,7 +2755,7 @@ mod tests {
             .as_str()
             .expect("error message should be a string")
             .contains("top must be greater than 0"));
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -2675,7 +2783,7 @@ mod tests {
             .as_str()
             .expect("error message should be a string")
             .contains("file not indexed: src/missing.rs"));
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]

@@ -239,7 +239,7 @@ fn cochange_command_returns_json_envelope_for_generated_git_fixture() {
     .unwrap();
     assert_eq!(actual, expected.trim_end_matches('\n'));
 
-    fs::remove_dir_all(repo).unwrap();
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -287,6 +287,56 @@ fn cochange_command_honors_filters_and_sort_for_generated_git_fixture() {
     assert_eq!(files.len(), 1);
     assert_eq!(files[0]["path"], "src/utils.rs");
     assert_eq!(files[0]["shared_commits"], 3);
+
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn split_command_returns_json_envelope_for_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["split", "src/lib.rs", "--clusters", "2"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "split");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["target"], "src/lib.rs");
+    assert_eq!(value["data"]["result"]["requested_clusters"], 2);
+    assert!(value["data"]["result"]["summary"]["clusters"].as_u64().unwrap() >= 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn mirror_command_returns_json_envelope_for_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(
+        &repo,
+        &[
+            "mirror",
+            "src/lib.rs",
+            "--other",
+            "src/parser.rs",
+            "--threshold",
+            "0",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "mirror");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["target"], "src/lib.rs");
+    assert_eq!(value["data"]["result"]["other"], "src/parser.rs");
+    assert!(value["data"]["result"]["similarity_score"].is_number());
 
     fs::remove_dir_all(repo).unwrap();
 }

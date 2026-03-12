@@ -1033,7 +1033,7 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["extraction"]["from_file"], "src/lib.rs");
         assert_eq!(value["data"]["result"]["extraction"]["into_file"], "src/parser_extracted.rs");
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[tokio::test]
@@ -1053,7 +1053,7 @@ mod tests {
             .as_str()
             .expect("error message should be a string")
             .contains("simulate extract requires at least one symbol"));
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[tokio::test]
@@ -1084,7 +1084,7 @@ mod tests {
         assert_eq!(value["data"]["result"]["summary"]["target_commits"], 4);
         assert_eq!(value["data"]["result"]["files"][0]["path"], "src/utils.rs");
         assert_eq!(value["data"]["result"]["files"][1]["path"], "src/resolver.rs");
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[tokio::test]
@@ -1164,7 +1164,7 @@ mod tests {
             .as_str()
             .expect("error message should be a string")
             .contains("file not indexed: src/missing.rs"));
-        fs::remove_dir_all(repo).unwrap();
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[tokio::test]
