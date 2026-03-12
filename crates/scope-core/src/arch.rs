@@ -3,8 +3,8 @@ use std::{collections::HashSet, fs, path::Path};
 use glob::Pattern;
 
 use crate::{
-    ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation, RepoPath,
-    ScopeError, ScopeResult, Store, TestConfig,
+    ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation, GateConfig,
+    GateMetric, RepoPath, ScopeError, ScopeResult, Store, TestConfig,
 };
 
 pub fn load_arch_config(repo_root: &Path) -> ScopeResult<ArchConfig> {
@@ -90,6 +90,7 @@ fn validate_arch_config(config: &ArchConfig) -> ScopeResult<()> {
     validate_test_config(&config.tests)?;
     validate_entry_point_config(&config.entry_points)?;
     validate_capability_config(&config.capabilities)?;
+    validate_gate_config(&config.gates)?;
 
     if config.layers.is_empty() {
         return Ok(());
@@ -197,6 +198,72 @@ pub fn validate_capability_config(config: &[crate::CapabilityConfig]) -> ScopeRe
     Ok(())
 }
 
+pub fn validate_gate_config(config: &[GateConfig]) -> ScopeResult<()> {
+    for gate in config {
+        if gate.min.is_none()
+            && gate.max.is_none()
+            && gate.min_delta.is_none()
+            && gate.max_delta.is_none()
+            && !gate.skip
+        {
+            return Err(ScopeError::InvalidInput(format!(
+                "gate '{:?}' must declare at least one threshold or set skip = true",
+                gate.metric
+            )));
+        }
+
+        if let (Some(min), Some(max)) = (gate.min, gate.max) {
+            if min > max {
+                return Err(ScopeError::InvalidInput(format!(
+                    "gate '{:?}' min may not exceed max",
+                    gate.metric
+                )));
+            }
+        }
+
+        if let (Some(min_delta), Some(max_delta)) = (gate.min_delta, gate.max_delta) {
+            if min_delta > max_delta {
+                return Err(ScopeError::InvalidInput(format!(
+                    "gate '{:?}' min_delta may not exceed max_delta",
+                    gate.metric
+                )));
+            }
+        }
+
+        match gate.metric {
+            GateMetric::HealthScore
+            | GateMetric::HealthScoreDelta
+            | GateMetric::ImportsUnresolvedPct
+            | GateMetric::ImportsResolvedPct => {
+                for (label, value) in [("min", gate.min), ("max", gate.max)] {
+                    if let Some(value) = value {
+                        if !(0.0..=100.0).contains(&value) {
+                            return Err(ScopeError::InvalidInput(format!(
+                                "gate '{:?}' {label} must be between 0 and 100",
+                                gate.metric
+                            )));
+                        }
+                    }
+                }
+            }
+            _ => {
+                for (label, value) in [("min", gate.min), ("max", gate.max)] {
+                    if let Some(value) = value {
+                        if value < 0.0 {
+                            return Err(ScopeError::InvalidInput(format!(
+                                "gate '{:?}' {label} must be non-negative",
+                                gate.metric
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_layer<'a>(
     layers: &'a [ArchLayer],
     path: &RepoPath,
@@ -238,6 +305,7 @@ mod tests {
             }],
             entry_points: Vec::new(),
             capabilities: Vec::new(),
+            gates: Vec::new(),
             tests: TestConfig::default(),
         };
 

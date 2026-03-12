@@ -14,7 +14,7 @@ pub mod stub;
 pub mod tracing;
 
 pub use adapters::{adapter_for_language, Adapter, RustAdapter, TsJsAdapter};
-pub use arch::{arch_check, arch_check_edges, load_arch_config};
+pub use arch::{arch_check, arch_check_edges, load_arch_config, validate_gate_config};
 pub use bootstrap::{bootstrap, AppContext};
 pub use config::{BootstrapOptions, RuntimePaths};
 pub use error::{ScopeError, ScopeResult};

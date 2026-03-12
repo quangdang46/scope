@@ -89,21 +89,75 @@ pub fn parse_query_statement(input: &str) -> ScopeResult<QueryStatement> {
 }
 
 fn parse_query_expr(input: &str) -> ScopeResult<QueryExpr> {
-    let mut segments = input
-        .split('|')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty());
+    let segments = split_pipeline_segments(input)?;
+    if segments.is_empty() || segments[0].is_empty() {
+        return Err(ScopeError::InvalidInput(
+            "query expression is missing a source".to_string(),
+        ));
+    }
 
-    let source_segment = segments.next().ok_or_else(|| {
-        ScopeError::InvalidInput("query expression is missing a source".to_string())
-    })?;
-    let source = parse_source(source_segment)?;
+    let source = parse_source(&segments[0])?;
     let mut steps = Vec::new();
-    for segment in segments {
+    for segment in &segments[1..] {
         steps.push(parse_step(segment)?);
     }
 
     Ok(QueryExpr { source, steps })
+}
+
+fn split_pipeline_segments(input: &str) -> ScopeResult<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        if in_quotes && escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_quotes => {
+                current.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            '|' if !in_quotes => {
+                let segment = current.trim();
+                if segment.is_empty() {
+                    return Err(ScopeError::InvalidInput(
+                        "query expression contains an empty pipeline segment".to_string(),
+                    ));
+                }
+                segments.push(segment.to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if in_quotes {
+        return Err(ScopeError::InvalidInput(
+            "query expression contains an unterminated quoted string".to_string(),
+        ));
+    }
+
+    let tail = current.trim();
+    if tail.is_empty() {
+        if !segments.is_empty() {
+            return Err(ScopeError::InvalidInput(
+                "query expression contains an empty pipeline segment".to_string(),
+            ));
+        }
+        return Ok(Vec::new());
+    }
+    segments.push(tail.to_string());
+    Ok(segments)
 }
 
 fn parse_source(input: &str) -> ScopeResult<QuerySource> {
@@ -395,5 +449,56 @@ mod tests {
         let error = parse_query_statement("file \"src/lib.rs\" | .impact").unwrap_err();
         assert_eq!(error.kind(), "invalid_input");
         assert!(error.to_string().contains("unsupported query step"));
+    }
+
+    #[test]
+    fn reject_trailing_pipe_segment() {
+        let error = parse_query_statement("file \"src/lib.rs\" | .deps |").unwrap_err();
+        assert_eq!(error.kind(), "invalid_input");
+        assert!(error
+            .to_string()
+            .contains("empty pipeline segment"));
+    }
+
+    #[test]
+    fn reject_repeated_pipe_segment() {
+        let error = parse_query_statement("file \"src/lib.rs\" || .deps").unwrap_err();
+        assert_eq!(error.kind(), "invalid_input");
+        assert!(error
+            .to_string()
+            .contains("empty pipeline segment"));
+    }
+
+    #[test]
+    fn allow_pipe_inside_quoted_selector() {
+        let statement = parse_query_statement("file \"src/a|b.rs\" | .deps").unwrap();
+        assert_eq!(
+            statement,
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::File(RepoPath::from("src/a|b.rs")),
+                steps: vec![QueryStep::Deps],
+            })
+        );
+    }
+
+    #[test]
+    fn reject_unterminated_quoted_selector() {
+        let error = parse_query_statement("file \"src/lib.rs | .deps").unwrap_err();
+        assert_eq!(error.kind(), "invalid_input");
+        assert!(error
+            .to_string()
+            .contains("unterminated quoted string"));
+    }
+
+    #[test]
+    fn allow_escaped_quote_and_pipe_inside_quoted_selector() {
+        let statement = parse_query_statement("file \"src/a\\\"|b.rs\" | .deps").unwrap();
+        assert_eq!(
+            statement,
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::File(RepoPath::from("src/a\\\"|b.rs")),
+                steps: vec![QueryStep::Deps],
+            })
+        );
     }
 }

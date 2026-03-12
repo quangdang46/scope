@@ -58,6 +58,7 @@ fn serialize_output<T: serde::Serialize>(
     }
 }
 
+
 fn compact_json_value(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
@@ -475,6 +476,25 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     serialize_output(&scope_core::stub::simulate_extract(result), compact)
                 }
             }
+        }
+        Commands::Report(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let _context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            serialize_output(&scope_core::stub::scaffolded_report(args.compare), compact)
+        }
+        Commands::Gate(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let _context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            if args.strict {
+                exit_code = 1;
+            }
+            serialize_output(&scope_core::stub::scaffolded_gate(args.compare, args.strict), compact)
         }
         Commands::Unused => {
             let bootstrap_options = BootstrapOptions {

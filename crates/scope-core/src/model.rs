@@ -583,7 +583,7 @@ pub struct CapabilityConfig {
     pub expected_callers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ArchConfig {
     #[serde(default, rename = "layer")]
     pub layers: Vec<ArchLayer>,
@@ -593,6 +593,8 @@ pub struct ArchConfig {
     pub entry_points: Vec<EntryPointConfig>,
     #[serde(default, rename = "capability")]
     pub capabilities: Vec<CapabilityConfig>,
+    #[serde(default, rename = "gate")]
+    pub gates: Vec<GateConfig>,
     #[serde(default, rename = "tests")]
     pub tests: TestConfig,
 }

@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::{
-    arch_check_edges, snapshot, ArchConfig, ArchFileEdge, AuditCapabilitySource,
+    arch_check, arch_check_edges, snapshot, ArchConfig, ArchFileEdge, AuditCapabilitySource,
     AuditEntryReachRecord, AuditResult, AuditSummary, BranchDiffAffectedFile,
     BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary, Certainty, CochangeRecord,
     CochangeResult, CochangeSort, CochangeSummary, ContextFileRecord, ContextFileRole,
@@ -28,7 +28,9 @@ use crate::{
     SnapshotListSummary, SnapshotMetadata, SnapshotSaveResult, SnapshotStabilityDelta,
     SnapshotStoredRecord, SnapshotSymbolRecord, SplitCluster, SplitClusterMember, SplitResult,
     SplitSummary, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
-    StabilitySummary, SymbolKind, SymbolRecord, TestConfig,
+    StabilitySummary, SymbolKind, SymbolRecord, TestConfig, GateConfig, GateEvaluation,
+    GateMetric, GateResult, GateSeverity, GateStatus, GateSummary, HealthReportComparison,
+    HealthReportMetrics, HealthReportResult,
     TestMapBuildResult, TestMapBuildSummary, TestMapCoveredByResult, TestMapCoveredBySummary,
     TestMapCoversResult, TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult,
     TestMapUncoveredSummary, TraversalRecord, TreeNode, TreeResult, TreeSummary, UnusedRecord,
@@ -1023,6 +1025,161 @@ impl Store {
             sort,
             files: records,
             summary,
+        })
+    }
+
+    pub fn query_report(
+        &self,
+        config: &ArchConfig,
+        compare: Option<&str>,
+    ) -> ScopeResult<HealthReportResult> {
+        let total_files = self.list_indexed_files()?.len();
+        let total_symbols = self.count_rows("symbols")?;
+        let total_imports = self.count_rows("imports")?;
+        let unresolved_imports = self.count_query(
+            "SELECT COUNT(*) FROM imports WHERE resolved_file_id IS NULL",
+        )?;
+        let parse_errors = self.count_query(
+            "SELECT COUNT(*) FROM files WHERE parse_status = 'error'",
+        )?;
+
+        let arch = arch_check(self, config)?;
+        let cycles = self.query_cycles(None)?;
+        let stability = self.query_stability(None, None, StabilitySort::Instability)?;
+        let unreachable = self.query_entry_unreachable(config, None)?;
+        let unused = self.query_unused()?;
+        let risk = self.query_risk(None, 90, None, Some(5), RiskSort::Score)?;
+
+        let imports_unresolved_pct = percent(unresolved_imports, total_imports);
+        let imports_resolved_pct = if total_imports == 0 {
+            100.0
+        } else {
+            100.0 - imports_unresolved_pct
+        };
+        let public_surface_removed = compare
+            .map(|target| self.compare_public_surface_removed(target))
+            .transpose()?
+            .unwrap_or(0);
+
+        let metrics = HealthReportMetrics {
+            total_files,
+            total_symbols,
+            total_imports,
+            unresolved_imports,
+            imports_unresolved_pct,
+            imports_resolved_pct,
+            parse_errors,
+            layer_violations: arch.violations.len(),
+            cycles: cycles.summary.cycle_count,
+            max_file_fan_in: max_file_fan_in(self.query_file_edges()?),
+            avg_instability: stability.summary.avg_instability,
+            unreachable_files: unreachable.unreachable_files,
+            unused_exports: unused.summary.unused_symbols,
+            public_surface_removed,
+            health_score: compute_health_score(
+                parse_errors,
+                arch.violations.len(),
+                cycles.summary.cycle_count,
+                unreachable.unreachable_files,
+                unused.summary.unused_symbols,
+                imports_unresolved_pct,
+                public_surface_removed,
+            ),
+        };
+
+        let comparison = if let Some(target) = compare {
+            let baseline = self.load_snapshot(target)?;
+            let baseline_layer_violations = baseline_layer_violations(&baseline.graph, config)?;
+            let baseline_cycles = baseline_cycles(&baseline.graph);
+            let baseline_unreachable_files = baseline_unreachable_files(&baseline.graph, config)?;
+            let baseline_public_surface_removed = 0usize;
+            let baseline_health_score = compute_health_score(
+                0,
+                baseline_layer_violations,
+                baseline_cycles,
+                baseline_unreachable_files,
+                baseline_unused_exports(&baseline.graph),
+                baseline_imports_unresolved_pct(&baseline.graph),
+                baseline_public_surface_removed,
+            );
+            Some(HealthReportComparison {
+                target: target.to_string(),
+                baseline_health_score,
+                health_score_delta: metrics.health_score - baseline_health_score,
+                baseline_layer_violations,
+                layer_violations_delta: metrics.layer_violations as isize
+                    - baseline_layer_violations as isize,
+                baseline_cycles,
+                cycles_delta: metrics.cycles as isize - baseline_cycles as isize,
+                baseline_unreachable_files,
+                unreachable_files_delta: metrics.unreachable_files as isize
+                    - baseline_unreachable_files as isize,
+                baseline_public_surface_removed,
+                public_surface_removed_delta: metrics.public_surface_removed as isize
+                    - baseline_public_surface_removed as isize,
+            })
+        } else {
+            None
+        };
+
+        let recommendations = report_recommendations(&metrics, &comparison);
+
+        Ok(HealthReportResult {
+            generated_at: unix_timestamp(),
+            compare: comparison,
+            metrics,
+            risk_hotspots: risk.files,
+            arch_violations: arch.violations,
+            cycles_detail: cycles.cycles,
+            unreachable_detail: unreachable.unreachable,
+            unused_export_detail: unused.symbols,
+            recommendations,
+        })
+    }
+
+    pub fn query_gate(
+        &self,
+        config: &ArchConfig,
+        compare: Option<&str>,
+        strict: bool,
+    ) -> ScopeResult<GateResult> {
+        let report = self.query_report(config, compare)?;
+        let gate_configs = if config.gates.is_empty() {
+            default_gate_config(strict)
+        } else {
+            config.gates.clone()
+        };
+
+        let evaluations = gate_configs
+            .iter()
+            .map(|gate| evaluate_gate(gate, &report, strict))
+            .collect::<Vec<_>>();
+
+        let summary = GateSummary {
+            total: evaluations.len(),
+            passed: evaluations
+                .iter()
+                .filter(|evaluation| evaluation.status == GateStatus::Pass)
+                .count(),
+            warnings: evaluations
+                .iter()
+                .filter(|evaluation| evaluation.status == GateStatus::Warning)
+                .count(),
+            failed: evaluations
+                .iter()
+                .filter(|evaluation| evaluation.status == GateStatus::Fail)
+                .count(),
+            skipped: evaluations
+                .iter()
+                .filter(|evaluation| evaluation.status == GateStatus::Skipped)
+                .count(),
+        };
+
+        Ok(GateResult {
+            compare: compare.map(str::to_string),
+            report,
+            summary,
+            evaluations,
         })
     }
 
@@ -2934,6 +3091,13 @@ impl Store {
             .connection
             .execute("DELETE FROM files WHERE path = ?1", [path.0.as_str()])?;
         Ok(deleted > 0)
+    }
+
+    fn compare_public_surface_removed(&self, snapshot_name: &str) -> ScopeResult<usize> {
+        let snapshot = self.load_snapshot(snapshot_name)?;
+        let before = snapshot_public_surface(&snapshot.graph);
+        let after = current_public_surface(self)?;
+        Ok(diff_public_surfaces(&before, &after).summary.removed_count)
     }
 
     pub fn reverse_dependency_closure(&self, paths: &[RepoPath]) -> ScopeResult<Vec<RepoPath>> {
@@ -6036,6 +6200,405 @@ fn dedup_traversals(traversals: Vec<TraversalRecord>) -> Vec<TraversalRecord> {
             .then_with(|| left.qualname.cmp(&right.qualname))
     });
     deduped
+}
+
+fn current_public_surface(store: &Store) -> ScopeResult<PublicSurface> {
+    let symbols = store
+        .list_indexed_symbols()?
+        .into_iter()
+        .filter(|symbol| symbol.exported)
+        .map(|symbol| PublicSurfaceSymbol {
+            file: symbol.file,
+            name: symbol.name,
+            qualname: symbol.qualname,
+            kind: symbol.kind,
+            visibility: symbol.visibility,
+            line: symbol.span.start_line,
+        })
+        .collect::<Vec<_>>();
+    Ok(PublicSurface {
+        file: RepoPath::from("<workspace>"),
+        symbols,
+    })
+}
+
+fn percent(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        (numerator as f64 / denominator as f64) * 100.0
+    }
+}
+
+fn max_file_fan_in(edges: Vec<ArchFileEdge>) -> usize {
+    let mut fan_in = HashMap::new();
+    for edge in edges.into_iter().filter(|edge| edge.edge_kind == EdgeKind::Import) {
+        *fan_in.entry(edge.to_file).or_insert(0usize) += 1;
+    }
+    fan_in.into_values().max().unwrap_or(0)
+}
+
+fn compute_health_score(
+    parse_errors: usize,
+    layer_violations: usize,
+    cycles: usize,
+    unreachable_files: usize,
+    unused_exports: usize,
+    imports_unresolved_pct: f64,
+    public_surface_removed: usize,
+) -> f64 {
+    let mut score = 100.0;
+    score -= parse_errors as f64 * 12.0;
+    score -= layer_violations as f64 * 8.0;
+    score -= cycles as f64 * 8.0;
+    score -= unreachable_files as f64 * 2.0;
+    score -= unused_exports as f64 * 1.0;
+    score -= imports_unresolved_pct * 0.5;
+    score -= public_surface_removed as f64 * 5.0;
+    score.clamp(0.0, 100.0)
+}
+
+fn report_recommendations(
+    metrics: &HealthReportMetrics,
+    comparison: &Option<HealthReportComparison>,
+) -> Vec<String> {
+    let mut recommendations = Vec::new();
+
+    if metrics.parse_errors > 0 {
+        recommendations.push(format!(
+            "reduce parse errors across {} indexed files before relying on deeper analysis",
+            metrics.parse_errors
+        ));
+    }
+    if metrics.layer_violations > 0 {
+        recommendations.push(format!(
+            "resolve {} architecture layer violations to restore intended boundaries",
+            metrics.layer_violations
+        ));
+    }
+    if metrics.cycles > 0 {
+        recommendations.push(format!(
+            "break {} dependency cycles to improve traversal clarity and change isolation",
+            metrics.cycles
+        ));
+    }
+    if metrics.unreachable_files > 0 {
+        recommendations.push(format!(
+            "review {} unreachable files for dead code or missing entry-point declarations",
+            metrics.unreachable_files
+        ));
+    }
+    if metrics.public_surface_removed > 0 {
+        recommendations.push(format!(
+            "review {} removed public surface entries against the comparison snapshot before landing changes",
+            metrics.public_surface_removed
+        ));
+    }
+    if let Some(comparison) = comparison {
+        if comparison.health_score_delta < 0.0 {
+            recommendations.push(format!(
+                "health score regressed by {:.1} points versus {}",
+                -comparison.health_score_delta,
+                comparison.target
+            ));
+        }
+    }
+    if recommendations.is_empty() {
+        recommendations.push(
+            "health metrics are within expected bounds for the current indexed snapshot".to_string(),
+        );
+    }
+
+    recommendations
+}
+
+fn baseline_imports_unresolved_pct(graph: &SnapshotGraph) -> f64 {
+    let unresolved = graph
+        .file_edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Import && edge.certainty != Certainty::Exact)
+        .count();
+    let imports = graph
+        .file_edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Import)
+        .count();
+    percent(unresolved, imports)
+}
+
+fn baseline_cycles(graph: &SnapshotGraph) -> usize {
+    let files = graph.files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    cycle_records_from_file_edges(&files, &snapshot_file_edges(graph)).len()
+}
+
+fn baseline_layer_violations(graph: &SnapshotGraph, config: &ArchConfig) -> ScopeResult<usize> {
+    let edges = snapshot_file_edges(graph);
+    let (_, violations) = arch_check_edges(config, &edges)?;
+    Ok(violations.len())
+}
+
+fn baseline_unreachable_files(graph: &SnapshotGraph, config: &ArchConfig) -> ScopeResult<usize> {
+    let all_files = graph.files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    let entry_points = if !config.entry_points.is_empty() {
+        let patterns = config
+            .entry_points
+            .iter()
+            .map(|entry| Pattern::new(&entry.pattern))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ScopeError::InvalidInput(format!("invalid entry point pattern: {error}")))?;
+        all_files
+            .iter()
+            .filter(|file| patterns.iter().any(|pattern| pattern.matches(&file.0)))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        let reverse = reverse_adjacency(&snapshot_import_adjacency(graph));
+        all_files
+            .iter()
+            .filter(|file| reverse.get(*file).map(|parents| parents.is_empty()).unwrap_or(true))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let reachable = reachable_files_from_roots(&entry_points, &snapshot_import_adjacency(graph));
+    Ok(all_files
+        .iter()
+        .filter(|file| !reachable.contains(*file))
+        .count())
+}
+
+fn baseline_unused_exports(graph: &SnapshotGraph) -> usize {
+    let inbound = graph
+        .symbol_edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Call)
+        .fold(HashMap::new(), |mut acc, edge| {
+            *acc.entry(edge.to.clone()).or_insert(0usize) += 1;
+            acc
+        });
+    graph
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.exported && inbound.get(&symbol.qualname).copied().unwrap_or(0) == 0)
+        .count()
+}
+
+fn snapshot_import_adjacency(graph: &SnapshotGraph) -> HashMap<RepoPath, Vec<RepoPath>> {
+    let mut adjacency: HashMap<RepoPath, Vec<RepoPath>> = HashMap::new();
+    for file in &graph.files {
+        adjacency.entry(file.path.clone()).or_default();
+    }
+    for edge in graph.file_edges.iter().filter(|edge| edge.kind == EdgeKind::Import) {
+        adjacency
+            .entry(RepoPath::from(edge.from.clone()))
+            .or_default()
+            .push(RepoPath::from(edge.to.clone()));
+    }
+    adjacency
+}
+
+fn reachable_files_from_roots(
+    roots: &[RepoPath],
+    adjacency: &HashMap<RepoPath, Vec<RepoPath>>,
+) -> HashSet<RepoPath> {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+
+    for root in roots {
+        if visited.insert(root.clone()) {
+            queue.push_back(root.clone());
+        }
+    }
+
+    while let Some(current) = queue.pop_front() {
+        if let Some(children) = adjacency.get(&current) {
+            for child in children {
+                if visited.insert(child.clone()) {
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+    }
+
+    visited
+}
+
+fn evaluate_gate(
+    gate: &GateConfig,
+    report: &HealthReportResult,
+    strict: bool,
+) -> GateEvaluation {
+    let (current_value, baseline_value, delta) = gate_metric_values(gate.metric.clone(), report);
+
+    if gate.skip {
+        return GateEvaluation {
+            metric: gate.metric.clone(),
+            status: GateStatus::Skipped,
+            severity: gate.severity.clone(),
+            current_value,
+            baseline_value,
+            delta,
+            min: gate.min,
+            max: gate.max,
+            min_delta: gate.min_delta,
+            max_delta: gate.max_delta,
+            message: gate.message.clone(),
+            detail: "gate explicitly skipped by configuration".to_string(),
+        };
+    }
+
+    let mut failed_reasons = Vec::new();
+    if let Some(min) = gate.min {
+        if current_value < min {
+            failed_reasons.push(format!("current value {:.2} is below min {:.2}", current_value, min));
+        }
+    }
+    if let Some(max) = gate.max {
+        if current_value > max {
+            failed_reasons.push(format!("current value {:.2} exceeds max {:.2}", current_value, max));
+        }
+    }
+    if let Some(min_delta) = gate.min_delta {
+        match delta {
+            Some(delta) if delta < min_delta => failed_reasons.push(format!(
+                "delta {:.2} is below min_delta {:.2}",
+                delta, min_delta
+            )),
+            None => failed_reasons.push("comparison snapshot required for min_delta".to_string()),
+            _ => {}
+        }
+    }
+    if let Some(max_delta) = gate.max_delta {
+        match delta {
+            Some(delta) if delta > max_delta => failed_reasons.push(format!(
+                "delta {:.2} exceeds max_delta {:.2}",
+                delta, max_delta
+            )),
+            None => failed_reasons.push("comparison snapshot required for max_delta".to_string()),
+            _ => {}
+        }
+    }
+
+    let failed = !failed_reasons.is_empty();
+    let status = if failed {
+        match gate.severity {
+            GateSeverity::Error if strict => GateStatus::Fail,
+            _ => GateStatus::Warning,
+        }
+    } else {
+        GateStatus::Pass
+    };
+
+    GateEvaluation {
+        metric: gate.metric.clone(),
+        status,
+        severity: gate.severity.clone(),
+        current_value,
+        baseline_value,
+        delta,
+        min: gate.min,
+        max: gate.max,
+        min_delta: gate.min_delta,
+        max_delta: gate.max_delta,
+        message: gate.message.clone(),
+        detail: if failed {
+            failed_reasons.join("; ")
+        } else {
+            "metric satisfied configured thresholds".to_string()
+        },
+    }
+}
+
+fn gate_metric_values(
+    metric: GateMetric,
+    report: &HealthReportResult,
+) -> (f64, Option<f64>, Option<f64>) {
+    match metric {
+        GateMetric::LayerViolations => metric_value(
+            report.metrics.layer_violations as f64,
+            report.compare.as_ref().map(|compare| compare.baseline_layer_violations as f64),
+        ),
+        GateMetric::Cycles => metric_value(
+            report.metrics.cycles as f64,
+            report.compare.as_ref().map(|compare| compare.baseline_cycles as f64),
+        ),
+        GateMetric::MaxFileFanIn => metric_value(report.metrics.max_file_fan_in as f64, None),
+        GateMetric::ParseErrors => metric_value(report.metrics.parse_errors as f64, None),
+        GateMetric::UnreachableFiles => metric_value(
+            report.metrics.unreachable_files as f64,
+            report.compare.as_ref().map(|compare| compare.baseline_unreachable_files as f64),
+        ),
+        GateMetric::UnusedExports => metric_value(report.metrics.unused_exports as f64, None),
+        GateMetric::HealthScore => metric_value(
+            report.metrics.health_score,
+            report.compare.as_ref().map(|compare| compare.baseline_health_score),
+        ),
+        GateMetric::HealthScoreDelta => (
+            report.compare.as_ref().map(|compare| compare.health_score_delta).unwrap_or(0.0),
+            Some(0.0),
+            report.compare.as_ref().map(|compare| compare.health_score_delta),
+        ),
+        GateMetric::ImportsUnresolvedPct => {
+            metric_value(report.metrics.imports_unresolved_pct, None)
+        }
+        GateMetric::ImportsResolvedPct => metric_value(report.metrics.imports_resolved_pct, None),
+        GateMetric::PublicSurfaceRemoved => metric_value(
+            report.metrics.public_surface_removed as f64,
+            report
+                .compare
+                .as_ref()
+                .map(|compare| compare.baseline_public_surface_removed as f64),
+        ),
+    }
+}
+
+fn metric_value(current: f64, baseline: Option<f64>) -> (f64, Option<f64>, Option<f64>) {
+    let delta = baseline.map(|baseline| current - baseline);
+    (current, baseline, delta)
+}
+
+fn default_gate_config(strict: bool) -> Vec<GateConfig> {
+    vec![
+        GateConfig {
+            metric: GateMetric::ParseErrors,
+            max: Some(0.0),
+            min: None,
+            max_delta: None,
+            min_delta: None,
+            severity: GateSeverity::Error,
+            message: Some("parse errors must remain at zero".to_string()),
+            skip: false,
+        },
+        GateConfig {
+            metric: GateMetric::LayerViolations,
+            max: Some(0.0),
+            min: None,
+            max_delta: None,
+            min_delta: None,
+            severity: if strict { GateSeverity::Error } else { GateSeverity::Warning },
+            message: Some("layer violations should be eliminated".to_string()),
+            skip: false,
+        },
+        GateConfig {
+            metric: GateMetric::Cycles,
+            max: Some(0.0),
+            min: None,
+            max_delta: None,
+            min_delta: None,
+            severity: if strict { GateSeverity::Error } else { GateSeverity::Warning },
+            message: Some("dependency cycles should remain at zero".to_string()),
+            skip: false,
+        },
+        GateConfig {
+            metric: GateMetric::HealthScore,
+            min: Some(if strict { 90.0 } else { 75.0 }),
+            max: None,
+            max_delta: None,
+            min_delta: None,
+            severity: if strict { GateSeverity::Error } else { GateSeverity::Warning },
+            message: Some("overall health score should remain healthy".to_string()),
+            skip: false,
+        },
+    ]
 }
 
 fn unix_timestamp() -> i64 {

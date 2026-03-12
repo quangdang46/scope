@@ -64,6 +64,10 @@ pub enum Commands {
     DiffSnapshot(DiffSnapshotArgs),
     /// Simulate extraction of symbols into a new file without changing the index
     Simulate(SimulateArgs),
+    /// Return the scaffolded health report envelope planned for Milestone 14
+    Report(ReportArgs),
+    /// Return the scaffolded CI gate envelope planned for Milestone 14
+    Gate(GateArgs),
     /// Report exported symbols with no indexed inbound references
     Unused,
     /// Report circular file dependency chains
@@ -387,6 +391,20 @@ pub struct SimulateExtractArgs {
     pub symbols: String,
     #[arg(long = "into")]
     pub into_file: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ReportArgs {
+    #[arg(long)]
+    pub compare: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct GateArgs {
+    #[arg(long)]
+    pub compare: Option<String>,
+    #[arg(long)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]

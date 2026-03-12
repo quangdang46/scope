@@ -589,3 +589,49 @@ fn serve_help_includes_core_flags() {
     assert!(stdout.contains("--open"));
     assert!(stdout.contains("--no-ui"));
 }
+
+#[test]
+fn report_and_gate_help_include_expected_flags() {
+    let report_output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["report", "--help"])
+        .output()
+        .expect("scope binary should run");
+    assert_eq!(report_output.status.code(), Some(0));
+    let report_stdout = String::from_utf8_lossy(&report_output.stdout);
+    assert!(report_stdout.contains("--compare"));
+
+    let gate_output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["gate", "--help"])
+        .output()
+        .expect("scope binary should run");
+    assert_eq!(gate_output.status.code(), Some(0));
+    let gate_stdout = String::from_utf8_lossy(&gate_output.stdout);
+    assert!(gate_stdout.contains("--compare"));
+    assert!(gate_stdout.contains("--strict"));
+}
+
+#[test]
+fn report_and_gate_commands_return_stub_json_envelopes() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let report_output = run_scope(&repo, &["report", "--compare", "baseline"]);
+    assert_eq!(report_output.status.code(), Some(0));
+    let report_value: serde_json::Value =
+        serde_json::from_slice(&report_output.stdout).expect("stdout should be JSON");
+    assert_eq!(report_value["command"], "report");
+    assert_eq!(report_value["status"], "stub");
+    assert_eq!(report_value["data"]["result"]["compare"]["target"], "baseline");
+
+    let gate_output = run_scope(&repo, &["gate", "--compare", "baseline", "--strict"]);
+    assert_eq!(gate_output.status.code(), Some(1));
+    let gate_value: serde_json::Value =
+        serde_json::from_slice(&gate_output.stdout).expect("stdout should be JSON");
+    assert_eq!(gate_value["command"], "gate");
+    assert_eq!(gate_value["status"], "stub");
+    assert_eq!(gate_value["data"]["result"]["compare"], "baseline");
+    assert_eq!(gate_value["data"]["result"]["summary"]["failed"], 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}

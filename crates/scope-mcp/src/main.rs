@@ -399,6 +399,33 @@ fn tool_registry() -> Vec<Value> {
             }),
         ),
         tool_definition(
+            "report",
+            "Return the scaffolded health report envelope planned for Milestone 14.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "compare": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "gate",
+            "Return the scaffolded CI gate envelope planned for Milestone 14.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "compare": { "type": "string" },
+                    "strict": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
             "simulate_extract",
             "Simulate extracting symbols into a new file without persisting changes.",
             json!({
@@ -771,6 +798,8 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, DispatchError>
         "stability" => dispatch_stability(arguments),
         "risk" => dispatch_risk(arguments),
         "cochange" => dispatch_cochange(arguments),
+        "report" => dispatch_report(arguments),
+        "gate" => dispatch_gate(arguments),
         "simulate_extract" => dispatch_simulate_extract(arguments),
         "surface" => dispatch_surface(arguments),
         "surface_diff" => dispatch_surface_diff(arguments),
@@ -1066,6 +1095,27 @@ fn dispatch_cochange(arguments: &Value) -> String {
     }) {
         Ok(output) => output,
         Err(error) => render_domain_error("cochange", &error),
+    }
+}
+
+fn dispatch_report(arguments: &Value) -> String {
+    match bootstrap_from_arguments(arguments).and_then(|_context| {
+        let compare = optional_string(arguments, "compare");
+        serialize_json(&scope_core::stub::scaffolded_report(compare))
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("report", &error),
+    }
+}
+
+fn dispatch_gate(arguments: &Value) -> String {
+    match bootstrap_from_arguments(arguments).and_then(|_context| {
+        let compare = optional_string(arguments, "compare");
+        let strict = optional_bool(arguments, "strict").unwrap_or(false);
+        serialize_json(&scope_core::stub::scaffolded_gate(compare, strict))
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("gate", &error),
     }
 }
 
@@ -2341,6 +2391,8 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "arch_check"));
         assert!(tools.iter().any(|tool| tool["name"] == "audit"));
         assert!(tools.iter().any(|tool| tool["name"] == "cochange"));
+        assert!(tools.iter().any(|tool| tool["name"] == "report"));
+        assert!(tools.iter().any(|tool| tool["name"] == "gate"));
         assert!(tools.iter().any(|tool| tool["name"] == "surface"));
         assert!(tools.iter().any(|tool| tool["name"] == "surface_diff"));
         assert!(tools.iter().any(|tool| tool["name"] == "test_map_covers"));
@@ -2594,6 +2646,34 @@ mod tests {
             &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
         )
         .unwrap();
+
+        let report_output = dispatch_tool(
+            "report",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "compare": "baseline"
+            }),
+        )
+        .unwrap();
+        let report_value: Value = serde_json::from_str(&report_output).unwrap();
+        assert_eq!(report_value["command"], "report");
+        assert_eq!(report_value["status"], "stub");
+        assert_eq!(report_value["data"]["result"]["compare"]["target"], "baseline");
+
+        let gate_output = dispatch_tool(
+            "gate",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "compare": "baseline",
+                "strict": true
+            }),
+        )
+        .unwrap();
+        let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
+        assert_eq!(gate_value["command"], "gate");
+        assert_eq!(gate_value["status"], "stub");
+        assert_eq!(gate_value["data"]["result"]["compare"], "baseline");
+        assert_eq!(gate_value["data"]["result"]["summary"]["failed"], 1);
 
         let unused_output = dispatch_tool(
             "unused",

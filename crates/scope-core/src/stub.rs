@@ -5,14 +5,14 @@ use crate::{
     model::{
         ArchCheckResult, AuditResult, BranchDiffResult, Certainty, CochangeResult, ContextResult,
         CyclesResult, DependencyRecord, EdgeKind, EntryConeResult, EntryListResult,
-        EntryReachesResult, EntryUnreachableResult, GateResult, HealthReportResult,
-        ImpactChangeType, ImpactTraversalRule, MirrorResult, NodeKind, PublicSurface,
-        PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult, SimulateExtractResult,
-        SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult, SnapshotSaveResult, Span,
-        SplitResult, StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult,
-        TestMapCoveredByResult, TestMapCoversResult, TestMapUncoveredResult, TraversalRecord,
-        TreeResult, UnusedResult,
-        Visibility,
+        EntryReachesResult, EntryUnreachableResult, GateEvaluation, GateMetric, GateResult,
+        GateSeverity, GateStatus, GateSummary, HealthReportComparison, HealthReportMetrics,
+        HealthReportResult, ImpactChangeType, ImpactTraversalRule, MirrorResult, NodeKind,
+        PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult,
+        SimulateExtractResult, SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult,
+        SnapshotSaveResult, Span, SplitResult, StabilityResult, SymbolKind, SymbolRecord,
+        TestMapBuildResult, TestMapCoveredByResult, TestMapCoversResult,
+        TestMapUncoveredResult, TraversalRecord, TreeResult, UnusedResult, Visibility,
     },
     DatabaseInfo, IndexHealthStats, QueryValue,
 };
@@ -723,8 +723,92 @@ pub fn report(result: HealthReportResult) -> JsonEnvelope<ReportData> {
     JsonEnvelope::success("report", ReportData { result })
 }
 
+pub fn scaffolded_report(compare: Option<String>) -> JsonEnvelope<ReportData> {
+    let result = HealthReportResult {
+        generated_at: 0,
+        compare: compare.map(|target| HealthReportComparison {
+            target,
+            baseline_health_score: 0.0,
+            health_score_delta: 0.0,
+            baseline_layer_violations: 0,
+            layer_violations_delta: 0,
+            baseline_cycles: 0,
+            cycles_delta: 0,
+            baseline_unreachable_files: 0,
+            unreachable_files_delta: 0,
+            baseline_public_surface_removed: 0,
+            public_surface_removed_delta: 0,
+        }),
+        metrics: HealthReportMetrics {
+            total_files: 0,
+            total_symbols: 0,
+            total_imports: 0,
+            unresolved_imports: 0,
+            imports_unresolved_pct: 0.0,
+            imports_resolved_pct: 0.0,
+            parse_errors: 0,
+            layer_violations: 0,
+            cycles: 0,
+            max_file_fan_in: 0,
+            avg_instability: 0.0,
+            unreachable_files: 0,
+            unused_exports: 0,
+            public_surface_removed: 0,
+            health_score: 0.0,
+        },
+        risk_hotspots: Vec::new(),
+        arch_violations: Vec::new(),
+        cycles_detail: Vec::new(),
+        unreachable_detail: Vec::new(),
+        unused_export_detail: Vec::new(),
+        recommendations: vec![
+            "scope report is scaffolded in this build; core metric aggregation is still in progress"
+                .to_string(),
+        ],
+    };
+    JsonEnvelope::stub("report", ReportData { result })
+}
+
 pub fn gate(result: GateResult) -> JsonEnvelope<GateData> {
     JsonEnvelope::success("gate", GateData { result })
+}
+
+pub fn scaffolded_gate(compare: Option<String>, strict: bool) -> JsonEnvelope<GateData> {
+    let report = scaffolded_report(compare.clone()).data.result;
+    let evaluations = vec![GateEvaluation {
+        metric: GateMetric::HealthScore,
+        status: if strict { GateStatus::Fail } else { GateStatus::Skipped },
+        severity: GateSeverity::Warning,
+        current_value: 0.0,
+        baseline_value: Some(0.0),
+        delta: Some(0.0),
+        min: None,
+        max: Some(0.0),
+        min_delta: None,
+        max_delta: Some(0.0),
+        message: Some(
+            "scope gate is scaffolded in this build; threshold evaluation is still in progress"
+                .to_string(),
+        ),
+        detail: if strict {
+            "strict mode marks the scaffolded gate as failed until real evaluation lands".to_string()
+        } else {
+            "gate evaluation is scaffolded and currently reports a skipped placeholder".to_string()
+        },
+    }];
+    let result = GateResult {
+        compare,
+        report,
+        summary: GateSummary {
+            total: evaluations.len(),
+            passed: 0,
+            warnings: 0,
+            failed: usize::from(strict),
+            skipped: usize::from(!strict),
+        },
+        evaluations,
+    };
+    JsonEnvelope::stub("gate", GateData { result })
 }
 
 pub fn unused(result: UnusedResult) -> JsonEnvelope<UnusedData> {
@@ -861,6 +945,27 @@ pub fn placeholder_symbol(path: RepoPath, name: &str, kind: SymbolKind) -> Symbo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scaffolded_report_and_gate_return_stub_envelopes() {
+        let report = scaffolded_report(Some("baseline".to_string()));
+        assert!(matches!(report.status, crate::json::JsonStatus::Stub));
+        assert_eq!(report.command, "report");
+        assert_eq!(report.data.result.compare.as_ref().unwrap().target, "baseline");
+        assert_eq!(report.data.result.metrics.health_score, 0.0);
+        assert_eq!(
+            report.data.result.recommendations,
+            vec!["scope report is scaffolded in this build; core metric aggregation is still in progress".to_string()]
+        );
+
+        let gate = scaffolded_gate(Some("baseline".to_string()), true);
+        assert!(matches!(gate.status, crate::json::JsonStatus::Stub));
+        assert_eq!(gate.command, "gate");
+        assert_eq!(gate.data.result.compare.as_deref(), Some("baseline"));
+        assert_eq!(gate.data.result.summary.failed, 1);
+        assert_eq!(gate.data.result.summary.skipped, 0);
+        assert_eq!(gate.data.result.evaluations.len(), 1);
+    }
 
     #[test]
     fn impact_rules_cover_all_supported_change_types() {

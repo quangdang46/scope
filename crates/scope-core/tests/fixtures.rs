@@ -1253,6 +1253,60 @@ fn generated_cochange_fixture_persists_expected_file_churn() {
 }
 
 #[test]
+fn report_query_supports_snapshot_comparison_and_removed_public_surface() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    store.save_snapshot("baseline", Some("HEAD".to_string())).unwrap();
+
+    let parser_path = repo.join("src/parser.rs");
+    let updated = fs::read_to_string(&parser_path)
+        .unwrap()
+        .replace("pub fn parse", "pub fn parse_token");
+    fs::write(&parser_path, updated).unwrap();
+    let _ = index_fixture(&repo);
+
+    let config = load_arch_config(&repo).unwrap();
+    let report = store.query_report(&config, Some("baseline")).unwrap();
+    assert_eq!(report.metrics.total_files, 5);
+    assert!(report.compare.is_some());
+    assert_eq!(report.compare.as_ref().unwrap().target, "baseline");
+    assert!(report.metrics.public_surface_removed >= 1);
+    assert!(report.compare.as_ref().unwrap().public_surface_removed_delta >= 1);
+
+    let envelope = stub::report(report.clone());
+    assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
+    assert_eq!(envelope.data.result, report);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn gate_query_uses_default_thresholds_and_fails_strict_arch_fixture() {
+    let repo = prepare_fixture_copy("arch_violations");
+    let store = index_fixture(&repo);
+    let config = load_arch_config(&repo).unwrap();
+
+    let gate = store.query_gate(&config, None, true).unwrap();
+    assert_eq!(gate.compare, None);
+    assert_eq!(gate.summary.total, 4);
+    assert!(gate.summary.failed >= 1);
+    assert!(gate
+        .evaluations
+        .iter()
+        .any(|evaluation| evaluation.metric == scope_core::GateMetric::LayerViolations));
+    assert!(gate
+        .evaluations
+        .iter()
+        .any(|evaluation| evaluation.status == scope_core::GateStatus::Fail));
+
+    let envelope = stub::gate(gate.clone());
+    assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
+    assert_eq!(envelope.data.result, gate);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn cochange_query_reports_expected_scores_and_filters() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);

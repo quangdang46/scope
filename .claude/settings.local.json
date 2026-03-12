@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(br update:*)",
+      "mcp__mcp-agent-mail__send_message",
+      "mcp__mcp-agent-mail__file_reservation_paths",
+      "Bash(cargo test:*)",
+      "mcp__mcp-agent-mail__fetch_inbox",
+      "mcp__mcp-agent-mail__acknowledge_message",
+      "mcp__mcp-agent-mail__reply_message",
+      "Bash(br list:*)",
+      "mcp__mcp-agent-mail__macro_start_session",
+      "Bash(br show:*)",
+      "Bash(cargo run:*)",
+      "Bash(br sync:*)",
+      "Bash(printf node_modules_present=$?n:*)",
+      "Bash(git:*)"
+    ]
+  }
+}
