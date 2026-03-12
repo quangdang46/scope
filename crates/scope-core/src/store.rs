@@ -2831,6 +2831,36 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn list_indexed_symbols(&self) -> ScopeResult<Vec<SymbolRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT files.path, symbols.name, symbols.qualname, symbols.kind, symbols.visibility, symbols.exported, symbols.span_start, symbols.span_end, symbols.start_line, symbols.end_line
+             FROM symbols
+             JOIN files ON files.id = symbols.file_id
+             ORDER BY symbols.qualname ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SymbolRecord {
+                file: RepoPath(row.get::<_, String>(0)?),
+                name: row.get(1)?,
+                qualname: row.get(2)?,
+                kind: symbol_kind_from_db(&row.get::<_, String>(3)?),
+                visibility: visibility_from_db(&row.get::<_, String>(4)?),
+                exported: row.get::<_, i64>(5)? != 0,
+                span: crate::Span {
+                    start_byte: row.get::<_, i64>(6)? as u32,
+                    end_byte: row.get::<_, i64>(7)? as u32,
+                    start_line: row.get::<_, i64>(8)? as u32,
+                    end_line: row.get::<_, i64>(9)? as u32,
+                },
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn resolve_query_symbol(&self, symbol: &str) -> ScopeResult<Option<SymbolRecord>> {
+        self.resolve_symbol_by_name_or_qualname(symbol)
+    }
+
     pub fn delete_file(&self, path: &RepoPath) -> ScopeResult<bool> {
         let deleted = self
             .connection
@@ -3062,7 +3092,7 @@ impl Store {
             .map_err(Into::into)
     }
 
-    fn resolve_symbol_by_name_or_qualname(
+    pub fn resolve_symbol_by_name_or_qualname(
         &self,
         symbol: &str,
     ) -> ScopeResult<Option<SymbolRecord>> {

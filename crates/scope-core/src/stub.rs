@@ -13,7 +13,7 @@ use crate::{
         TestMapCoversResult, TestMapUncoveredResult, TraversalRecord, TreeResult, UnusedResult,
         Visibility,
     },
-    DatabaseInfo, IndexHealthStats,
+    DatabaseInfo, IndexHealthStats, QueryValue,
 };
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -239,6 +239,12 @@ pub struct EntryReachesData {
 #[derive(Debug, Serialize)]
 pub struct EntryUnreachableData {
     pub result: EntryUnreachableResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueryData {
+    pub input: String,
+    pub result: QueryValue,
 }
 
 #[derive(Debug, Serialize)]
@@ -785,6 +791,10 @@ pub fn test_map_covered_by(result: TestMapCoveredByResult) -> JsonEnvelope<TestM
 
 pub fn test_map_uncovered(result: TestMapUncoveredResult) -> JsonEnvelope<TestMapUncoveredData> {
     JsonEnvelope::success("test-map-uncovered", TestMapUncoveredData { result })
+}
+
+pub fn query(input: String, result: QueryValue) -> JsonEnvelope<QueryData> {
+    JsonEnvelope::success("query", QueryData { input, result })
 }
 
 pub fn surface(target: RepoPath, surface: PublicSurface) -> JsonEnvelope<SurfaceData> {

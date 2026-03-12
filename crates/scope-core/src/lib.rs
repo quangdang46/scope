@@ -5,6 +5,7 @@ pub mod config;
 pub mod error;
 pub mod json;
 pub mod model;
+pub mod query_lang;
 pub mod scanner;
 pub mod serve;
 pub mod snapshot;
@@ -46,6 +47,7 @@ pub use model::{
     TestMapUncoveredResult, TestMapUncoveredSummary, TraversalRecord, TreeNode, TreeResult,
     TreeSummary, UnusedRecord, UnusedResult, UnusedSummary, Visibility,
 };
+pub use query_lang::{execute_query, parse_query_statement, QueryExpr, QuerySession, QuerySource, QueryStatement, QueryStep, QueryValue};
 pub use scanner::{scan_repo, ScanConfig, ScanEntry, SupportedLanguage};
 pub use serve::{run_server, ServeOptions};
 pub use store::{DatabaseInfo, IndexHealthStats, ParseStatusCounts, Store, INDEX_SCHEMA_VERSION};

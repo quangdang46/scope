@@ -289,6 +289,44 @@ fn diff_command_reports_no_changes_for_clean_fixture_repo() {
 }
 
 #[test]
+fn query_expr_returns_json_envelope_for_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["query", "--expr", "file \"src/lib.rs\" | .deps | unique | count"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "query");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["input"], "file \"src/lib.rs\" | .deps | unique | count");
+    assert_eq!(value["data"]["result"]["number"], 3);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_expr_invalid_step_emits_json_error_on_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["query", "--expr", "file \"src/lib.rs\" | .impact"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+}
+
+#[test]
 fn serve_help_includes_core_flags() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .args(["serve", "--help"])

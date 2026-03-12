@@ -3,6 +3,7 @@ mod cli;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
+    io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -550,6 +551,21 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             ))?;
             return Ok(exit_code);
         }
+        Commands::Query(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            if let Some(expr) = args.expr {
+                let mut session = scope_core::QuerySession::default();
+                let result = scope_core::execute_query(&expr, &context.store, &mut session)?;
+                serialize_output(&scope_core::stub::query(expr, result), compact)
+            } else {
+                run_query_repl(&context.store)?;
+                return Ok(exit_code);
+            }
+        }
         Commands::Doctor(args) => {
             let bootstrap_options = BootstrapOptions {
                 repo_root_override: cli.repo_root.clone(),
@@ -670,6 +686,67 @@ fn change_type_name(change_type: ChangeType) -> String {
         ChangeType::SideEffect => "side-effect",
     }
     .to_string()
+}
+
+fn run_query_repl(store: &scope_core::Store) -> Result<(), scope_core::ScopeError> {
+    let stdin = io::stdin();
+    let mut session = scope_core::QuerySession::default();
+    let mut stdout = io::stdout();
+
+    writeln!(stdout, "scope query REPL")
+        .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+    writeln!(stdout, "Type :help for commands, :exit to quit.")
+        .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+    write!(stdout, "scope> ")
+        .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+    stdout
+        .flush()
+        .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+
+    for line in stdin.lock().lines() {
+        let line = line.map_err(|error| scope_core::ScopeError::io("stdin", error))?;
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+        match input {
+            ":exit" | ":quit" => break,
+            ":help" => {
+                writeln!(stdout, "Sources: file \"...\", symbol \"...\", all-files, all-symbols, $name")
+                    .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+                writeln!(stdout, "Steps: .deps, .reverse, .symbols, .callers, .callees, unique, count")
+                    .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+                writeln!(stdout, "Bindings: let name = <expr>")
+                    .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+            }
+            ":vars" => {
+                writeln!(stdout, "{}", session.binding_names().join(", "))
+                    .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+            }
+            _ => match scope_core::execute_query(input, store, &mut session) {
+                Ok(result) => {
+                    let rendered = serde_json::to_string_pretty(&scope_core::stub::query(
+                        input.to_string(),
+                        result,
+                    ))
+                    .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
+                    writeln!(stdout, "{rendered}")
+                        .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+                }
+                Err(error) => {
+                    writeln!(stdout, "{}", render_cli_error(&error))
+                        .map_err(|io_error| scope_core::ScopeError::io("stdout", io_error))?;
+                }
+            },
+        }
+        write!(stdout, "scope> ")
+            .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+        stdout
+            .flush()
+            .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+    }
+
+    Ok(())
 }
 
 fn build_context_pack(

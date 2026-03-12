@@ -74,6 +74,8 @@ pub enum Commands {
     Entry(EntryArgs),
     /// Start a local HTTP API server with a minimal embedded UI
     Serve(ServeArgs),
+    /// Explore the indexed graph with a composable query language
+    Query(QueryArgs),
     /// Inspect repository and index health
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
@@ -426,6 +428,12 @@ pub struct ServeArgs {
     pub open: bool,
     #[arg(long)]
     pub no_ui: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct QueryArgs {
+    #[arg(long)]
+    pub expr: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
