@@ -7,10 +7,11 @@ use crate::{
         CyclesResult, DependencyRecord, EdgeKind, EntryConeResult, EntryListResult,
         EntryReachesResult, EntryUnreachableResult, GateResult, HealthReportResult,
         ImpactChangeType, ImpactTraversalRule, MirrorResult, NodeKind, PublicSurface,
-        PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult, SnapshotDeleteResult,
-        SnapshotDiffResult, SnapshotListResult, SnapshotSaveResult, Span, SplitResult,
-        StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult, TestMapCoveredByResult,
-        TestMapCoversResult, TestMapUncoveredResult, TraversalRecord, TreeResult, UnusedResult,
+        PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult, SimulateExtractResult,
+        SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult, SnapshotSaveResult, Span,
+        SplitResult, StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult,
+        TestMapCoveredByResult, TestMapCoversResult, TestMapUncoveredResult, TraversalRecord,
+        TreeResult, UnusedResult,
         Visibility,
     },
     DatabaseInfo, IndexHealthStats, QueryValue,
@@ -179,6 +180,11 @@ pub struct RiskData {
 #[derive(Debug, Serialize)]
 pub struct CochangeData {
     pub result: CochangeResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimulateExtractData {
+    pub result: SimulateExtractResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -707,6 +713,10 @@ pub fn risk(result: RiskResult) -> JsonEnvelope<RiskData> {
 
 pub fn cochange(result: CochangeResult) -> JsonEnvelope<CochangeData> {
     JsonEnvelope::success("cochange", CochangeData { result })
+}
+
+pub fn simulate_extract(result: SimulateExtractResult) -> JsonEnvelope<SimulateExtractData> {
+    JsonEnvelope::success("simulate-extract", SimulateExtractData { result })
 }
 
 pub fn report(result: HealthReportResult) -> JsonEnvelope<ReportData> {

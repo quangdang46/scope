@@ -399,6 +399,25 @@ fn tool_registry() -> Vec<Value> {
             }),
         ),
         tool_definition(
+            "simulate_extract",
+            "Simulate extracting symbols into a new file without persisting changes.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "symbols": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1
+                    },
+                    "into_file": { "type": "string" }
+                },
+                "required": ["symbols", "into_file"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
             "surface",
             "Query the public API surface for a file or symbol target.",
             json!({
@@ -720,6 +739,7 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, DispatchError>
         "stability" => dispatch_stability(arguments),
         "risk" => dispatch_risk(arguments),
         "cochange" => dispatch_cochange(arguments),
+        "simulate_extract" => dispatch_simulate_extract(arguments),
         "surface" => dispatch_surface(arguments),
         "surface_diff" => dispatch_surface_diff(arguments),
         "test_map_build" => dispatch_test_map_build(arguments),
@@ -1012,6 +1032,21 @@ fn dispatch_cochange(arguments: &Value) -> String {
     }) {
         Ok(output) => output,
         Err(error) => render_domain_error("cochange", &error),
+    }
+}
+
+fn dispatch_simulate_extract(arguments: &Value) -> String {
+    match bootstrap_from_arguments(arguments).and_then(|context| {
+        let symbols = required_string_array(arguments, "symbols")?;
+        let into_file = required_string(arguments, "into_file")?;
+        let config = load_arch_config(&context.paths.repo_root)?;
+        let result = context
+            .store
+            .simulate_extract(&symbols, &RepoPath::from(into_file), &config)?;
+        serialize_json(&scope_core::stub::simulate_extract(result))
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("simulate-extract", &error),
     }
 }
 
@@ -2554,6 +2589,121 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["target"], "src/parser.rs");
         assert_eq!(value["data"]["result"]["files"][0]["path"], "src/utils.rs");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_cochange_rejects_invalid_min_shared_commits() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "cochange",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/parser.rs",
+                "min_shared_commits": 0
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("min_shared_commits must be greater than 0"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_cochange_rejects_invalid_top() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "cochange",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/parser.rs",
+                "top": 0
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("top must be greater than 0"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_cochange_rejects_missing_target() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "cochange",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/missing.rs"
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("file not indexed: src/missing.rs"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_cochange_rejects_unsupported_sort() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "cochange",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/parser.rs",
+                "sort": "bogus"
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("unsupported cochange sort: bogus"));
         fs::remove_dir_all(repo).unwrap();
     }
 

@@ -419,6 +419,53 @@ pub struct SnapshotDiffResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SimulateExtraction {
+    pub symbols: Vec<String>,
+    pub from_file: RepoPath,
+    pub into_file: RepoPath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SimulateGraphDelta {
+    pub edges_added: usize,
+    pub edges_removed: usize,
+    pub new_edges: Vec<SnapshotEdgeRecord>,
+    pub removed_edges: Vec<SnapshotEdgeRecord>,
+    pub cycles_introduced: usize,
+    pub cycles_resolved: usize,
+    pub new_layer_violations: usize,
+    pub resolved_layer_violations: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SimulateFileStabilityDelta {
+    pub file: RepoPath,
+    pub instability_before: Option<f64>,
+    pub instability_after: Option<f64>,
+    pub improved: bool,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulateRecommendation {
+    HighValue,
+    Neutral,
+    Risky,
+    LowConfidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SimulateExtractResult {
+    pub extraction: SimulateExtraction,
+    pub graph_delta: SimulateGraphDelta,
+    pub stability_delta: Vec<SimulateFileStabilityDelta>,
+    pub recommendation: SimulateRecommendation,
+    pub recommendation_reasons: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RenameEditKind {
     Definition,

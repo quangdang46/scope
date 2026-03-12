@@ -128,3 +128,71 @@ fn simulate_extract_command_empty_symbol_list_emits_json_error_on_stderr() {
         .expect("error message should be a string")
         .contains("simulate extract requires at least one symbol"));
 }
+
+#[test]
+fn simulate_extract_command_rejects_existing_target_file_with_json_error() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(
+        &repo,
+        &[
+            "simulate",
+            "extract",
+            "lib::parser",
+            "--into",
+            "src/parser.rs",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("target file `src/parser.rs` already exists in the index"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn simulate_extract_command_rejects_unresolved_symbol_with_json_error() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(
+        &repo,
+        &[
+            "simulate",
+            "extract",
+            "lib::missing_symbol",
+            "--into",
+            "src/parser_extracted.rs",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("could not resolve symbol `lib::missing_symbol`"));
+
+    fs::remove_dir_all(repo).unwrap();
+}

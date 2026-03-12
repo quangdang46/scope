@@ -13,7 +13,9 @@ use tower::ServiceExt;
 
 use crate::{
     load_arch_config,
-    model::{CochangeSort, ImpactChangeType, RiskSort, StabilitySort, SymbolKind},
+    model::{
+        CochangeSort, CycleSeverity, ImpactChangeType, RiskSort, StabilitySort, SymbolKind,
+    },
     stub, DatabaseInfo, IndexHealthStats, RepoPath, RuntimePaths, ScopeError, ScopeResult, Store,
 };
 
@@ -75,11 +77,38 @@ const WEB_UI_HTML: &str = r#"<!doctype html>
       <p>List saved snapshots.</p>
       <a href="/api/snapshot/list">/api/snapshot/list</a>
     </div>
+    <div class="card">
+      <strong>Audit</strong>
+      <p>Trace configured capability reachability.</p>
+      <a href="/api/audit?capability=network">/api/audit?capability=network</a>
+    </div>
+    <div class="card">
+      <strong>Surface diff</strong>
+      <p>Compare exported API shape between indexed files.</p>
+      <a href="/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts">/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts</a>
+    </div>
+    <div class="card">
+      <strong>Tree</strong>
+      <p>Inspect recursive file dependencies.</p>
+      <a href="/api/tree?target=src/lib.rs">/api/tree?target=src/lib.rs</a>
+    </div>
+    <div class="card">
+      <strong>Simulate extract</strong>
+      <p>Preview graph changes from extracting symbols into a new file.</p>
+      <a href="/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs">/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs</a>
+    </div>
   </div>
 
   <div class="actions">
     <button data-endpoint="/api/status">Load status</button>
     <button data-endpoint="/api/entry/list">Load entry list</button>
+    <button data-endpoint="/api/audit?capability=network">Load audit</button>
+    <button data-endpoint="/api/surface?target=src/auth/jwt.ts">Load surface</button>
+    <button data-endpoint="/api/surface/diff?before=src/auth/jwt.ts&after=src/auth/aliases.ts">Load surface diff</button>
+    <button data-endpoint="/api/cycles">Load cycles</button>
+    <button data-endpoint="/api/tree?target=src/lib.rs">Load tree</button>
+    <button data-endpoint="/api/simulate/extract?symbols=lib::parser&into=src/parser_extracted.rs">Load simulate extract</button>
+    <button data-endpoint="/api/entry/reaches?target=src/parser.rs">Load entry reaches</button>
     <button data-endpoint="/api/snapshot/list">Load snapshots</button>
   </div>
 
@@ -118,7 +147,14 @@ pub fn build_router(state: Arc<ServeState>, no_ui: bool) -> Router {
         .route("/api/risk", get(api_risk))
         .route("/api/stability", get(api_stability))
         .route("/api/cochange", get(api_cochange))
+        .route("/api/audit", get(api_audit))
+        .route("/api/surface", get(api_surface))
+        .route("/api/surface/diff", get(api_surface_diff))
+        .route("/api/cycles", get(api_cycles))
+        .route("/api/tree", get(api_tree))
+        .route("/api/simulate/extract", get(api_simulate_extract))
         .route("/api/entry/list", get(api_entry_list))
+        .route("/api/entry/reaches", get(api_entry_reaches))
         .route("/api/entry/unreachable", get(api_entry_unreachable))
         .route("/api/snapshot/list", get(api_snapshot_list))
         .with_state(state);
@@ -291,6 +327,48 @@ struct CochangeParams {
 #[derive(Debug, Deserialize)]
 struct EntryUnreachableParams {
     min_age_days: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditParams {
+    capability: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SurfaceParams {
+    target: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SurfaceDiffParams {
+    before: String,
+    after: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CyclesParams {
+    #[serde(default)]
+    severity: Option<CycleSeverity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TreeParams {
+    target: String,
+    #[serde(default)]
+    reverse: bool,
+    depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimulateExtractParams {
+    symbols: String,
+    #[serde(rename = "into")]
+    into_file: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EntryReachesParams {
+    target: String,
 }
 
 fn default_days() -> u32 {
@@ -493,6 +571,108 @@ async fn api_cochange(
     }
 }
 
+async fn api_audit(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<AuditParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let config = load_arch_config(&state.paths.repo_root)?;
+        let result = store.query_audit(&config, &params.capability)?;
+        Ok(stub::audit(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("audit", error),
+    }
+}
+
+async fn api_surface(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<SurfaceParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let path = store.resolve_surface_target(&params.target)?;
+        let surface = store.query_public_surface(&path)?;
+        Ok(stub::surface(path, surface))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("surface", error),
+    }
+}
+
+async fn api_surface_diff(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<SurfaceDiffParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let before = store.resolve_surface_target(&params.before)?;
+        let after = store.resolve_surface_target(&params.after)?;
+        let diff = store.diff_public_surface(&before, &after)?;
+        Ok(stub::surface_diff(before, after, diff))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("surface-diff", error),
+    }
+}
+
+async fn api_cycles(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<CyclesParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let result = store.query_cycles(params.severity)?;
+        Ok(stub::cycles(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("cycles", error),
+    }
+}
+
+async fn api_tree(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<TreeParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let result =
+            store.query_tree(&RepoPath::from(params.target), params.reverse, params.depth)?;
+        Ok(stub::tree(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("tree", error),
+    }
+}
+
+async fn api_simulate_extract(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<SimulateExtractParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let config = load_arch_config(&state.paths.repo_root)?;
+        let symbols = params
+            .symbols
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if symbols.is_empty() {
+            return Err(ScopeError::InvalidInput(
+                "simulate extract requires at least one symbol".to_string(),
+            ));
+        }
+        let result = store.simulate_extract(&symbols, &RepoPath::from(params.into_file), &config)?;
+        Ok(stub::simulate_extract(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("simulate-extract", error),
+    }
+}
+
 async fn api_entry_list(State(state): State<Arc<ServeState>>) -> Response {
     match (|| {
         let store = open_store(&state)?;
@@ -502,6 +682,21 @@ async fn api_entry_list(State(state): State<Arc<ServeState>>) -> Response {
     })() {
         Ok(envelope) => json_success(envelope),
         Err(error) => query_error("entry-list", error),
+    }
+}
+
+async fn api_entry_reaches(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<EntryReachesParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let config = load_arch_config(&state.paths.repo_root)?;
+        let result = store.query_entry_reaches(&config, &RepoPath::from(params.target))?;
+        Ok(stub::entry_reaches(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("entry-reaches", error),
     }
 }
 
@@ -605,6 +800,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use serde_json::Value;
     use std::fs;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::{adapter_for_language, scan_repo, ScanConfig, Store};
@@ -735,6 +931,243 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audit_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("capability_audit");
+        let app = build_router(state, false);
+        let response = call(app, "/api/audit?capability=network").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "audit");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["capability"], "network");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn surface_diff_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("ts_small");
+        let app = build_router(state, false);
+        let response = call(
+            app,
+            "/api/surface/diff?before=src/auth/jwt.ts&after=src/auth/aliases.ts",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "surface-diff");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["before"], "src/auth/jwt.ts");
+        assert_eq!(value["data"]["after"], "src/auth/aliases.ts");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cycles_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/cycles").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "cycles");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["summary"]["cycle_count"], 0);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tree_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/tree?target=src/lib.rs").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "tree");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["target"], "src/lib.rs");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn entry_reaches_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("capability_audit");
+        let app = build_router(state, false);
+        let response = call(app, "/api/entry/reaches?target=src/shared/api.ts").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "entry-reaches");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["target"], "src/shared/api.ts");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn simulate_extract_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(
+            app,
+            "/api/simulate/extract?symbols=lib::parser&into=src/parser_extracted.rs",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "simulate-extract");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["extraction"]["from_file"], "src/lib.rs");
+        assert_eq!(value["data"]["result"]["extraction"]["into_file"], "src/parser_extracted.rs");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn simulate_extract_endpoint_rejects_empty_symbol_list() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/simulate/extract?symbols=,%20%20,&into=src/parser_extracted.rs").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "simulate-extract");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("simulate extract requires at least one symbol"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cochange_endpoint_returns_expected_envelope_for_generated_git_fixture() {
+        let fixture_root = fixture_root("cochange");
+        let script = fixture_root.join("create_git_history.sh");
+        let repo = unique_temp_dir("cochange-serve");
+
+        let status = Command::new(&script).arg(&repo).status().unwrap();
+        assert!(status.success());
+
+        index_fixture(&repo);
+        let paths = RuntimePaths {
+            repo_root: repo.clone(),
+            scope_dir: repo.join(".scope"),
+            db_path: repo.join(".scope/index.db"),
+        };
+        let app = build_router(Arc::new(ServeState { paths }), false);
+        let response = call(app, "/api/cochange?target=src/parser.rs&days=10000").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["target"], "src/parser.rs");
+        assert_eq!(value["data"]["result"]["summary"]["target_commits"], 4);
+        assert_eq!(value["data"]["result"]["files"][0]["path"], "src/utils.rs");
+        assert_eq!(value["data"]["result"]["files"][1]["path"], "src/resolver.rs");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cochange_endpoint_rejects_invalid_days() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/cochange?target=src/lib.rs&days=0").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("cochange window days must be greater than 0"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cochange_endpoint_rejects_invalid_top() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/cochange?target=src/lib.rs&top=0").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("top must be greater than 0"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cochange_endpoint_rejects_invalid_min_shared_commits() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/cochange?target=src/lib.rs&min_shared_commits=0").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("min_shared_commits must be greater than 0"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cochange_endpoint_rejects_missing_target() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/cochange?target=src/missing.rs").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "cochange");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("file not indexed: src/missing.rs"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
     async fn html_fallback_is_served_when_ui_enabled() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);
@@ -745,6 +1178,10 @@ mod tests {
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("scope serve"));
+        assert!(html.contains("/api/audit?capability=network"));
+        assert!(html.contains("/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts"));
+        assert!(html.contains("/api/tree?target=src/lib.rs"));
+        assert!(html.contains("/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs"));
         fs::remove_dir_all(repo).unwrap();
     }
 

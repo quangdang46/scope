@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "command": "simulate-extract",
+  "status": "ok",
+  "data": {
+    "result": {
+      "extraction": {
+        "symbols": [
+          "lib::parser"
+        ],
+        "from_file": "src/lib.rs",
+        "into_file": "src/parser_extracted.rs"
+      },
+      "graph_delta": {
+        "edges_added": 1,
+        "edges_removed": 0,
+        "new_edges": [
+          {
+            "from": "src/lib.rs",
+            "to": "src/parser_extracted.rs",
+            "kind": "import",
+            "certainty": "exact"
+          }
+        ],
+        "removed_edges": [],
+        "cycles_introduced": 0,
+        "cycles_resolved": 0,
+        "new_layer_violations": 0,
+        "resolved_layer_violations": 0
+      },
+      "stability_delta": [
+        {
+          "file": "src/lib.rs",
+          "instability_before": 0.0,
+          "instability_after": 1.0,
+          "improved": false,
+          "note": null
+        },
+        {
+          "file": "src/parser_extracted.rs",
+          "instability_before": null,
+          "instability_after": 0.0,
+          "improved": false,
+          "note": null
+        }
+      ],
+      "recommendation": "neutral",
+      "recommendation_reasons": [
+        "no major structural improvement or regression detected"
+      ],
+      "warnings": []
+    }
+  },
+  "warnings": []
+}

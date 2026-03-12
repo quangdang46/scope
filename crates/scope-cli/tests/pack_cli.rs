@@ -144,6 +144,72 @@ fn cochange_invalid_days_emits_json_error_on_stderr() {
 }
 
 #[test]
+fn cochange_invalid_min_shared_commits_emits_json_error_on_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["cochange", "src/lib.rs", "--min-shared-commits", "0"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("min_shared_commits must be greater than 0"));
+}
+
+#[test]
+fn cochange_invalid_top_emits_json_error_on_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["cochange", "src/lib.rs", "--top", "0"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("top must be greater than 0"));
+}
+
+#[test]
+fn cochange_missing_target_emits_json_error_on_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["cochange", "src/missing.rs"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("file not indexed: src/missing.rs"));
+}
+
+#[test]
 fn cochange_command_returns_json_envelope_for_generated_git_fixture() {
     let fixture_root = fixture_root("cochange");
     let script = fixture_root.join("create_git_history.sh");

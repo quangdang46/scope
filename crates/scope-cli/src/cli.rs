@@ -62,6 +62,8 @@ pub enum Commands {
     Snapshot(SnapshotArgs),
     /// Compare two saved architectural snapshots
     DiffSnapshot(DiffSnapshotArgs),
+    /// Simulate extraction of symbols into a new file without changing the index
+    Simulate(SimulateArgs),
     /// Report exported symbols with no indexed inbound references
     Unused,
     /// Report circular file dependency chains
@@ -362,6 +364,25 @@ pub struct SnapshotDeleteArgs {
 pub struct DiffSnapshotArgs {
     pub before: String,
     pub after: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SimulateArgs {
+    #[command(subcommand)]
+    pub command: SimulateCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SimulateCommand {
+    /// Simulate extracting symbols into a new file without persisting changes
+    Extract(SimulateExtractArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SimulateExtractArgs {
+    pub symbols: String,
+    #[arg(long = "into")]
+    pub into_file: String,
 }
 
 #[derive(Debug, Clone, ValueEnum)]

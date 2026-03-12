@@ -12,7 +12,7 @@ use std::{
 use clap::Parser;
 use cli::{
     ArchCommand, ChangeType, Cli, CochangeSortArg, Commands, CycleSeverityArg, RiskSortArg,
-    SnapshotCommand, StabilitySortArg, SurfaceCommand, TestMapCommand,
+    SimulateCommand, SnapshotCommand, StabilitySortArg, SurfaceCommand, TestMapCommand,
 };
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, CochangeSort,
@@ -458,6 +458,23 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 .store
                 .diff_snapshot(&args.before, &args.after, &config)?;
             serialize_output(&scope_core::stub::diff_snapshot(result), compact)
+        }
+        Commands::Simulate(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let config = load_arch_config(&context.paths.repo_root)?;
+            match args.command {
+                SimulateCommand::Extract(args) => {
+                    let symbols = parse_symbol_csv(&args.symbols)?;
+                    let result = context
+                        .store
+                        .simulate_extract(&symbols, &RepoPath::from(args.into_file), &config)?;
+                    serialize_output(&scope_core::stub::simulate_extract(result), compact)
+                }
+            }
         }
         Commands::Unused => {
             let bootstrap_options = BootstrapOptions {
@@ -999,6 +1016,21 @@ fn validate_new_name(new_name: &str) -> Result<(), scope_core::ScopeError> {
         ));
     }
     Ok(())
+}
+
+fn parse_symbol_csv(value: &str) -> Result<Vec<String>, scope_core::ScopeError> {
+    let symbols = value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if symbols.is_empty() {
+        return Err(scope_core::ScopeError::InvalidInput(
+            "simulate extract requires at least one symbol".to_string(),
+        ));
+    }
+    Ok(symbols)
 }
 
 fn looks_like_symbol(target: &str) -> bool {

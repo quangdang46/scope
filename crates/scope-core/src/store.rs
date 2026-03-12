@@ -21,12 +21,14 @@ use crate::{
     MirrorSummary, NodeKind, PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind,
     PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind,
     RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort,
-    RiskSummary, ScopeError, ScopeResult, SnapshotCentralityDelta, SnapshotDeleteResult,
-    SnapshotDiffResult, SnapshotEdgeDelta, SnapshotEdgeRecord, SnapshotFileRecord, SnapshotGraph,
-    SnapshotListResult, SnapshotListSummary, SnapshotMetadata, SnapshotSaveResult,
-    SnapshotStabilityDelta, SnapshotStoredRecord, SnapshotSymbolRecord, SplitCluster,
-    SplitClusterMember, SplitResult, SplitSummary, StabilityCategory, StabilityRecord,
-    StabilityResult, StabilitySort, StabilitySummary, SymbolKind, SymbolRecord, TestConfig,
+    RiskSummary, ScopeError, ScopeResult, SimulateExtractResult, SimulateExtraction,
+    SimulateFileStabilityDelta, SimulateGraphDelta, SimulateRecommendation,
+    SnapshotCentralityDelta, SnapshotDeleteResult, SnapshotDiffResult, SnapshotEdgeDelta,
+    SnapshotEdgeRecord, SnapshotFileRecord, SnapshotGraph, SnapshotListResult,
+    SnapshotListSummary, SnapshotMetadata, SnapshotSaveResult, SnapshotStabilityDelta,
+    SnapshotStoredRecord, SnapshotSymbolRecord, SplitCluster, SplitClusterMember, SplitResult,
+    SplitSummary, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
+    StabilitySummary, SymbolKind, SymbolRecord, TestConfig,
     TestMapBuildResult, TestMapBuildSummary, TestMapCoveredByResult, TestMapCoveredBySummary,
     TestMapCoversResult, TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult,
     TestMapUncoveredSummary, TraversalRecord, TreeNode, TreeResult, TreeSummary, UnusedRecord,
@@ -1936,6 +1938,72 @@ impl Store {
         )))
     }
 
+    pub fn simulate_extract(
+        &self,
+        symbols: &[String],
+        into_file: &RepoPath,
+        config: &ArchConfig,
+    ) -> ScopeResult<SimulateExtractResult> {
+        let extraction = self.resolve_simulate_extraction(symbols, into_file)?;
+        let before = self.build_snapshot_graph(unix_timestamp())?;
+        let after = self.simulate_extract_graph(&before, &extraction)?;
+
+        let new_edges = diff_edge_records(&before.file_edges, &after.file_edges);
+        let removed_edges = diff_edge_records(&after.file_edges, &before.file_edges);
+        let before_file_edges = snapshot_file_edges(&before);
+        let after_file_edges = snapshot_file_edges(&after);
+        let before_cycles = cycle_records_from_file_edges(
+            &before
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            &before_file_edges,
+        );
+        let after_cycles = cycle_records_from_file_edges(
+            &after
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            &after_file_edges,
+        );
+        let before_cycle_keys = cycle_record_keys(&before_cycles);
+        let after_cycle_keys = cycle_record_keys(&after_cycles);
+        let (_, before_violations) = arch_check_edges(config, &before_file_edges)?;
+        let (_, after_violations) = arch_check_edges(config, &after_file_edges)?;
+        let introduced_violations = diff_violations(&before_violations, &after_violations);
+        let resolved_violations = diff_violations(&after_violations, &before_violations);
+        let stability_delta = simulate_stability_deltas(&before, &after, &extraction);
+        let warnings = simulate_warnings(&before, &after, &extraction);
+        let (recommendation, recommendation_reasons) = simulate_recommendation(
+            &stability_delta,
+            before_cycle_keys,
+            after_cycle_keys,
+            introduced_violations.len(),
+            resolved_violations.len(),
+            !warnings.is_empty(),
+        );
+
+        Ok(SimulateExtractResult {
+            extraction,
+            graph_delta: SimulateGraphDelta {
+                edges_added: new_edges.len(),
+                edges_removed: removed_edges.len(),
+                new_edges,
+                removed_edges,
+                cycles_introduced: after_cycle_keys.saturating_sub(before_cycle_keys),
+                cycles_resolved: before_cycle_keys.saturating_sub(after_cycle_keys),
+                new_layer_violations: introduced_violations.len(),
+                resolved_layer_violations: resolved_violations.len(),
+            },
+            stability_delta,
+            recommendation,
+            recommendation_reasons,
+            warnings,
+        })
+    }
+
     pub fn build_rename_plan(
         &self,
         repo_root: &Path,
@@ -3512,6 +3580,196 @@ impl Store {
             })
             .optional()
             .map_err(Into::into)
+    }
+
+    fn resolve_simulate_extraction(
+        &self,
+        symbols: &[String],
+        into_file: &RepoPath,
+    ) -> ScopeResult<SimulateExtraction> {
+        if symbols.is_empty() {
+            return Err(ScopeError::InvalidInput(
+                "simulate extract requires at least one symbol".to_string(),
+            ));
+        }
+        let mut normalized = Vec::new();
+        let mut seen = HashSet::new();
+        let mut resolved = Vec::new();
+        for symbol in symbols {
+            let trimmed = symbol.trim();
+            if trimmed.is_empty() {
+                return Err(ScopeError::InvalidInput(
+                    "simulate extract does not allow empty symbol names".to_string(),
+                ));
+            }
+            if !seen.insert(trimmed.to_string()) {
+                return Err(ScopeError::InvalidInput(format!(
+                    "simulate extract received duplicate symbol `{trimmed}`"
+                )));
+            }
+            let resolved_symbol = self.resolve_symbol_by_name_or_qualname(trimmed)?.ok_or_else(|| {
+                ScopeError::InvalidInput(format!(
+                    "simulate extract could not resolve symbol `{trimmed}`; use an indexed symbol name or qualname"
+                ))
+            })?;
+            normalized.push(trimmed.to_string());
+            resolved.push(resolved_symbol);
+        }
+        let from_file = resolved
+            .first()
+            .map(|record| record.file.clone())
+            .ok_or_else(|| ScopeError::InvalidInput("simulate extract requires symbols".to_string()))?;
+        if resolved.iter().any(|record| record.file != from_file) {
+            return Err(ScopeError::InvalidInput(
+                "simulate extract requires all symbols to come from the same indexed file"
+                    .to_string(),
+            ));
+        }
+        if &from_file == into_file {
+            return Err(ScopeError::InvalidInput(
+                "simulate extract target file must differ from the source file".to_string(),
+            ));
+        }
+        if self.file_id(into_file)?.is_some() {
+            return Err(ScopeError::InvalidInput(format!(
+                "simulate extract target file `{}` already exists in the index; choose a new file path",
+                into_file.0
+            )));
+        }
+        Ok(SimulateExtraction {
+            symbols: normalized,
+            from_file,
+            into_file: into_file.clone(),
+        })
+    }
+
+    fn simulate_extract_graph(
+        &self,
+        before: &SnapshotGraph,
+        extraction: &SimulateExtraction,
+    ) -> ScopeResult<SnapshotGraph> {
+        let mut after = before.clone();
+        let from_file = &extraction.from_file;
+        let into_file = &extraction.into_file;
+        let moved_symbols = extraction
+            .symbols
+            .iter()
+            .map(|symbol| {
+                self.resolve_symbol_by_name_or_qualname(symbol)?.ok_or_else(|| {
+                    ScopeError::InvalidInput(format!(
+                        "simulate extract could not resolve symbol `{symbol}` during graph construction"
+                    ))
+                })
+            })
+            .collect::<ScopeResult<Vec<_>>>()?;
+        let moved_qualnames = moved_symbols
+            .iter()
+            .map(|symbol| symbol.qualname.clone())
+            .collect::<HashSet<_>>();
+        let moved_names = moved_symbols
+            .iter()
+            .map(|symbol| symbol.name.clone())
+            .collect::<HashSet<_>>();
+
+        if !after.files.iter().any(|file| &file.path == into_file) {
+            let source_language = after
+                .files
+                .iter()
+                .find(|file| &file.path == from_file)
+                .map(|file| file.language.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            after.files.push(SnapshotFileRecord {
+                path: into_file.clone(),
+                language: source_language,
+                content_hash: None,
+            });
+            after.files.sort_by(|left, right| left.path.cmp(&right.path));
+        }
+
+        for symbol in &mut after.symbols {
+            if moved_qualnames.contains(&symbol.qualname) {
+                symbol.file = into_file.clone();
+            }
+        }
+        after.symbols.sort_by(|left, right| {
+            left.file
+                .cmp(&right.file)
+                .then_with(|| left.qualname.cmp(&right.qualname))
+        });
+
+        let mut edges = after.file_edges.clone();
+        let mut importer_files = self.importer_paths_for_file(from_file)?;
+        let caller_files = self.caller_file_paths_for_symbols(&moved_qualnames)?;
+        importer_files.extend(caller_files);
+        importer_files.sort();
+        importer_files.dedup();
+
+        for importer in importer_files {
+            if importer == *into_file {
+                continue;
+            }
+            if importer == *from_file {
+                remove_snapshot_import_edge(&mut edges, &importer, from_file, &moved_names);
+            }
+            push_snapshot_import_edge(&mut edges, importer.clone(), into_file.clone(), Certainty::Heuristic);
+            if importer == *from_file {
+                push_snapshot_import_edge(&mut edges, from_file.clone(), into_file.clone(), Certainty::Exact);
+            }
+        }
+        push_snapshot_import_edge(&mut edges, from_file.clone(), into_file.clone(), Certainty::Exact);
+        edges.sort_by(|left, right| {
+            left.from
+                .cmp(&right.from)
+                .then_with(|| left.to.cmp(&right.to))
+                .then_with(|| format!("{:?}", left.kind).cmp(&format!("{:?}", right.kind)))
+        });
+        edges.dedup();
+        after.file_edges = edges;
+
+        Ok(after)
+    }
+
+    fn importer_paths_for_file(&self, path: &RepoPath) -> ScopeResult<Vec<RepoPath>> {
+        let Some(file_id) = self.file_id(path)? else {
+            return Ok(Vec::new());
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT files.path
+             FROM imports
+             JOIN files ON files.id = imports.file_id
+             WHERE imports.resolved_file_id = ?1
+             ORDER BY files.path ASC",
+        )?;
+        let rows = statement.query_map([file_id], |row| Ok(RepoPath(row.get::<_, String>(0)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn caller_file_paths_for_symbols(
+        &self,
+        qualnames: &HashSet<String>,
+    ) -> ScopeResult<Vec<RepoPath>> {
+        if qualnames.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut files = HashSet::new();
+        for qualname in qualnames {
+            let mut statement = self.connection.prepare(
+                "SELECT DISTINCT files.path
+                 FROM symbol_edges
+                 JOIN symbols ON symbols.id = symbol_edges.from_symbol_id
+                 JOIN files ON files.id = symbols.file_id
+                 WHERE symbol_edges.to_symbol_id = ?1 AND symbol_edges.kind = 'call'",
+            )?;
+            if let Some(symbol_id) = self.symbol_id(qualname)? {
+                let rows = statement.query_map([symbol_id], |row| Ok(RepoPath(row.get::<_, String>(0)?)))?;
+                for row in rows {
+                    files.insert(row?);
+                }
+            }
+        }
+        let mut files = files.into_iter().collect::<Vec<_>>();
+        files.sort();
+        Ok(files)
     }
 
     fn collect_symbol_import_rename_steps(
@@ -5501,6 +5759,172 @@ fn diff_violations(
         .collect()
 }
 
+fn simulate_stability_deltas(
+    before: &SnapshotGraph,
+    after: &SnapshotGraph,
+    extraction: &SimulateExtraction,
+) -> Vec<SimulateFileStabilityDelta> {
+    let before_files = before
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let after_files = after
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let before_edges = snapshot_file_edges(before);
+    let after_edges = snapshot_file_edges(after);
+    let before_records = stability_records_from_file_edges(&before_files, &before_edges, None)
+        .into_iter()
+        .map(|record| (record.path.clone(), record))
+        .collect::<HashMap<_, _>>();
+    let after_records = stability_records_from_file_edges(&after_files, &after_edges, None)
+        .into_iter()
+        .map(|record| (record.path.clone(), record))
+        .collect::<HashMap<_, _>>();
+
+    let mut targets = vec![extraction.from_file.clone(), extraction.into_file.clone()];
+    targets.sort();
+    targets.dedup();
+    targets
+        .into_iter()
+        .map(|file| {
+            let before_instability = before_records.get(&file).map(|record| record.instability);
+            let after_instability = after_records.get(&file).map(|record| record.instability);
+            SimulateFileStabilityDelta {
+                file,
+                instability_before: before_instability,
+                instability_after: after_instability,
+                improved: match (before_instability, after_instability) {
+                    (Some(before), Some(after)) => after < before,
+                    _ => false,
+                },
+                note: None,
+            }
+        })
+        .collect()
+}
+
+fn simulate_recommendation(
+    stability_delta: &[SimulateFileStabilityDelta],
+    cycles_before: usize,
+    cycles_after: usize,
+    introduced_violations: usize,
+    resolved_violations: usize,
+    low_confidence: bool,
+) -> (SimulateRecommendation, Vec<String>) {
+    let mut reasons = Vec::new();
+    let source_improved = stability_delta.iter().any(|delta| {
+        delta.improved && delta.instability_before.is_some() && delta.instability_after.is_some()
+    });
+    if cycles_after > cycles_before {
+        reasons.push(format!(
+            "introduces {} additional cycle(s)",
+            cycles_after - cycles_before
+        ));
+    }
+    if introduced_violations > 0 {
+        reasons.push(format!(
+            "introduces {introduced_violations} new layer violation(s)"
+        ));
+    }
+    if cycles_before > cycles_after {
+        reasons.push(format!(
+            "resolves {} existing cycle(s)",
+            cycles_before - cycles_after
+        ));
+    }
+    if resolved_violations > 0 {
+        reasons.push(format!(
+            "resolves {resolved_violations} existing layer violation(s)"
+        ));
+    }
+    if source_improved {
+        reasons.push("improves instability for the extracted source file".to_string());
+    }
+    if low_confidence {
+        reasons.push("uses conservative heuristic edge rewrites for simulated imports/calls".to_string());
+    }
+
+    let recommendation = if low_confidence && !source_improved && cycles_after >= cycles_before {
+        SimulateRecommendation::LowConfidence
+    } else if cycles_after > cycles_before || introduced_violations > 0 {
+        SimulateRecommendation::Risky
+    } else if source_improved || cycles_before > cycles_after || resolved_violations > 0 {
+        SimulateRecommendation::HighValue
+    } else {
+        SimulateRecommendation::Neutral
+    };
+    if reasons.is_empty() {
+        reasons.push("no major structural improvement or regression detected".to_string());
+    }
+    (recommendation, reasons)
+}
+
+fn simulate_warnings(
+    before: &SnapshotGraph,
+    after: &SnapshotGraph,
+    extraction: &SimulateExtraction,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let moved_symbol_count = after
+        .symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.file == extraction.into_file && extraction.symbols.iter().any(|name| {
+                symbol.qualname == *name || symbol.name == *name || symbol.qualname.ends_with(&format!("::{name}"))
+            })
+        })
+        .count();
+    if moved_symbol_count < extraction.symbols.len() {
+        warnings.push(
+            "some requested symbols were matched heuristically while building the simulated graph"
+                .to_string(),
+        );
+    }
+    if before.file_edges == after.file_edges {
+        warnings.push("simulation produced no file-edge changes; static evidence may be too weak".to_string());
+    }
+    warnings
+}
+
+fn cycle_record_keys(records: &[CycleRecord]) -> usize {
+    records.len()
+}
+
+fn push_snapshot_import_edge(
+    edges: &mut Vec<SnapshotEdgeRecord>,
+    from: RepoPath,
+    to: RepoPath,
+    certainty: Certainty,
+) {
+    let candidate = SnapshotEdgeRecord {
+        from: from.0,
+        to: to.0,
+        kind: EdgeKind::Import,
+        certainty,
+    };
+    if !edges.contains(&candidate) {
+        edges.push(candidate);
+    }
+}
+
+fn remove_snapshot_import_edge(
+    edges: &mut Vec<SnapshotEdgeRecord>,
+    from: &RepoPath,
+    to: &RepoPath,
+    moved_names: &HashSet<String>,
+) {
+    edges.retain(|edge| {
+        !(edge.kind == EdgeKind::Import
+            && edge.from == from.0
+            && edge.to == to.0
+            && !moved_names.is_empty())
+    });
+}
+
 fn import_mentions_symbol(raw_text: &str, symbol_name: &str) -> bool {
     raw_text.contains(symbol_name)
 }
@@ -7067,6 +7491,80 @@ mod tests {
             .as_ref()
             .is_some_and(|path| path.0 == "src/resolver.rs")
             && record.edge_kind == EdgeKind::Import));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn simulate_extract_preserves_source_edge_for_importers_with_unmoved_symbols() {
+        let dir = unique_temp_dir("db-simulate-preserve-source-edge");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let lib = sample_file("src/lib.rs");
+        let main = sample_file("src/main.rs");
+        let extracts = vec![
+            ExtractResult {
+                file: lib.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![
+                    sample_symbol("src/lib.rs", "parser", SymbolKind::Function, Visibility::Public),
+                    sample_symbol("src/lib.rs", "farewell", SymbolKind::Function, Visibility::Public),
+                ],
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: main.clone(),
+                imports: vec![ImportRecord {
+                    file: main.path.clone(),
+                    raw_text: "use crate::lib::{parser, farewell};".to_string(),
+                    import_path: ImportPath::Relative(lib.path.clone()),
+                    span: sample_span(1),
+                    certainty: Certainty::Exact,
+                }],
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/main.rs",
+                    "run",
+                    SymbolKind::Function,
+                    Visibility::Local,
+                )],
+                call_sites: vec![
+                    sample_call("src/main.rs", "main::run", "parser", Some("lib::parser"), false, 2),
+                    sample_call(
+                        "src/main.rs",
+                        "main::run",
+                        "farewell",
+                        Some("lib::farewell"),
+                        false,
+                        3,
+                    ),
+                ],
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
+
+        let result = store
+            .simulate_extract(
+                &["lib::parser".to_string()],
+                &RepoPath::from("src/parser_extracted.rs"),
+                &ArchConfig::default(),
+            )
+            .unwrap();
+
+        assert!(result.graph_delta.new_edges.iter().any(|edge| {
+            edge.from == "src/main.rs" && edge.to == "src/parser_extracted.rs" && edge.kind == EdgeKind::Import
+        }));
+        assert!(!result.graph_delta.removed_edges.iter().any(|edge| {
+            edge.from == "src/main.rs" && edge.to == "src/lib.rs" && edge.kind == EdgeKind::Import
+        }));
+        assert_eq!(result.graph_delta.edges_removed, 0);
 
         std::fs::remove_dir_all(dir).unwrap();
     }
