@@ -6488,6 +6488,168 @@ mod tests {
     }
 
     #[test]
+    fn query_utility_commands_cover_empty_and_filtered_cases() {
+        let dir = unique_temp_dir("db-utility-queries");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let app = sample_file("src/app.rs");
+        let parser = sample_file("src/parser.rs");
+        let utils = sample_file("src/utils.rs");
+        let leaf = sample_file("src/leaf.rs");
+
+        let app_extract = ExtractResult {
+            file: app.clone(),
+            imports: vec![ImportRecord {
+                file: app.path.clone(),
+                raw_text: "use crate::parser;".to_string(),
+                import_path: ImportPath::Relative(parser.path.clone()),
+                span: sample_span(1),
+                certainty: Certainty::Exact,
+            }],
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![sample_symbol(
+                "src/app.rs",
+                "run",
+                SymbolKind::Function,
+                Visibility::Public,
+            )],
+            call_sites: vec![sample_call(
+                "src/app.rs",
+                "app::run",
+                "parse",
+                Some("parser::parse"),
+                false,
+                2,
+            )],
+            parse_diagnostics: Vec::new(),
+        };
+
+        let parser_extract = ExtractResult {
+            file: parser.clone(),
+            imports: vec![ImportRecord {
+                file: parser.path.clone(),
+                raw_text: "use crate::utils;".to_string(),
+                import_path: ImportPath::Relative(utils.path.clone()),
+                span: sample_span(1),
+                certainty: Certainty::Exact,
+            }],
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![
+                sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
+                sample_symbol(
+                    "src/parser.rs",
+                    "unused_helper",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                ),
+            ],
+            call_sites: vec![sample_call(
+                "src/parser.rs",
+                "parser::parse",
+                "helper",
+                Some("utils::helper"),
+                false,
+                2,
+            )],
+            parse_diagnostics: Vec::new(),
+        };
+
+        let utils_extract = ExtractResult {
+            file: utils.clone(),
+            imports: vec![ImportRecord {
+                file: utils.path.clone(),
+                raw_text: "use crate::leaf;".to_string(),
+                import_path: ImportPath::Relative(leaf.path.clone()),
+                span: sample_span(1),
+                certainty: Certainty::Exact,
+            }],
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![sample_symbol(
+                "src/utils.rs",
+                "helper",
+                SymbolKind::Function,
+                Visibility::Public,
+            )],
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        };
+
+        let leaf_extract = ExtractResult {
+            file: leaf.clone(),
+            imports: Vec::new(),
+            modules: Vec::new(),
+            exports: Vec::new(),
+            symbols: vec![sample_symbol(
+                "src/leaf.rs",
+                "leaf_fn",
+                SymbolKind::Function,
+                Visibility::Public,
+            )],
+            call_sites: Vec::new(),
+            parse_diagnostics: Vec::new(),
+        };
+
+        store
+            .persist_extract_results(&[
+                app_extract,
+                parser_extract,
+                utils_extract,
+                leaf_extract,
+            ])
+            .unwrap();
+
+        let unused = store.query_unused().unwrap();
+        assert_eq!(unused.summary.exported_symbols, 5);
+        assert_eq!(unused.summary.unused_symbols, 3);
+        assert_eq!(
+            unused
+                .symbols
+                .iter()
+                .map(|record| record.qualname.as_str())
+                .collect::<Vec<_>>(),
+            vec!["app::run", "leaf::leaf_fn", "parser::unused_helper"]
+        );
+
+        let cycles = store.query_cycles(Some(CycleSeverity::High)).unwrap();
+        assert_eq!(cycles.summary.cycle_count, 0);
+        assert!(cycles.cycles.is_empty());
+
+        let branch_diff = store.query_branch_diff(&dir, "HEAD").unwrap();
+        assert_eq!(branch_diff.summary.changed_files, 0);
+        assert_eq!(branch_diff.summary.affected_files, 0);
+        assert!(branch_diff.changed_files.is_empty());
+        assert!(branch_diff.affected_files.is_empty());
+
+        let tree = store.query_tree(&app.path, false, Some(2)).unwrap();
+        assert_eq!(tree.summary.nodes, 3);
+        assert_eq!(tree.tree.path, app.path);
+        assert_eq!(tree.tree.children.len(), 1);
+        assert_eq!(tree.tree.children[0].path, parser.path);
+        assert_eq!(tree.tree.children[0].children[0].path, utils.path);
+
+        let reverse_tree = store.query_tree(&leaf.path, true, Some(3)).unwrap();
+        assert!(reverse_tree.reverse);
+        assert_eq!(reverse_tree.summary.nodes, 4);
+        assert_eq!(reverse_tree.tree.children[0].path, utils.path);
+        assert_eq!(reverse_tree.tree.children[0].children[0].path, parser.path);
+        assert_eq!(
+            reverse_tree.tree.children[0].children[0].children[0].path,
+            app.path
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn resolves_same_file_direct_calls() {
         let dir = unique_temp_dir("db-calls-same-file");
         let db_path = dir.join("index.db");

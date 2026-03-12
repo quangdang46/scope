@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "command": "cochange",
+  "status": "ok",
+  "data": {
+    "result": {
+      "target": "src/parser.rs",
+      "top": null,
+      "days": 10000,
+      "min_shared_commits": 1,
+      "sort": "score",
+      "files": [
+        {
+          "path": "src/utils.rs",
+          "shared_commits": 3,
+          "target_commits": 4,
+          "candidate_commits": 3,
+          "score": 0.75,
+          "normalized_score": 100,
+          "reason": "3 shared commits out of 4 target commits in last 10000 days"
+        },
+        {
+          "path": "src/resolver.rs",
+          "shared_commits": 2,
+          "target_commits": 4,
+          "candidate_commits": 3,
+          "score": 0.5,
+          "normalized_score": 67,
+          "reason": "2 shared commits out of 4 target commits in last 10000 days"
+        }
+      ],
+      "summary": {
+        "git_available": true,
+        "target_commits": 4,
+        "related_files": 2,
+        "max_shared_commits": 3,
+        "max_score": 0.75
+      }
+    }
+  },
+  "warnings": []
+}

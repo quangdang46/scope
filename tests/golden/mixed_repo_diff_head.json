@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "command": "diff",
+  "status": "ok",
+  "data": {
+    "result": {
+      "branch": "HEAD",
+      "changed_files": [],
+      "affected_files": [],
+      "summary": {
+        "changed_files": 0,
+        "affected_files": 0
+      }
+    }
+  },
+  "warnings": []
+}

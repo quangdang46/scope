@@ -2344,6 +2344,76 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_entry_queries_return_scope_json_envelopes() {
+        let repo = prepare_fixture_copy("capability_audit");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let list_output = dispatch_tool(
+            "entry_list",
+            &json!({ "repo_root": repo.display().to_string() }),
+        )
+        .unwrap();
+        let list_value: Value = serde_json::from_str(&list_output).unwrap();
+        assert_eq!(list_value["command"], "entry-list");
+        assert_eq!(list_value["status"], "ok");
+        assert_eq!(list_value["data"]["result"]["summary"]["entry_points"], 2);
+
+        let cone_output = dispatch_tool(
+            "entry_cone",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/workers/job.ts"
+            }),
+        )
+        .unwrap();
+        let cone_value: Value = serde_json::from_str(&cone_output).unwrap();
+        assert_eq!(cone_value["command"], "entry-cone");
+        assert_eq!(cone_value["status"], "ok");
+        assert_eq!(cone_value["data"]["result"]["summary"]["reachable_files"], 3);
+        assert_eq!(cone_value["data"]["result"]["summary"]["max_distance"], 2);
+
+        let reaches_output = dispatch_tool(
+            "entry_reaches",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/http/client.ts"
+            }),
+        )
+        .unwrap();
+        let reaches_value: Value = serde_json::from_str(&reaches_output).unwrap();
+        assert_eq!(reaches_value["command"], "entry-reaches");
+        assert_eq!(reaches_value["status"], "ok");
+        assert_eq!(
+            reaches_value["data"]["result"]["summary"]["reaching_entry_points"],
+            2
+        );
+        assert_eq!(
+            reaches_value["data"]["result"]["summary"]["nearest_distance"],
+            2
+        );
+
+        let unreachable_output = dispatch_tool(
+            "entry_unreachable",
+            &json!({ "repo_root": repo.display().to_string() }),
+        )
+        .unwrap();
+        let unreachable_value: Value = serde_json::from_str(&unreachable_output).unwrap();
+        assert_eq!(unreachable_value["command"], "entry-unreachable");
+        assert_eq!(unreachable_value["status"], "ok");
+        assert_eq!(
+            unreachable_value["data"]["result"]["unreachable_files"],
+            0
+        );
+        assert_eq!(unreachable_value["data"]["result"]["reachable_files"], 4);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
     fn dispatch_test_map_returns_scope_json_envelope() {
         let repo = prepare_fixture_copy("test_map_ts");
         let index_output = dispatch_tool(
@@ -2370,6 +2440,75 @@ mod tests {
             "src/auth/middleware.ts"
         );
         assert_eq!(value["data"]["result"]["summary"]["covering_tests"], 3);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_utility_queries_return_scope_json_envelopes() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let unused_output = dispatch_tool(
+            "unused",
+            &json!({ "repo_root": repo.display().to_string() }),
+        )
+        .unwrap();
+        let unused_value: Value = serde_json::from_str(&unused_output).unwrap();
+        assert_eq!(unused_value["command"], "unused");
+        assert_eq!(unused_value["status"], "ok");
+        assert_eq!(unused_value["data"]["result"]["summary"]["exported_symbols"], 8);
+        assert_eq!(unused_value["data"]["result"]["summary"]["unused_symbols"], 6);
+
+        let cycles_output = dispatch_tool(
+            "cycles",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "severity": "high"
+            }),
+        )
+        .unwrap();
+        let cycles_value: Value = serde_json::from_str(&cycles_output).unwrap();
+        assert_eq!(cycles_value["command"], "cycles");
+        assert_eq!(cycles_value["status"], "ok");
+        assert_eq!(cycles_value["data"]["result"]["severity"], "high");
+        assert_eq!(cycles_value["data"]["result"]["summary"]["cycle_count"], 0);
+
+        let tree_output = dispatch_tool(
+            "tree",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/parser.rs",
+                "reverse": true,
+                "depth": 2
+            }),
+        )
+        .unwrap();
+        let tree_value: Value = serde_json::from_str(&tree_output).unwrap();
+        assert_eq!(tree_value["command"], "tree");
+        assert_eq!(tree_value["status"], "ok");
+        assert_eq!(tree_value["data"]["result"]["target"], "src/parser.rs");
+        assert_eq!(tree_value["data"]["result"]["reverse"], true);
+        assert_eq!(tree_value["data"]["result"]["summary"]["nodes"], 4);
+
+        let diff_output = dispatch_tool(
+            "diff",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "branch": "HEAD"
+            }),
+        )
+        .unwrap();
+        let diff_value: Value = serde_json::from_str(&diff_output).unwrap();
+        assert_eq!(diff_value["command"], "diff");
+        assert_eq!(diff_value["status"], "ok");
+        assert_eq!(diff_value["data"]["result"]["branch"], "HEAD");
+        assert_eq!(diff_value["data"]["result"]["summary"]["changed_files"], 0);
+        assert_eq!(diff_value["data"]["result"]["summary"]["affected_files"], 0);
+
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -2596,6 +2735,31 @@ mod tests {
         assert_eq!(delete_value["command"], "snapshot-delete");
         assert_eq!(delete_value["status"], "ok");
         assert_eq!(delete_value["data"]["result"]["deleted"], true);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_utility_queries_invalid_target_returns_domain_error_envelope() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "tree",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/missing.rs"
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "tree");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+
         fs::remove_dir_all(repo).unwrap();
     }
 }
