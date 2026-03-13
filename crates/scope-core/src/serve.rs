@@ -1218,6 +1218,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_endpoint_invalid_step_returns_json_error() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.impact").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "query");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("unsupported query step `.impact`; supported steps are .deps, .reverse, .symbols, .callers, .callees, unique, and count"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
     async fn unused_endpoint_returns_expected_envelope() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);

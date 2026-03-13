@@ -746,6 +746,45 @@ fn query_expr_unterminated_quote_emits_json_error_on_stderr() {
 }
 
 #[test]
+fn query_expr_supports_all_sources_and_reverse_step() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let all_files_output = run_scope(&repo, &["query", "--expr", "all-files | count"]);
+    assert_eq!(all_files_output.status.code(), Some(0));
+    let all_files_value: serde_json::Value =
+        serde_json::from_slice(&all_files_output.stdout).expect("stdout should be JSON");
+    assert_eq!(all_files_value["command"], "query");
+    assert_eq!(all_files_value["status"], "ok");
+    assert_eq!(all_files_value["data"]["result"]["number"], 5);
+
+    let all_symbols_output = run_scope(&repo, &["query", "--expr", "all-symbols | count"]);
+    assert_eq!(all_symbols_output.status.code(), Some(0));
+    let all_symbols_value: serde_json::Value =
+        serde_json::from_slice(&all_symbols_output.stdout).expect("stdout should be JSON");
+    assert_eq!(all_symbols_value["command"], "query");
+    assert_eq!(all_symbols_value["status"], "ok");
+    assert!(all_symbols_value["data"]["result"]["number"]
+        .as_u64()
+        .expect("symbol count should be numeric")
+        >= 4);
+
+    let reverse_output = run_scope(
+        &repo,
+        &["query", "--expr", "file \"src/parser.rs\" | .reverse | unique | count"],
+    );
+    assert_eq!(reverse_output.status.code(), Some(0));
+    let reverse_value: serde_json::Value =
+        serde_json::from_slice(&reverse_output.stdout).expect("stdout should be JSON");
+    assert_eq!(reverse_value["command"], "query");
+    assert_eq!(reverse_value["status"], "ok");
+    assert_eq!(reverse_value["data"]["result"]["number"], 2);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn query_repl_supports_help_bindings_and_exit() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);
@@ -786,6 +825,51 @@ fn query_repl_prints_json_errors_and_honors_quit_alias() {
     assert!(stdout.contains("\"command\": \"cli\""));
     assert!(stdout.contains("\"status\": \"error\""));
     assert!(stdout.contains("unsupported query step `.impact`"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_repl_surfaces_unknown_bindings_and_empty_vars_output() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope_with_stdin(&repo, &["query"], ":vars\n$missing\n:exit\n");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scope query REPL"));
+    assert!(stdout.contains("unknown query binding `$missing`"));
+    assert!(stdout.contains("\"command\": \"cli\""));
+    assert!(stdout.contains("\"status\": \"error\""));
+    assert!(stdout.contains("scope> \nscope>"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_repl_supports_all_sources_and_reverse_step() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope_with_stdin(
+        &repo,
+        &["query"],
+        "all-files | count\nall-symbols | count\nfile \"src/parser.rs\" | .reverse | unique | count\n:exit\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scope query REPL"));
+    assert!(stdout.contains("\"input\": \"all-files | count\""));
+    assert!(stdout.contains("\"input\": \"all-symbols | count\""));
+    assert!(stdout.contains("\"input\": \"file \\\"src/parser.rs\\\" | .reverse | unique | count\""));
+    assert!(stdout.contains("\"number\": 5"));
+    assert!(stdout.contains("\"number\": 1"));
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -934,17 +1018,22 @@ fn snapshot_round_trip_and_diff_snapshot_return_live_json_envelopes() {
     let reindex_output = run_scope(&repo, &["index"]);
     assert_eq!(reindex_output.status.code(), Some(0));
 
+    let current_snapshot_output = run_scope(&repo, &["snapshot", "save", "--name", "current"]);
+    assert_eq!(current_snapshot_output.status.code(), Some(0));
+
     let diff_output = run_scope(&repo, &["diff-snapshot", "baseline", "current"]);
     assert_eq!(diff_output.status.code(), Some(0));
     let diff_value: serde_json::Value =
         serde_json::from_slice(&diff_output.stdout).expect("stdout should be JSON");
     assert_eq!(diff_value["command"], "diff-snapshot");
     assert_eq!(diff_value["status"], "ok");
-    assert_eq!(diff_value["data"]["result"]["before"], "baseline");
-    assert_eq!(diff_value["data"]["result"]["after"], "current");
-    assert!(diff_value["data"]["result"]["public_surface"]["modified"]
+    assert_eq!(diff_value["data"]["result"]["before"]["name"], "baseline");
+    assert_eq!(diff_value["data"]["result"]["after"]["name"], "current");
+    assert_eq!(diff_value["data"]["result"]["surface_diff"]["summary"]["added_count"], 1);
+    assert_eq!(diff_value["data"]["result"]["surface_diff"]["summary"]["removed_count"], 1);
+    assert!(diff_value["data"]["result"]["surface_diff"]["changes"]
         .as_array()
-        .is_some_and(|items| !items.is_empty()));
+        .is_some_and(|items| items.len() >= 2));
 
     let delete_output = run_scope(&repo, &["snapshot", "delete", "baseline"]);
     assert_eq!(delete_output.status.code(), Some(0));
