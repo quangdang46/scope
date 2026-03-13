@@ -208,16 +208,19 @@ pub fn build_router(state: Arc<ServeState>, no_ui: bool) -> Router {
 pub async fn run_server(paths: RuntimePaths, options: ServeOptions) -> ScopeResult<()> {
     let state = Arc::new(ServeState { paths });
     let app = build_router(state, options.no_ui);
-    let address = SocketAddr::from(([127, 0, 0, 1], options.port));
-    let listener = tokio::net::TcpListener::bind(address)
+    let requested_address = SocketAddr::from(([127, 0, 0, 1], options.port));
+    let listener = tokio::net::TcpListener::bind(requested_address)
         .await
-        .map_err(|error| ScopeError::io(format!("bind {address}"), error))?;
+        .map_err(|error| ScopeError::io(format!("bind {requested_address}"), error))?;
+    let local_address = listener
+        .local_addr()
+        .map_err(|error| ScopeError::io("listener local address", error))?;
 
     if options.open {
-        let _ = open::that(format!("http://{address}"));
+        let _ = open::that(format!("http://{local_address}"));
     }
 
-    eprintln!("scope serve: http://{address}");
+    eprintln!("scope serve: http://{local_address}");
     axum::serve(listener, app)
         .await
         .map_err(|error| ScopeError::Internal(error.to_string()))
@@ -1715,6 +1718,10 @@ mod tests {
         let app = build_router(state, false);
         let response = call(app, "/").await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -1728,11 +1735,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_endpoint_sets_json_content_type() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/status").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "serve-status");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_list_endpoint_sets_json_content_type() {
+        let (state, repo) = build_test_state("rust_small");
+        let store = open_store(&state).unwrap();
+        store.save_snapshot("baseline", None).unwrap();
+        let app = build_router(state, false);
+        let response = call(app, "/api/snapshot/list").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "snapshot-list");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
     async fn html_fallback_is_disabled_with_no_ui() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, true);
         let response = call(app, "/").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();

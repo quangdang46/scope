@@ -1,9 +1,11 @@
 use std::{
     fs,
-    io::Write,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 fn workspace_root() -> PathBuf {
@@ -83,6 +85,81 @@ fn run_scope_with_stdin(repo: &Path, args: &[&str], stdin_input: &str) -> std::p
         .expect("stdin should accept test input");
 
     child.wait_with_output().expect("scope binary should exit")
+}
+
+fn write_arch_config(repo: &Path, source: &str) {
+    let scope_dir = repo.join(".scope");
+    fs::create_dir_all(&scope_dir).expect("scope config directory should be created");
+    fs::write(scope_dir.join("arch.toml"), source).expect("arch config should be written");
+}
+
+fn spawn_scope_serve(repo: &Path, args: &[&str]) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_scope"))
+        .current_dir(repo)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scope serve should start")
+}
+
+fn wait_for_serve_url(child: &mut Child) -> String {
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let mut reader = BufReader::new(stderr);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).expect("stderr should be readable");
+        if read == 0 {
+            if let Some(status) = child.try_wait().expect("child status should be available") {
+                panic!("scope serve exited before reporting a URL: {status}");
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for scope serve URL");
+            thread::sleep(Duration::from_millis(25));
+            continue;
+        }
+
+        if let Some(url) = line.trim().strip_prefix("scope serve: ") {
+            return url.to_string();
+        }
+    }
+}
+
+fn http_get(url: &str) -> (String, String) {
+    let without_scheme = url
+        .strip_prefix("http://")
+        .expect("test URLs should use http");
+    let (host_port, path) = without_scheme.split_once('/').unwrap_or((without_scheme, ""));
+    let request_path = format!("/{}", path);
+    let mut stream = TcpStream::connect(host_port).expect("server should accept connections");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout should be set");
+    stream
+        .write_all(
+            format!(
+                "GET {request_path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("request should be written");
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("response should be readable");
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .expect("response should contain headers and body");
+    (headers.to_string(), body.to_string())
+}
+
+fn stop_child(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]
@@ -938,6 +1015,36 @@ fn serve_help_includes_core_flags() {
 }
 
 #[test]
+fn serve_command_supports_ephemeral_port_and_reports_live_url() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index", "--no-git"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let mut child = spawn_scope_serve(&repo, &["serve", "--port", "0", "--no-ui"]);
+    let url = wait_for_serve_url(&mut child);
+    assert!(url.starts_with("http://127.0.0.1:"));
+
+    let (status_headers, status_body) = http_get(&format!("{url}/api/status"));
+    assert!(status_headers.starts_with("HTTP/1.1 200 OK"));
+    assert!(status_headers.contains("content-type: application/json"));
+    let status_value: serde_json::Value =
+        serde_json::from_str(&status_body).expect("status body should be JSON");
+    assert_eq!(status_value["command"], "serve-status");
+    assert_eq!(status_value["status"], "ok");
+
+    let (root_headers, root_body) = http_get(&url);
+    assert!(root_headers.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(root_headers.contains("content-type: application/json"));
+    let root_value: serde_json::Value =
+        serde_json::from_str(&root_body).expect("root body should be JSON");
+    assert_eq!(root_value["command"], "serve");
+    assert_eq!(root_value["status"], "error");
+
+    stop_child(child);
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn report_and_gate_help_include_expected_flags() {
     let report_output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .args(["report", "--help"])
@@ -1032,6 +1139,94 @@ fn gate_command_missing_compare_snapshot_emits_json_error_on_stderr() {
         .as_str()
         .expect("error message should be a string")
         .contains("snapshot not found: missing"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn gate_command_warns_for_delta_only_config_without_compare() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index", "--no-git"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    write_arch_config(
+        &repo,
+        r#"[[gate]]
+metric = "health_score_delta"
+min_delta = -1.0
+severity = "warning"
+message = "health score should not regress much"
+skip = false
+"#,
+    );
+
+    let output = run_scope(&repo, &["gate"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["command"], "gate");
+    assert_eq!(value["status"], "ok");
+    assert!(value["data"]["result"]["summary"]["warnings"]
+        .as_u64()
+        .expect("warnings summary should be numeric")
+        >= 1);
+    let evaluations = value["data"]["result"]["evaluations"]
+        .as_array()
+        .expect("evaluations should be an array");
+    let evaluation = evaluations
+        .iter()
+        .find(|evaluation| evaluation["metric"] == "health_score_delta")
+        .expect("health_score_delta evaluation should be present");
+    assert_eq!(evaluation["status"], "warning");
+    assert_eq!(evaluation["severity"], "warning");
+    assert!(evaluation["detail"]
+        .as_str()
+        .expect("detail should be a string")
+        .contains("comparison snapshot required for min_delta"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn gate_command_respects_skipped_custom_gate_config() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index", "--no-git"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    write_arch_config(
+        &repo,
+        r#"[[gate]]
+metric = "cycles"
+severity = "warning"
+message = "cycles temporarily ignored"
+skip = true
+"#,
+    );
+
+    let output = run_scope(&repo, &["gate"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["command"], "gate");
+    assert_eq!(value["status"], "ok");
+    assert!(value["data"]["result"]["summary"]["skipped"]
+        .as_u64()
+        .expect("skipped summary should be numeric")
+        >= 1);
+    let evaluations = value["data"]["result"]["evaluations"]
+        .as_array()
+        .expect("evaluations should be an array");
+    let evaluation = evaluations
+        .iter()
+        .find(|evaluation| evaluation["metric"] == "cycles")
+        .expect("cycles evaluation should be present");
+    assert_eq!(evaluation["status"], "skipped");
+    assert_eq!(evaluation["severity"], "warning");
+    assert_eq!(evaluation["detail"], "gate explicitly skipped by configuration");
 
     fs::remove_dir_all(repo).unwrap();
 }
