@@ -1167,6 +1167,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn report_endpoint_missing_compare_snapshot_returns_json_error() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/report?compare=missing").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "report");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "not_found");
+        assert_eq!(value["data"]["message"], "snapshot not found: missing");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn gate_endpoint_missing_compare_snapshot_returns_json_error() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/gate?compare=missing").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "gate");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "not_found");
+        assert_eq!(value["data"]["message"], "snapshot not found: missing");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
     async fn query_endpoint_returns_expected_envelope() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);
