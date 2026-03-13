@@ -2995,6 +2995,46 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_report_and_gate_missing_compare_snapshot_return_not_found_errors() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let report_output = dispatch_tool(
+            "report",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "compare": "missing"
+            }),
+        )
+        .unwrap();
+        let report_value: Value = serde_json::from_str(&report_output).unwrap();
+        assert_eq!(report_value["command"], "report");
+        assert_eq!(report_value["status"], "error");
+        assert_eq!(report_value["data"]["kind"], "not_found");
+        assert_eq!(report_value["data"]["message"], "snapshot not found: missing");
+
+        let gate_output = dispatch_tool(
+            "gate",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "compare": "missing"
+            }),
+        )
+        .unwrap();
+        let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
+        assert_eq!(gate_value["command"], "gate");
+        assert_eq!(gate_value["status"], "error");
+        assert_eq!(gate_value["data"]["kind"], "not_found");
+        assert_eq!(gate_value["data"]["message"], "snapshot not found: missing");
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
     fn dispatch_cochange_returns_scope_json_envelope() {
         let repo = prepare_fixture_copy("rust_small");
         let _ = dispatch_tool(
