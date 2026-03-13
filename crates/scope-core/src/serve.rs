@@ -1418,6 +1418,215 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn symbols_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/symbols?file=src/lib.rs").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "symbols");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "src/lib.rs");
+        assert!(value["data"]["symbols"].as_array().is_some_and(|items| !items.is_empty()));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn calls_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/calls?symbol=lib::run").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "calls");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["symbol"], "lib::run");
+        assert!(value["data"]["traversals"].is_array());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn callers_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/callers?symbol=parser::parse").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "callers");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["symbol"], "parser::parse");
+        assert!(value["data"]["traversals"].as_array().is_some_and(|items| !items.is_empty()));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn impact_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/impact?target=parser::parse&change_type=body").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "impact");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "parser::parse");
+        assert_eq!(value["data"]["change_type"], "body");
+        assert!(value["data"]["summary"]["total"].as_u64().is_some());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn why_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/why?from=src/lib.rs&to=src/parser.rs").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "why");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["from"], "src/lib.rs");
+        assert_eq!(value["data"]["to"], "src/parser.rs");
+        assert!(value["data"]["path"].is_array());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn context_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/context?target=parser::parse&change_type=body&budget=400").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "context");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["change_type"], "body");
+        assert_eq!(value["data"]["result"]["budget"], 400);
+        assert!(value["data"]["result"]["summary"]["targets_count"].as_u64().is_some());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn risk_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/risk?top=3").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "risk");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["top"], 3);
+        assert!(value["data"]["result"]["summary"]["scored_files"].as_u64().is_some());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stability_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/stability").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "stability");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["result"]["summary"]["flagged_count"].as_u64().is_some());
+        assert!(value["data"]["result"]["files"].is_array());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn surface_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/surface?target=src/lib.rs").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "surface");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "src/lib.rs");
+        assert!(value["data"]["surface"]["symbols"].is_array());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn entry_list_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("capability_audit");
+        let app = build_router(state, false);
+        let response = call(app, "/api/entry/list").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "entry-list");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["result"]["summary"]["entry_points"].as_u64().is_some());
+        assert!(value["data"]["result"]["entry_points"].is_array());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn entry_unreachable_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("capability_audit");
+        let app = build_router(state, false);
+        let response = call(app, "/api/entry/unreachable").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "entry-unreachable");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["result"]["unreachable_files"].as_u64().is_some());
+        assert!(value["data"]["result"]["unreachable"].is_array());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_list_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let store = open_store(&state).unwrap();
+        store.save_snapshot("baseline", None).unwrap();
+        let app = build_router(state, false);
+        let response = call(app, "/api/snapshot/list").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "snapshot-list");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["summary"]["snapshot_count"], 1);
+        assert_eq!(value["data"]["result"]["snapshots"][0]["name"], "baseline");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
     async fn html_fallback_is_served_when_ui_enabled() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);

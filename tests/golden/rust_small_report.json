@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "command": "report",
+  "status": "ok",
+  "data": {
+    "result": {
+      "generated_at": 1773410813,
+      "compare": null,
+      "metrics": {
+        "total_files": 5,
+        "total_symbols": 10,
+        "total_imports": 1,
+        "unresolved_imports": 0,
+        "imports_unresolved_pct": 0.0,
+        "imports_resolved_pct": 100.0,
+        "parse_errors": 0,
+        "layer_violations": 0,
+        "cycles": 0,
+        "max_file_fan_in": 1,
+        "avg_instability": 0.2,
+        "unreachable_files": 3,
+        "unused_exports": 6,
+        "public_surface_removed": 0,
+        "health_score": 88.0
+      },
+      "risk_hotspots": [
+        {
+          "path": "src/parser.rs",
+          "direct_dependents": 1,
+          "transitive_dependents": 1,
+          "churn_commits": 0,
+          "score": 1.0,
+          "normalized_score": 100,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (1 direct dependents, 1 transitive dependents)"
+        },
+        {
+          "path": "src/lib.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (0 direct dependents, 0 transitive dependents)"
+        },
+        {
+          "path": "src/main.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (0 direct dependents, 0 transitive dependents)"
+        },
+        {
+          "path": "src/resolver.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (0 direct dependents, 0 transitive dependents)"
+        },
+        {
+          "path": "src/utils.rs",
+          "direct_dependents": 0,
+          "transitive_dependents": 0,
+          "churn_commits": 0,
+          "score": 0.0,
+          "normalized_score": 0,
+          "reason": "git churn unavailable; score falls back to dependency-only blast radius (0 direct dependents, 0 transitive dependents)"
+        }
+      ],
+      "arch_violations": [],
+      "cycles_detail": [],
+      "unreachable_detail": [
+        {
+          "file": "src/lib.rs",
+          "last_modified_days_ago": 3,
+          "exported_symbols": 5,
+          "certainty": "exact",
+          "certainty_note": "Higher confidence — static imports are exhaustively detected."
+        },
+        {
+          "file": "src/main.rs",
+          "last_modified_days_ago": 3,
+          "exported_symbols": 0,
+          "certainty": "exact",
+          "certainty_note": "Higher confidence — static imports are exhaustively detected."
+        },
+        {
+          "file": "src/utils.rs",
+          "last_modified_days_ago": 3,
+          "exported_symbols": 1,
+          "certainty": "exact",
+          "certainty_note": "Higher confidence — static imports are exhaustively detected."
+        }
+      ],
+      "unused_export_detail": [
+        {
+          "file": "src/lib.rs",
+          "name": "parser",
+          "qualname": "lib::parser",
+          "kind": "module",
+          "visibility": "public",
+          "line": 1,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::parser` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/lib.rs",
+          "name": "resolver",
+          "qualname": "lib::resolver",
+          "kind": "module",
+          "visibility": "public",
+          "line": 2,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::resolver` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/lib.rs",
+          "name": "utils",
+          "qualname": "lib::utils",
+          "kind": "module",
+          "visibility": "public",
+          "line": 3,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::utils` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/lib.rs",
+          "name": "greet",
+          "qualname": "lib::greet",
+          "kind": "function",
+          "visibility": "public",
+          "line": 5,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::greet` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/lib.rs",
+          "name": "farewell",
+          "qualname": "lib::farewell",
+          "kind": "function",
+          "visibility": "public",
+          "line": 10,
+          "inbound_references": 0,
+          "reason": "exported symbol `lib::farewell` has no indexed inbound call edges"
+        },
+        {
+          "file": "src/resolver.rs",
+          "name": "resolve",
+          "qualname": "resolver::resolve",
+          "kind": "function",
+          "visibility": "public",
+          "line": 3,
+          "inbound_references": 0,
+          "reason": "exported symbol `resolver::resolve` has no indexed inbound call edges"
+        }
+      ],
+      "recommendations": [
+        "review 3 unreachable files for dead code or missing entry-point declarations"
+      ]
+    }
+  },
+  "warnings": []
+}

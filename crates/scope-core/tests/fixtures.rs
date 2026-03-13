@@ -103,6 +103,31 @@ fn read_golden(name: &str) -> String {
         .to_string()
 }
 
+fn read_golden_json(name: &str) -> serde_json::Value {
+    serde_json::from_str(&read_golden(name)).unwrap()
+}
+
+fn normalize_report_like_json(value: &mut serde_json::Value) {
+    if let Some(generated_at) = value.pointer_mut("/data/result/generated_at") {
+        *generated_at = serde_json::Value::from(0);
+    }
+    if let Some(generated_at) = value.pointer_mut("/data/result/report/generated_at") {
+        *generated_at = serde_json::Value::from(0);
+    }
+    for pointer in [
+        "/data/result/unreachable_detail",
+        "/data/result/report/unreachable_detail",
+    ] {
+        if let Some(items) = value.pointer_mut(pointer).and_then(|node| node.as_array_mut()) {
+            for item in items {
+                if let Some(days) = item.get_mut("last_modified_days_ago") {
+                    *days = serde_json::Value::from(0);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn cochange_fixture_contains_history_script() {
     let root = fixture_root("cochange");
@@ -1253,7 +1278,24 @@ fn generated_cochange_fixture_persists_expected_file_churn() {
 }
 
 #[test]
-fn report_query_supports_snapshot_comparison_and_removed_public_surface() {
+fn report_query_matches_golden_json_for_rust_small_fixture() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let config = load_arch_config(&repo).unwrap();
+
+    let report = store.query_report(&config, None).unwrap();
+    let mut actual = serde_json::to_value(stub::report(report)).unwrap();
+    let mut expected = read_golden_json("rust_small_report.json");
+    normalize_report_like_json(&mut actual);
+    normalize_report_like_json(&mut expected);
+
+    assert_eq!(actual, expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn report_query_matches_golden_json_for_snapshot_comparison() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
     store.save_snapshot("baseline", Some("HEAD".to_string())).unwrap();
@@ -1267,6 +1309,12 @@ fn report_query_supports_snapshot_comparison_and_removed_public_surface() {
 
     let config = load_arch_config(&repo).unwrap();
     let report = store.query_report(&config, Some("baseline")).unwrap();
+    let mut actual = serde_json::to_value(stub::report(report.clone())).unwrap();
+    let mut expected = read_golden_json("rust_small_report_compare_baseline.json");
+    normalize_report_like_json(&mut actual);
+    normalize_report_like_json(&mut expected);
+
+    assert_eq!(actual, expected);
     assert_eq!(report.metrics.total_files, 5);
     assert!(report.compare.is_some());
     assert_eq!(report.compare.as_ref().unwrap().target, "baseline");
@@ -1276,6 +1324,23 @@ fn report_query_supports_snapshot_comparison_and_removed_public_surface() {
     let envelope = stub::report(report.clone());
     assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
     assert_eq!(envelope.data.result, report);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn gate_query_matches_golden_json_for_strict_arch_fixture() {
+    let repo = prepare_fixture_copy("arch_violations");
+    let store = index_fixture(&repo);
+    let config = load_arch_config(&repo).unwrap();
+
+    let gate = store.query_gate(&config, None, true).unwrap();
+    let mut actual = serde_json::to_value(stub::gate(gate)).unwrap();
+    let mut expected = read_golden_json("arch_violations_gate_strict.json");
+    normalize_report_like_json(&mut actual);
+    normalize_report_like_json(&mut expected);
+
+    assert_eq!(actual, expected);
 
     fs::remove_dir_all(repo).unwrap();
 }

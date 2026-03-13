@@ -580,6 +580,62 @@ fn query_expr_returns_json_envelope_for_fixture_repo() {
 }
 
 #[test]
+fn calls_and_callers_commands_return_live_json_for_direct_mode() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let calls_output = run_scope(&repo, &["calls", "lib::run"]);
+    assert_eq!(calls_output.status.code(), Some(0));
+    let calls_value: serde_json::Value =
+        serde_json::from_slice(&calls_output.stdout).expect("stdout should be JSON");
+    assert_eq!(calls_value["command"], "calls");
+    assert_eq!(calls_value["status"], "ok");
+    assert_eq!(calls_value["data"]["symbol"], "lib::run");
+    assert!(calls_value["data"]["traversals"].is_array());
+
+    let callers_output = run_scope(&repo, &["callers", "parser::parse"]);
+    assert_eq!(callers_output.status.code(), Some(0));
+    let callers_value: serde_json::Value =
+        serde_json::from_slice(&callers_output.stdout).expect("stdout should be JSON");
+    assert_eq!(callers_value["command"], "callers");
+    assert_eq!(callers_value["status"], "ok");
+    assert_eq!(callers_value["data"]["symbol"], "parser::parse");
+    assert!(callers_value["data"]["traversals"].is_array());
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn calls_and_callers_commands_report_stub_status_for_transitive_mode() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let calls_output = run_scope(&repo, &["calls", "lib::run", "--transitive"]);
+    assert_eq!(calls_output.status.code(), Some(0));
+    let calls_value: serde_json::Value =
+        serde_json::from_slice(&calls_output.stdout).expect("stdout should be JSON");
+    assert_eq!(calls_value["command"], "calls");
+    assert_eq!(calls_value["status"], "stub");
+    assert_eq!(calls_value["data"]["symbol"], "lib::run");
+    assert_eq!(calls_value["data"]["transitive"], true);
+    assert!(calls_value["warnings"].as_array().is_some_and(|items| !items.is_empty()));
+
+    let callers_output = run_scope(&repo, &["callers", "parser::parse", "--transitive"]);
+    assert_eq!(callers_output.status.code(), Some(0));
+    let callers_value: serde_json::Value =
+        serde_json::from_slice(&callers_output.stdout).expect("stdout should be JSON");
+    assert_eq!(callers_value["command"], "callers");
+    assert_eq!(callers_value["status"], "stub");
+    assert_eq!(callers_value["data"]["symbol"], "parser::parse");
+    assert_eq!(callers_value["data"]["transitive"], true);
+    assert!(callers_value["warnings"].as_array().is_some_and(|items| !items.is_empty()));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn query_expr_invalid_step_emits_json_error_on_stderr() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .args(["query", "--expr", "file \"src/lib.rs\" | .impact"])

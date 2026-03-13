@@ -2470,6 +2470,38 @@ mod tests {
     }
 
     #[test]
+    fn tool_registry_exposes_expected_report_gate_and_query_schemas() {
+        let tools = tool_registry();
+        let by_name: HashMap<&str, &Value> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(|name| (name, tool)))
+            .collect();
+
+        let report = by_name.get("report").expect("report tool should exist");
+        assert_eq!(report["inputSchema"]["type"], "object");
+        assert_eq!(report["inputSchema"]["properties"]["repo_root"]["type"], "string");
+        assert_eq!(report["inputSchema"]["properties"]["db_path"]["type"], "string");
+        assert_eq!(report["inputSchema"]["properties"]["compare"]["type"], "string");
+        assert_eq!(report["inputSchema"]["additionalProperties"], false);
+
+        let gate = by_name.get("gate").expect("gate tool should exist");
+        assert_eq!(gate["inputSchema"]["type"], "object");
+        assert_eq!(gate["inputSchema"]["properties"]["repo_root"]["type"], "string");
+        assert_eq!(gate["inputSchema"]["properties"]["db_path"]["type"], "string");
+        assert_eq!(gate["inputSchema"]["properties"]["compare"]["type"], "string");
+        assert_eq!(gate["inputSchema"]["properties"]["strict"]["type"], "boolean");
+        assert_eq!(gate["inputSchema"]["additionalProperties"], false);
+
+        let query = by_name.get("query").expect("query tool should exist");
+        assert_eq!(query["inputSchema"]["type"], "object");
+        assert_eq!(query["inputSchema"]["properties"]["repo_root"]["type"], "string");
+        assert_eq!(query["inputSchema"]["properties"]["db_path"]["type"], "string");
+        assert_eq!(query["inputSchema"]["properties"]["expr"]["type"], "string");
+        assert_eq!(query["inputSchema"]["required"], json!(["expr"]));
+        assert_eq!(query["inputSchema"]["additionalProperties"], false);
+    }
+
+    #[test]
     fn dispatch_deps_returns_scope_json_envelope() {
         let repo = prepare_fixture_copy("rust_small");
         let index_output = dispatch_tool(
@@ -2494,6 +2526,63 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["target"], "src/lib.rs");
         fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn handle_message_wraps_query_tool_call_in_jsonrpc_result() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "query",
+                "arguments": {
+                    "repo_root": repo.display().to_string(),
+                    "expr": "file \"src/lib.rs\" | .deps | count"
+                }
+            }
+        });
+        let response = handle_message(&request).expect("tools/call should return a response");
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 7);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("content text should be a string");
+        let payload: Value = serde_json::from_str(text).expect("wrapped content should be JSON");
+        assert_eq!(payload["command"], "query");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["data"]["input"], "file \"src/lib.rs\" | .deps | count");
+        assert_eq!(payload["data"]["result"]["number"], 3);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn handle_message_returns_jsonrpc_error_for_unknown_tool_calls() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "does_not_exist",
+                "arguments": {}
+            }
+        });
+        let response = handle_message(&request).expect("unknown tools should return an error response");
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 9);
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("unknown tool"));
     }
 
     #[test]
