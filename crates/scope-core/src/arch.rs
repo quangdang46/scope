@@ -231,10 +231,7 @@ pub fn validate_gate_config(config: &[GateConfig]) -> ScopeResult<()> {
         }
 
         match gate.metric {
-            GateMetric::HealthScore
-            | GateMetric::HealthScoreDelta
-            | GateMetric::ImportsUnresolvedPct
-            | GateMetric::ImportsResolvedPct => {
+            GateMetric::HealthScore | GateMetric::ImportsUnresolvedPct | GateMetric::ImportsResolvedPct => {
                 for (label, value) in [("min", gate.min), ("max", gate.max)] {
                     if let Some(value) = value {
                         if !(0.0..=100.0).contains(&value) {
@@ -244,6 +241,14 @@ pub fn validate_gate_config(config: &[GateConfig]) -> ScopeResult<()> {
                             )));
                         }
                     }
+                }
+            }
+            GateMetric::HealthScoreDelta => {
+                if gate.min.is_some() || gate.max.is_some() {
+                    return Err(ScopeError::InvalidInput(
+                        "gate 'HealthScoreDelta' must use min_delta/max_delta rather than min/max"
+                            .to_string(),
+                    ));
                 }
             }
             _ => {
@@ -387,5 +392,53 @@ mod tests {
         assert!(error
             .to_string()
             .contains("invalid capability expected_callers pattern"));
+    }
+
+    #[test]
+    fn rejects_health_score_delta_min_and_max_thresholds() {
+        let error = validate_gate_config(&[GateConfig {
+            metric: GateMetric::HealthScoreDelta,
+            min: Some(90.0),
+            max: None,
+            min_delta: None,
+            max_delta: None,
+            severity: crate::GateSeverity::Error,
+            message: None,
+            skip: false,
+        }])
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("must use min_delta/max_delta rather than min/max"));
+    }
+
+    #[test]
+    fn allows_negative_health_score_delta_thresholds() {
+        validate_gate_config(&[GateConfig {
+            metric: GateMetric::HealthScoreDelta,
+            min: None,
+            max: None,
+            min_delta: Some(-5.0),
+            max_delta: Some(0.0),
+            severity: crate::GateSeverity::Warning,
+            message: None,
+            skip: false,
+        }])
+        .unwrap();
+    }
+
+    #[test]
+    fn skip_gates_may_omit_thresholds() {
+        validate_gate_config(&[GateConfig {
+            metric: GateMetric::Cycles,
+            min: None,
+            max: None,
+            min_delta: None,
+            max_delta: None,
+            severity: crate::GateSeverity::Warning,
+            message: None,
+            skip: true,
+        }])
+        .unwrap();
     }
 }

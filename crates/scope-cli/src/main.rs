@@ -482,19 +482,25 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 repo_root_override: cli.repo_root.clone(),
                 db_override: cli.db.clone(),
             };
-            let _context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(&scope_core::stub::scaffolded_report(args.compare), compact)
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let config = load_arch_config(&context.paths.repo_root)?;
+            let result = context.store.query_report(&config, args.compare.as_deref())?;
+            serialize_output(&scope_core::stub::report(result), compact)
         }
         Commands::Gate(args) => {
             let bootstrap_options = BootstrapOptions {
                 repo_root_override: cli.repo_root.clone(),
                 db_override: cli.db.clone(),
             };
-            let _context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            if args.strict {
+            let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let config = load_arch_config(&context.paths.repo_root)?;
+            let result = context
+                .store
+                .query_gate(&config, args.compare.as_deref(), args.strict)?;
+            if result.summary.failed > 0 {
                 exit_code = 1;
             }
-            serialize_output(&scope_core::stub::scaffolded_gate(args.compare, args.strict), compact)
+            serialize_output(&scope_core::stub::gate(result), compact)
         }
         Commands::Unused => {
             let bootstrap_options = BootstrapOptions {

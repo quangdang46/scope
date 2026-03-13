@@ -64,9 +64,9 @@ pub enum Commands {
     DiffSnapshot(DiffSnapshotArgs),
     /// Simulate extraction of symbols into a new file without changing the index
     Simulate(SimulateArgs),
-    /// Return the scaffolded health report envelope planned for Milestone 14
+    /// Report repository health metrics and architectural findings
     Report(ReportArgs),
-    /// Return the scaffolded CI gate envelope planned for Milestone 14
+    /// Evaluate configured CI-style quality gates against repository health
     Gate(GateArgs),
     /// Report exported symbols with no indexed inbound references
     Unused,

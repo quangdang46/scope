@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
 use crate::{
-    load_arch_config,
+    execute_query, load_arch_config,
     model::{
         CochangeSort, CycleSeverity, ImpactChangeType, RiskSort, StabilitySort, SymbolKind,
     },
-    stub, DatabaseInfo, IndexHealthStats, RepoPath, RuntimePaths, ScopeError, ScopeResult, Store,
+    stub, DatabaseInfo, IndexHealthStats, QuerySession, RepoPath, RuntimePaths, ScopeError,
+    ScopeResult, Store,
 };
 
 #[derive(Debug, Clone)]
@@ -73,6 +74,11 @@ const WEB_UI_HTML: &str = r#"<!doctype html>
       <a href="/api/entry/list">/api/entry/list</a>
     </div>
     <div class="card">
+      <strong>Entry cone</strong>
+      <p>Show files reachable from a detected entry point.</p>
+      <a href="/api/entry/cone?target=src/workers/job.ts">/api/entry/cone?target=src/workers/job.ts</a>
+    </div>
+    <div class="card">
       <strong>Snapshots</strong>
       <p>List saved snapshots.</p>
       <a href="/api/snapshot/list">/api/snapshot/list</a>
@@ -93,6 +99,26 @@ const WEB_UI_HTML: &str = r#"<!doctype html>
       <a href="/api/tree?target=src/lib.rs">/api/tree?target=src/lib.rs</a>
     </div>
     <div class="card">
+      <strong>Report</strong>
+      <p>Summarize repository health metrics and findings.</p>
+      <a href="/api/report">/api/report</a>
+    </div>
+    <div class="card">
+      <strong>Gate</strong>
+      <p>Evaluate configured quality gates against current health.</p>
+      <a href="/api/gate?strict=true">/api/gate?strict=true</a>
+    </div>
+    <div class="card">
+      <strong>Query</strong>
+      <p>Run composable graph queries over indexed files and symbols.</p>
+      <a href="/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count">/api/query?expr=file "src/lib.rs" | .deps | count</a>
+    </div>
+    <div class="card">
+      <strong>Unused</strong>
+      <p>List exported symbols with no indexed inbound references.</p>
+      <a href="/api/unused">/api/unused</a>
+    </div>
+    <div class="card">
       <strong>Simulate extract</strong>
       <p>Preview graph changes from extracting symbols into a new file.</p>
       <a href="/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs">/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs</a>
@@ -101,7 +127,12 @@ const WEB_UI_HTML: &str = r#"<!doctype html>
 
   <div class="actions">
     <button data-endpoint="/api/status">Load status</button>
+    <button data-endpoint="/api/report">Load report</button>
+    <button data-endpoint="/api/gate?strict=true">Load gate</button>
+    <button data-endpoint="/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count">Load query</button>
+    <button data-endpoint="/api/unused">Load unused</button>
     <button data-endpoint="/api/entry/list">Load entry list</button>
+    <button data-endpoint="/api/entry/cone?target=src/workers/job.ts">Load entry cone</button>
     <button data-endpoint="/api/audit?capability=network">Load audit</button>
     <button data-endpoint="/api/surface?target=src/auth/jwt.ts">Load surface</button>
     <button data-endpoint="/api/surface/diff?before=src/auth/jwt.ts&after=src/auth/aliases.ts">Load surface diff</button>
@@ -142,8 +173,13 @@ pub fn build_router(state: Arc<ServeState>, no_ui: bool) -> Router {
         .route("/api/calls", get(api_calls))
         .route("/api/callers", get(api_callers))
         .route("/api/impact", get(api_impact))
+        .route("/api/explain", get(api_explain))
         .route("/api/why", get(api_why))
         .route("/api/context", get(api_context))
+        .route("/api/report", get(api_report))
+        .route("/api/gate", get(api_gate))
+        .route("/api/query", get(api_query))
+        .route("/api/unused", get(api_unused))
         .route("/api/risk", get(api_risk))
         .route("/api/stability", get(api_stability))
         .route("/api/cochange", get(api_cochange))
@@ -154,6 +190,7 @@ pub fn build_router(state: Arc<ServeState>, no_ui: bool) -> Router {
         .route("/api/tree", get(api_tree))
         .route("/api/simulate/extract", get(api_simulate_extract))
         .route("/api/entry/list", get(api_entry_list))
+        .route("/api/entry/cone", get(api_entry_cone))
         .route("/api/entry/reaches", get(api_entry_reaches))
         .route("/api/entry/unreachable", get(api_entry_unreachable))
         .route("/api/snapshot/list", get(api_snapshot_list))
@@ -280,6 +317,13 @@ struct ImpactParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ExplainParams {
+    target: String,
+    to: Option<String>,
+    depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct WhyParams {
     from: String,
     to: String,
@@ -291,6 +335,23 @@ struct ContextParams {
     target: String,
     change_type: ImpactChangeType,
     budget: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReportParams {
+    compare: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GateParams {
+    compare: Option<String>,
+    #[serde(default)]
+    strict: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueryParams {
+    expr: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +425,11 @@ struct SimulateExtractParams {
     symbols: String,
     #[serde(rename = "into")]
     into_file: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EntryTargetParams {
+    target: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -482,6 +548,20 @@ async fn api_impact(
     }
 }
 
+async fn api_explain(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<ExplainParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let traversals = store.query_explain(&params.target, params.to.as_deref(), params.depth)?;
+        Ok(stub::explain(params.target, params.to, params.depth, traversals))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("explain", error),
+    }
+}
+
 async fn api_why(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<WhyParams>,
@@ -508,6 +588,62 @@ async fn api_context(
     })() {
         Ok(envelope) => json_success(envelope),
         Err(error) => query_error("context", error),
+    }
+}
+
+async fn api_report(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<ReportParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let config = load_arch_config(&state.paths.repo_root)?;
+        let result = store.query_report(&config, params.compare.as_deref())?;
+        Ok(stub::report(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("report", error),
+    }
+}
+
+async fn api_gate(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<GateParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let config = load_arch_config(&state.paths.repo_root)?;
+        let result = store.query_gate(&config, params.compare.as_deref(), params.strict)?;
+        Ok(stub::gate(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("gate", error),
+    }
+}
+
+async fn api_query(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<QueryParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let mut session = QuerySession::default();
+        let result = execute_query(&params.expr, &store, &mut session)?;
+        Ok(stub::query(params.expr, result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("query", error),
+    }
+}
+
+async fn api_unused(State(state): State<Arc<ServeState>>) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let result = store.query_unused()?;
+        Ok(stub::unused(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("unused", error),
     }
 }
 
@@ -682,6 +818,21 @@ async fn api_entry_list(State(state): State<Arc<ServeState>>) -> Response {
     })() {
         Ok(envelope) => json_success(envelope),
         Err(error) => query_error("entry-list", error),
+    }
+}
+
+async fn api_entry_cone(
+    State(state): State<Arc<ServeState>>,
+    Query(params): Query<EntryTargetParams>,
+) -> Response {
+    match (|| {
+        let store = open_store(&state)?;
+        let config = load_arch_config(&state.paths.repo_root)?;
+        let result = store.query_entry_cone(&config, &RepoPath::from(params.target))?;
+        Ok(stub::entry_cone(result))
+    })() {
+        Ok(envelope) => json_success(envelope),
+        Err(error) => query_error("entry-cone", error),
     }
 }
 
@@ -984,6 +1135,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn report_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/report").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "report");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["result"]["metrics"]["total_files"].as_u64().is_some());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn gate_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/gate?strict=true").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "gate");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["result"]["summary"]["total"].as_u64().is_some());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "query");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["input"], "file \"src/lib.rs\" | .deps | count");
+        assert!(value["data"]["result"].is_object());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unused_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/unused").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "unused");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["result"]["summary"]["exported_symbols"].as_u64().is_some());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn explain_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/explain?target=parser::parse").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "explain");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "parser::parse");
+        assert!(value["data"]["traversals"].as_array().is_some_and(|items| !items.is_empty()));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
     async fn tree_endpoint_returns_expected_envelope() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);
@@ -996,6 +1229,23 @@ mod tests {
         assert_eq!(value["command"], "tree");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["target"], "src/lib.rs");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn entry_cone_endpoint_returns_expected_envelope() {
+        let (state, repo) = build_test_state("capability_audit");
+        let app = build_router(state, false);
+        let response = call(app, "/api/entry/cone?target=src/workers/job.ts").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "entry-cone");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["result"]["entry"], "src/workers/job.ts");
+        assert_eq!(value["data"]["result"]["summary"]["reachable_files"], 3);
         fs::remove_dir_all(repo).unwrap();
     }
 

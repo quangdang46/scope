@@ -1,7 +1,8 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -62,6 +63,26 @@ fn run_scope(repo: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .expect("scope binary should run")
+}
+
+fn run_scope_with_stdin(repo: &Path, args: &[&str], stdin_input: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .current_dir(repo)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scope binary should run");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(stdin_input.as_bytes())
+        .expect("stdin should accept test input");
+
+    child.wait_with_output().expect("scope binary should exit")
 }
 
 #[test]
@@ -577,6 +598,143 @@ fn query_expr_invalid_step_emits_json_error_on_stderr() {
 }
 
 #[test]
+fn query_expr_supports_quoted_pipes_escapes_and_let_bindings() {
+    let repo = prepare_fixture_copy("rust_small");
+    let weird_file = repo.join("src/a|b.rs");
+    fs::write(&weird_file, "pub fn odd_name() {}\n").unwrap();
+    let quoted_escape_file = repo.join("src/a\"|b.rs");
+    fs::write(&quoted_escape_file, "pub fn escaped_quote_name() {}\n").unwrap();
+    let backslash_file = repo.join("src/path\\file.rs");
+    fs::write(&backslash_file, "pub fn backslash_name() {}\n").unwrap();
+
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let quoted_output = run_scope(&repo, &["query", "--expr", "file \"src/a|b.rs\" | .symbols | count"]);
+    assert_eq!(quoted_output.status.code(), Some(0));
+    let quoted_value: serde_json::Value =
+        serde_json::from_slice(&quoted_output.stdout).expect("stdout should be JSON");
+    assert_eq!(quoted_value["command"], "query");
+    assert_eq!(quoted_value["status"], "ok");
+    assert_eq!(quoted_value["data"]["input"], "file \"src/a|b.rs\" | .symbols | count");
+    assert_eq!(quoted_value["data"]["result"]["number"], 1);
+
+    let escaped_quote_output = run_scope(
+        &repo,
+        &[
+            "query",
+            "--expr",
+            "file \"src/a\\\"|b.rs\" | .symbols | count",
+        ],
+    );
+    assert_eq!(escaped_quote_output.status.code(), Some(0));
+    let escaped_quote_value: serde_json::Value =
+        serde_json::from_slice(&escaped_quote_output.stdout).expect("stdout should be JSON");
+    assert_eq!(escaped_quote_value["command"], "query");
+    assert_eq!(escaped_quote_value["status"], "ok");
+    assert_eq!(escaped_quote_value["data"]["result"]["number"], 1);
+
+    let backslash_output = run_scope(
+        &repo,
+        &[
+            "query",
+            "--expr",
+            "file \"src/path\\\\file.rs\" | .symbols | count",
+        ],
+    );
+    assert_eq!(backslash_output.status.code(), Some(0));
+    let backslash_value: serde_json::Value =
+        serde_json::from_slice(&backslash_output.stdout).expect("stdout should be JSON");
+    assert_eq!(backslash_value["command"], "query");
+    assert_eq!(backslash_value["status"], "ok");
+    assert_eq!(backslash_value["data"]["result"]["number"], 1);
+
+    let let_output = run_scope(
+        &repo,
+        &["query", "--expr", "let roots = file \"src/lib.rs\" | .deps | unique"],
+    );
+    assert_eq!(let_output.status.code(), Some(0));
+    let let_value: serde_json::Value =
+        serde_json::from_slice(&let_output.stdout).expect("stdout should be JSON");
+    assert_eq!(let_value["command"], "query");
+    assert_eq!(let_value["status"], "ok");
+    assert_eq!(let_value["data"]["input"], "let roots = file \"src/lib.rs\" | .deps | unique");
+    let files = let_value["data"]["result"]["files"]
+        .as_array()
+        .expect("files result should be an array");
+    assert_eq!(files.len(), 3);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_expr_unterminated_quote_emits_json_error_on_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["query", "--expr", "file \"src/lib.rs | .deps"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("unterminated quoted string"));
+}
+
+#[test]
+fn query_repl_supports_help_bindings_and_exit() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope_with_stdin(
+        &repo,
+        &["query"],
+        ":help\nlet roots = file \"src/lib.rs\" | .deps | unique\n:vars\n:exit\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scope query REPL"));
+    assert!(stdout.contains("Type :help for commands, :exit to quit."));
+    assert!(stdout.contains("Sources: file \"...\", symbol \"...\", all-files, all-symbols, $name"));
+    assert!(stdout.contains("Steps: .deps, .reverse, .symbols, .callers, .callees, unique, count"));
+    assert!(stdout.contains("Bindings: let name = <expr>"));
+    assert!(stdout.contains("\"command\": \"query\""));
+    assert!(stdout.contains("roots"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_repl_prints_json_errors_and_honors_quit_alias() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope_with_stdin(&repo, &["query"], "file \"src/lib.rs\" | .impact\n:quit\n");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scope query REPL"));
+    assert!(stdout.contains("\"command\": \"cli\""));
+    assert!(stdout.contains("\"status\": \"error\""));
+    assert!(stdout.contains("unsupported query step `.impact`"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn serve_help_includes_core_flags() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .args(["serve", "--help"])
@@ -611,27 +769,32 @@ fn report_and_gate_help_include_expected_flags() {
 }
 
 #[test]
-fn report_and_gate_commands_return_stub_json_envelopes() {
+fn report_and_gate_commands_return_live_json_envelopes() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);
     assert_eq!(index_output.status.code(), Some(0));
+
+    let snapshot_output = run_scope(&repo, &["snapshot", "save", "--name", "baseline"]);
+    assert_eq!(snapshot_output.status.code(), Some(0));
 
     let report_output = run_scope(&repo, &["report", "--compare", "baseline"]);
     assert_eq!(report_output.status.code(), Some(0));
     let report_value: serde_json::Value =
         serde_json::from_slice(&report_output.stdout).expect("stdout should be JSON");
     assert_eq!(report_value["command"], "report");
-    assert_eq!(report_value["status"], "stub");
+    assert_eq!(report_value["status"], "ok");
     assert_eq!(report_value["data"]["result"]["compare"]["target"], "baseline");
+    assert!(report_value["data"]["result"]["metrics"]["total_files"].as_u64().unwrap() > 0);
 
     let gate_output = run_scope(&repo, &["gate", "--compare", "baseline", "--strict"]);
     assert_eq!(gate_output.status.code(), Some(1));
     let gate_value: serde_json::Value =
         serde_json::from_slice(&gate_output.stdout).expect("stdout should be JSON");
     assert_eq!(gate_value["command"], "gate");
-    assert_eq!(gate_value["status"], "stub");
+    assert_eq!(gate_value["status"], "ok");
     assert_eq!(gate_value["data"]["result"]["compare"], "baseline");
     assert_eq!(gate_value["data"]["result"]["summary"]["failed"], 1);
+    assert!(gate_value["data"]["result"]["summary"]["passed"].as_u64().unwrap() > 0);
 
     fs::remove_dir_all(repo).unwrap();
 }

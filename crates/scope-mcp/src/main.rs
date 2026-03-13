@@ -7,8 +7,9 @@ use std::{
 };
 
 use scope_core::{
-    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, CochangeSort,
-    DatabaseInfo, RepoPath, RiskSort, ScanConfig, Store, SymbolKind, Verbosity,
+    adapter_for_language, arch_check, execute_query, load_arch_config, scan_repo,
+    BootstrapOptions, CochangeSort, DatabaseInfo, QuerySession, RepoPath, RiskSort, ScanConfig,
+    Store, SymbolKind, Verbosity,
 };
 use serde_json::{json, Value};
 
@@ -400,7 +401,7 @@ fn tool_registry() -> Vec<Value> {
         ),
         tool_definition(
             "report",
-            "Return the scaffolded health report envelope planned for Milestone 14.",
+            "Return repository health metrics and architectural findings.",
             json!({
                 "type": "object",
                 "properties": {
@@ -413,7 +414,7 @@ fn tool_registry() -> Vec<Value> {
         ),
         tool_definition(
             "gate",
-            "Return the scaffolded CI gate envelope planned for Milestone 14.",
+            "Evaluate configured CI-style quality gates against repository health.",
             json!({
                 "type": "object",
                 "properties": {
@@ -422,6 +423,20 @@ fn tool_registry() -> Vec<Value> {
                     "compare": { "type": "string" },
                     "strict": { "type": "boolean" }
                 },
+                "additionalProperties": false
+            }),
+        ),
+        tool_definition(
+            "query",
+            "Run a composable graph query over indexed files and symbols.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "repo_root": { "type": "string" },
+                    "db_path": { "type": "string" },
+                    "expr": { "type": "string" }
+                },
+                "required": ["expr"],
                 "additionalProperties": false
             }),
         ),
@@ -800,6 +815,7 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, DispatchError>
         "cochange" => dispatch_cochange(arguments),
         "report" => dispatch_report(arguments),
         "gate" => dispatch_gate(arguments),
+        "query" => dispatch_query(arguments),
         "simulate_extract" => dispatch_simulate_extract(arguments),
         "surface" => dispatch_surface(arguments),
         "surface_diff" => dispatch_surface_diff(arguments),
@@ -1099,9 +1115,11 @@ fn dispatch_cochange(arguments: &Value) -> String {
 }
 
 fn dispatch_report(arguments: &Value) -> String {
-    match bootstrap_from_arguments(arguments).and_then(|_context| {
+    match bootstrap_from_arguments(arguments).and_then(|context| {
         let compare = optional_string(arguments, "compare");
-        serialize_json(&scope_core::stub::scaffolded_report(compare))
+        let config = load_arch_config(&context.paths.repo_root)?;
+        let result = context.store.query_report(&config, compare.as_deref())?;
+        serialize_json(&scope_core::stub::report(result))
     }) {
         Ok(output) => output,
         Err(error) => render_domain_error("report", &error),
@@ -1109,13 +1127,28 @@ fn dispatch_report(arguments: &Value) -> String {
 }
 
 fn dispatch_gate(arguments: &Value) -> String {
-    match bootstrap_from_arguments(arguments).and_then(|_context| {
+    match bootstrap_from_arguments(arguments).and_then(|context| {
         let compare = optional_string(arguments, "compare");
         let strict = optional_bool(arguments, "strict").unwrap_or(false);
-        serialize_json(&scope_core::stub::scaffolded_gate(compare, strict))
+        let config = load_arch_config(&context.paths.repo_root)?;
+        let result = context.store.query_gate(&config, compare.as_deref(), strict)?;
+        serialize_json(&scope_core::stub::gate(result))
     }) {
         Ok(output) => output,
         Err(error) => render_domain_error("gate", &error),
+    }
+}
+
+fn dispatch_query(arguments: &Value) -> String {
+    match required_string(arguments, "expr").and_then(|expr| {
+        bootstrap_from_arguments(arguments).and_then(|context| {
+            let mut session = QuerySession::default();
+            let result = execute_query(&expr, &context.store, &mut session)?;
+            serialize_json(&scope_core::stub::query(expr, result))
+        })
+    }) {
+        Ok(output) => output,
+        Err(error) => render_domain_error("query", &error),
     }
 }
 
@@ -2393,6 +2426,7 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "cochange"));
         assert!(tools.iter().any(|tool| tool["name"] == "report"));
         assert!(tools.iter().any(|tool| tool["name"] == "gate"));
+        assert!(tools.iter().any(|tool| tool["name"] == "query"));
         assert!(tools.iter().any(|tool| tool["name"] == "surface"));
         assert!(tools.iter().any(|tool| tool["name"] == "surface_diff"));
         assert!(tools.iter().any(|tool| tool["name"] == "test_map_covers"));
@@ -2647,6 +2681,15 @@ mod tests {
         )
         .unwrap();
 
+        let _ = dispatch_tool(
+            "snapshot_save",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "name": "baseline"
+            }),
+        )
+        .unwrap();
+
         let report_output = dispatch_tool(
             "report",
             &json!({
@@ -2657,8 +2700,9 @@ mod tests {
         .unwrap();
         let report_value: Value = serde_json::from_str(&report_output).unwrap();
         assert_eq!(report_value["command"], "report");
-        assert_eq!(report_value["status"], "stub");
+        assert_eq!(report_value["status"], "ok");
         assert_eq!(report_value["data"]["result"]["compare"]["target"], "baseline");
+        assert!(report_value["data"]["result"]["metrics"]["total_files"].as_u64().unwrap() > 0);
 
         let gate_output = dispatch_tool(
             "gate",
@@ -2671,9 +2715,24 @@ mod tests {
         .unwrap();
         let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
         assert_eq!(gate_value["command"], "gate");
-        assert_eq!(gate_value["status"], "stub");
+        assert_eq!(gate_value["status"], "ok");
         assert_eq!(gate_value["data"]["result"]["compare"], "baseline");
         assert_eq!(gate_value["data"]["result"]["summary"]["failed"], 1);
+        assert!(gate_value["data"]["result"]["summary"]["passed"].as_u64().unwrap() > 0);
+
+        let query_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/lib.rs\" | .deps | count"
+            }),
+        )
+        .unwrap();
+        let query_value: Value = serde_json::from_str(&query_output).unwrap();
+        assert_eq!(query_value["command"], "query");
+        assert_eq!(query_value["status"], "ok");
+        assert_eq!(query_value["data"]["input"], "file \"src/lib.rs\" | .deps | count");
+        assert_eq!(query_value["data"]["result"]["number"], 3);
 
         let unused_output = dispatch_tool(
             "unused",

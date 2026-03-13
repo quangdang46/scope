@@ -968,6 +968,71 @@ mod tests {
     }
 
     #[test]
+    fn live_report_and_gate_return_ok_envelopes() {
+        let live_report = HealthReportResult {
+            generated_at: 1,
+            compare: None,
+            metrics: HealthReportMetrics {
+                total_files: 1,
+                total_symbols: 2,
+                total_imports: 3,
+                unresolved_imports: 0,
+                imports_unresolved_pct: 0.0,
+                imports_resolved_pct: 100.0,
+                parse_errors: 0,
+                layer_violations: 0,
+                cycles: 0,
+                max_file_fan_in: 1,
+                avg_instability: 0.0,
+                unreachable_files: 0,
+                unused_exports: 0,
+                public_surface_removed: 0,
+                health_score: 100.0,
+            },
+            risk_hotspots: Vec::new(),
+            arch_violations: Vec::new(),
+            cycles_detail: Vec::new(),
+            unreachable_detail: Vec::new(),
+            unused_export_detail: Vec::new(),
+            recommendations: vec!["healthy".to_string()],
+        };
+        let report_envelope = report(live_report.clone());
+        assert!(matches!(report_envelope.status, crate::json::JsonStatus::Ok));
+        assert_eq!(report_envelope.command, "report");
+        assert_eq!(report_envelope.data.result, live_report);
+
+        let live_gate = GateResult {
+            compare: None,
+            report: live_report.clone(),
+            summary: GateSummary {
+                total: 1,
+                passed: 1,
+                warnings: 0,
+                failed: 0,
+                skipped: 0,
+            },
+            evaluations: vec![GateEvaluation {
+                metric: GateMetric::HealthScore,
+                status: GateStatus::Pass,
+                severity: GateSeverity::Warning,
+                current_value: 100.0,
+                baseline_value: None,
+                delta: None,
+                min: Some(75.0),
+                max: None,
+                min_delta: None,
+                max_delta: None,
+                message: Some("healthy".to_string()),
+                detail: "metric satisfied configured thresholds".to_string(),
+            }],
+        };
+        let gate_envelope = gate(live_gate.clone());
+        assert!(matches!(gate_envelope.status, crate::json::JsonStatus::Ok));
+        assert_eq!(gate_envelope.command, "gate");
+        assert_eq!(gate_envelope.data.result, live_gate);
+    }
+
+    #[test]
     fn impact_rules_cover_all_supported_change_types() {
         let cases = [
             ("body", vec![EdgeKind::Call], false, Some(1), false, true),

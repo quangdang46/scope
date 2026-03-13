@@ -209,7 +209,35 @@ fn parse_quoted(input: &str, keyword: &str) -> ScopeResult<Option<String>> {
             "{keyword} selectors must use a quoted string"
         )));
     }
-    Ok(Some(rest[1..rest.len() - 1].to_string()))
+    decode_quoted_selector(&rest[1..rest.len() - 1]).map(Some)
+}
+
+fn decode_quoted_selector(raw: &str) -> ScopeResult<String> {
+    let mut decoded = String::new();
+    let mut chars = raw.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('"') => decoded.push('"'),
+            Some('\\') => decoded.push('\\'),
+            Some(other) => {
+                decoded.push('\\');
+                decoded.push(other);
+            }
+            None => {
+                return Err(ScopeError::InvalidInput(
+                    "query expression contains an unterminated escape sequence".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(decoded)
 }
 
 fn validate_binding_name(name: &str) -> ScopeResult<()> {
@@ -496,9 +524,30 @@ mod tests {
         assert_eq!(
             statement,
             QueryStatement::Expr(QueryExpr {
-                source: QuerySource::File(RepoPath::from("src/a\\\"|b.rs")),
+                source: QuerySource::File(RepoPath::from("src/a\"|b.rs")),
                 steps: vec![QueryStep::Deps],
             })
         );
+    }
+
+    #[test]
+    fn preserve_literal_backslashes_in_quoted_selector() {
+        let statement = parse_query_statement("file \"src\\path\\file.rs\" | .deps").unwrap();
+        assert_eq!(
+            statement,
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::File(RepoPath::from("src\\path\\file.rs")),
+                steps: vec![QueryStep::Deps],
+            })
+        );
+    }
+
+    #[test]
+    fn reject_unterminated_escape_in_quoted_selector() {
+        let error = decode_quoted_selector("src/lib\\").unwrap_err();
+        assert_eq!(error.kind(), "invalid_input");
+        assert!(error
+            .to_string()
+            .contains("unterminated escape sequence"));
     }
 }

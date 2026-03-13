@@ -1307,6 +1307,66 @@ fn gate_query_uses_default_thresholds_and_fails_strict_arch_fixture() {
 }
 
 #[test]
+fn gate_query_warns_for_missing_compare_on_delta_only_gate() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let config = scope_core::ArchConfig {
+        gates: vec![scope_core::GateConfig {
+            metric: scope_core::GateMetric::HealthScoreDelta,
+            min: None,
+            max: None,
+            min_delta: Some(-1.0),
+            max_delta: None,
+            severity: scope_core::GateSeverity::Warning,
+            message: Some("health score should not regress much".to_string()),
+            skip: false,
+        }],
+        ..scope_core::ArchConfig::default()
+    };
+
+    let gate = store.query_gate(&config, None, false).unwrap();
+    assert_eq!(gate.summary.total, 1);
+    assert_eq!(gate.summary.failed, 0);
+    assert_eq!(gate.summary.warnings, 1);
+    let evaluation = &gate.evaluations[0];
+    assert_eq!(evaluation.metric, scope_core::GateMetric::HealthScoreDelta);
+    assert_eq!(evaluation.status, scope_core::GateStatus::Warning);
+    assert!(evaluation
+        .detail
+        .contains("comparison snapshot required for min_delta"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn gate_query_respects_skipped_custom_gate() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let config = scope_core::ArchConfig {
+        gates: vec![scope_core::GateConfig {
+            metric: scope_core::GateMetric::Cycles,
+            min: None,
+            max: None,
+            min_delta: None,
+            max_delta: None,
+            severity: scope_core::GateSeverity::Warning,
+            message: Some("cycles temporarily ignored".to_string()),
+            skip: true,
+        }],
+        ..scope_core::ArchConfig::default()
+    };
+
+    let gate = store.query_gate(&config, None, false).unwrap();
+    assert_eq!(gate.summary.total, 1);
+    assert_eq!(gate.summary.skipped, 1);
+    assert_eq!(gate.summary.failed, 0);
+    assert_eq!(gate.summary.warnings, 0);
+    assert_eq!(gate.evaluations[0].status, scope_core::GateStatus::Skipped);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn cochange_query_reports_expected_scores_and_filters() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
