@@ -785,6 +785,55 @@ fn query_expr_supports_all_sources_and_reverse_step() {
 }
 
 #[test]
+fn query_expr_supports_multiple_expr_flags_with_shared_bindings() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(
+        &repo,
+        &[
+            "query",
+            "--expr",
+            "let roots = file \"src/lib.rs\" | .deps | unique",
+            "--expr",
+            "$roots | count",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["command"], "query");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["input"], "$roots | count");
+    assert_eq!(value["data"]["result"]["number"], 3);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_expr_accepts_indexed_empty_file_targets() {
+    let repo = prepare_fixture_copy("rust_small");
+    let empty_file = repo.join("src/empty.rs");
+    fs::write(&empty_file, "").unwrap();
+
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["query", "--expr", "file \"src/empty.rs\" | count"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["command"], "query");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["result"]["number"], 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn query_repl_supports_help_bindings_and_exit() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);

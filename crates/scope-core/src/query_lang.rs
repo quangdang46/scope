@@ -278,7 +278,11 @@ fn evaluate_expr(expr: &QueryExpr, store: &Store, session: &QuerySession) -> Sco
             let path = path.clone();
             if store.query_deps(&path)?.is_empty() && store.query_reverse_deps(&path)?.is_empty() {
                 let symbols = store.query_symbols(&path, false, None)?;
-                if symbols.is_empty() {
+                let indexed = store
+                    .list_indexed_files()?
+                    .into_iter()
+                    .any(|candidate| candidate == path);
+                if symbols.is_empty() && !indexed {
                     return Err(ScopeError::InvalidInput(format!(
                         "query file target `{}` is not indexed",
                         path.0

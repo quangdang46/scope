@@ -626,14 +626,26 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            if let Some(expr) = args.expr {
-                let mut session = scope_core::QuerySession::default();
-                let result = scope_core::execute_query(&expr, &context.store, &mut session)?;
-                serialize_output(&scope_core::stub::query(expr, result), compact)
-            } else {
+            if args.expr.is_empty() {
                 run_query_repl(&context.store)?;
                 return Ok(exit_code);
             }
+
+            let mut session = scope_core::QuerySession::default();
+            let mut last_input = String::new();
+            let mut last_result = None;
+            for expr in args.expr {
+                last_input = expr.clone();
+                last_result = Some(scope_core::execute_query(&expr, &context.store, &mut session)?);
+            }
+
+            serialize_output(
+                &scope_core::stub::query(
+                    last_input,
+                    last_result.expect("query mode should execute at least one expression"),
+                ),
+                compact,
+            )
         }
         Commands::Doctor(args) => {
             let bootstrap_options = BootstrapOptions {

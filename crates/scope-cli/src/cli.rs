@@ -494,7 +494,7 @@ pub struct ServeArgs {
 #[derive(Debug, clap::Args)]
 pub struct QueryArgs {
     #[arg(long)]
-    pub expr: Option<String>,
+    pub expr: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]

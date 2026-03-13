@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -21,12 +22,15 @@ fn golden_root() -> PathBuf {
     repo_root().join("tests/golden")
 }
 
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("scope-gate-{prefix}-{nanos}"))
+    let salt = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("scope-gate-{prefix}-{nanos}-{salt}"))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {
