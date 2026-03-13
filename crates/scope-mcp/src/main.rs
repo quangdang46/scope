@@ -1116,7 +1116,7 @@ fn dispatch_cochange(arguments: &Value) -> String {
 
 fn dispatch_report(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
-        let compare = optional_string(arguments, "compare");
+        let compare = optional_string_arg(arguments, "compare")?;
         let config = load_arch_config(&context.paths.repo_root)?;
         let result = context.store.query_report(&config, compare.as_deref())?;
         serialize_json(&scope_core::stub::report(result))
@@ -1128,8 +1128,8 @@ fn dispatch_report(arguments: &Value) -> String {
 
 fn dispatch_gate(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
-        let compare = optional_string(arguments, "compare");
-        let strict = optional_bool(arguments, "strict").unwrap_or(false);
+        let compare = optional_string_arg(arguments, "compare")?;
+        let strict = optional_bool_arg(arguments, "strict")?.unwrap_or(false);
         let config = load_arch_config(&context.paths.repo_root)?;
         let result = context.store.query_gate(&config, compare.as_deref(), strict)?;
         serialize_json(&scope_core::stub::gate(result))
@@ -1140,7 +1140,7 @@ fn dispatch_gate(arguments: &Value) -> String {
 }
 
 fn dispatch_query(arguments: &Value) -> String {
-    match required_string(arguments, "expr").and_then(|expr| {
+    match required_string_arg(arguments, "expr").and_then(|expr| {
         bootstrap_from_arguments(arguments).and_then(|context| {
             let mut session = QuerySession::default();
             let result = execute_query(&expr, &context.store, &mut session)?;
@@ -1513,7 +1513,11 @@ fn bootstrap_from_arguments(
 }
 
 fn required_string(arguments: &Value, key: &str) -> Result<String, scope_core::ScopeError> {
-    optional_string(arguments, key).ok_or_else(|| {
+    required_string_arg(arguments, key)
+}
+
+fn required_string_arg(arguments: &Value, key: &str) -> Result<String, scope_core::ScopeError> {
+    optional_string_arg(arguments, key)?.ok_or_else(|| {
         scope_core::ScopeError::InvalidInput(format!("mcp tool arguments require `{key}`"))
     })
 }
@@ -1523,6 +1527,19 @@ fn optional_string(arguments: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn optional_string_arg(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<String>, scope_core::ScopeError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(scope_core::ScopeError::InvalidInput(format!(
+            "mcp tool argument `{key}` must be a string when provided"
+        ))),
+    }
 }
 
 fn required_string_array(
@@ -1548,6 +1565,19 @@ fn required_string_array(
 
 fn optional_bool(arguments: &Value, key: &str) -> Option<bool> {
     arguments.get(key).and_then(Value::as_bool)
+}
+
+fn optional_bool_arg(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<bool>, scope_core::ScopeError> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(scope_core::ScopeError::InvalidInput(format!(
+            "mcp tool argument `{key}` must be a boolean when provided"
+        ))),
+    }
 }
 
 fn optional_usize(arguments: &Value, key: &str) -> Result<Option<usize>, scope_core::ScopeError> {
@@ -2790,6 +2820,87 @@ mod tests {
         assert_eq!(diff_value["data"]["result"]["branch"], "HEAD");
         assert_eq!(diff_value["data"]["result"]["summary"]["changed_files"], 0);
         assert_eq!(diff_value["data"]["result"]["summary"]["affected_files"], 0);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_report_gate_and_query_reject_invalid_arguments() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let report_output = dispatch_tool(
+            "report",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "compare": 7
+            }),
+        )
+        .unwrap();
+        let report_value: Value = serde_json::from_str(&report_output).unwrap();
+        assert_eq!(report_value["command"], "report");
+        assert_eq!(report_value["status"], "error");
+        assert_eq!(report_value["data"]["kind"], "invalid_input");
+        assert!(report_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("mcp tool argument `compare` must be a string when provided"));
+
+        let gate_output = dispatch_tool(
+            "gate",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "strict": "yes"
+            }),
+        )
+        .unwrap();
+        let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
+        assert_eq!(gate_value["command"], "gate");
+        assert_eq!(gate_value["status"], "error");
+        assert_eq!(gate_value["data"]["kind"], "invalid_input");
+        assert!(gate_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("mcp tool argument `strict` must be a boolean when provided"));
+
+        let query_missing_expr_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string()
+            }),
+        )
+        .unwrap();
+        let query_missing_expr_value: Value =
+            serde_json::from_str(&query_missing_expr_output).unwrap();
+        assert_eq!(query_missing_expr_value["command"], "query");
+        assert_eq!(query_missing_expr_value["status"], "error");
+        assert_eq!(query_missing_expr_value["data"]["kind"], "invalid_input");
+        assert!(query_missing_expr_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("mcp tool arguments require `expr`"));
+
+        let query_invalid_expr_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": false
+            }),
+        )
+        .unwrap();
+        let query_invalid_expr_value: Value =
+            serde_json::from_str(&query_invalid_expr_output).unwrap();
+        assert_eq!(query_invalid_expr_value["command"], "query");
+        assert_eq!(query_invalid_expr_value["status"], "error");
+        assert_eq!(query_invalid_expr_value["data"]["kind"], "invalid_input");
+        assert!(query_invalid_expr_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("mcp tool argument `expr` must be a string when provided"));
 
         fs::remove_dir_all(repo).unwrap();
     }
