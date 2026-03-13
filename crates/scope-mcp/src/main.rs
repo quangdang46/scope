@@ -428,15 +428,23 @@ fn tool_registry() -> Vec<Value> {
         ),
         tool_definition(
             "query",
-            "Run a composable graph query over indexed files and symbols.",
+            "Run one or more composable graph queries over indexed files and symbols.",
             json!({
                 "type": "object",
                 "properties": {
                     "repo_root": { "type": "string" },
                     "db_path": { "type": "string" },
-                    "expr": { "type": "string" }
+                    "expr": { "type": "string" },
+                    "exprs": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1
+                    }
                 },
-                "required": ["expr"],
+                "anyOf": [
+                    { "required": ["expr"] },
+                    { "required": ["exprs"] }
+                ],
                 "additionalProperties": false
             }),
         ),
@@ -1140,11 +1148,19 @@ fn dispatch_gate(arguments: &Value) -> String {
 }
 
 fn dispatch_query(arguments: &Value) -> String {
-    match required_string_arg(arguments, "expr").and_then(|expr| {
+    match query_exprs(arguments).and_then(|exprs| {
         bootstrap_from_arguments(arguments).and_then(|context| {
             let mut session = QuerySession::default();
-            let result = execute_query(&expr, &context.store, &mut session)?;
-            serialize_json(&scope_core::stub::query(expr, result))
+            let mut last_output = None;
+            for expr in exprs {
+                let result = execute_query(&expr, &context.store, &mut session)?;
+                last_output = Some(serialize_json(&scope_core::stub::query(expr, result))?);
+            }
+            last_output.ok_or_else(|| {
+                scope_core::ScopeError::InvalidInput(
+                    "mcp tool arguments require `expr` or `exprs`".to_string(),
+                )
+            })
         })
     }) {
         Ok(output) => output,
@@ -1546,9 +1562,23 @@ fn required_string_array(
     arguments: &Value,
     key: &str,
 ) -> Result<Vec<String>, scope_core::ScopeError> {
-    let Some(values) = arguments.get(key).and_then(Value::as_array) else {
-        return Err(scope_core::ScopeError::InvalidInput(format!(
+    optional_string_array(arguments, key)?.ok_or_else(|| {
+        scope_core::ScopeError::InvalidInput(format!(
             "mcp tool arguments require `{key}` as an array of strings"
+        ))
+    })
+}
+
+fn optional_string_array(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<Vec<String>>, scope_core::ScopeError> {
+    let Some(values) = arguments.get(key) else {
+        return Ok(None);
+    };
+    let Some(values) = values.as_array() else {
+        return Err(scope_core::ScopeError::InvalidInput(format!(
+            "mcp tool argument `{key}` must be an array of strings when provided"
         )));
     };
     let mut parsed = Vec::with_capacity(values.len());
@@ -1560,7 +1590,26 @@ fn required_string_array(
         };
         parsed.push(value.to_string());
     }
-    Ok(parsed)
+    Ok(Some(parsed))
+}
+
+fn query_exprs(arguments: &Value) -> Result<Vec<String>, scope_core::ScopeError> {
+    match (
+        optional_string_arg(arguments, "expr")?,
+        optional_string_array(arguments, "exprs")?,
+    ) {
+        (Some(_), Some(_)) => Err(scope_core::ScopeError::InvalidInput(
+            "mcp tool arguments accept either `expr` or `exprs`, but not both".to_string(),
+        )),
+        (Some(expr), None) => Ok(vec![expr]),
+        (None, Some(exprs)) if exprs.is_empty() => Err(scope_core::ScopeError::InvalidInput(
+            "mcp tool argument `exprs` must contain at least one expression".to_string(),
+        )),
+        (None, Some(exprs)) => Ok(exprs),
+        (None, None) => Err(scope_core::ScopeError::InvalidInput(
+            "mcp tool arguments require `expr` or `exprs`".to_string(),
+        )),
+    }
 }
 
 fn optional_bool(arguments: &Value, key: &str) -> Option<bool> {
@@ -2445,6 +2494,12 @@ mod tests {
         dst
     }
 
+    fn write_arch_config(repo: &Path, source: &str) {
+        let scope_dir = repo.join(".scope");
+        fs::create_dir_all(&scope_dir).unwrap();
+        fs::write(scope_dir.join("arch.toml"), source).unwrap();
+    }
+
     #[test]
     fn tools_list_reports_expected_initial_wrapper_scope() {
         let tools = tool_registry();
@@ -2497,7 +2552,13 @@ mod tests {
         assert_eq!(query["inputSchema"]["properties"]["repo_root"]["type"], "string");
         assert_eq!(query["inputSchema"]["properties"]["db_path"]["type"], "string");
         assert_eq!(query["inputSchema"]["properties"]["expr"]["type"], "string");
-        assert_eq!(query["inputSchema"]["required"], json!(["expr"]));
+        assert_eq!(query["inputSchema"]["properties"]["exprs"]["type"], "array");
+        assert_eq!(query["inputSchema"]["properties"]["exprs"]["items"]["type"], "string");
+        assert_eq!(query["inputSchema"]["properties"]["exprs"]["minItems"], 1);
+        assert_eq!(query["inputSchema"]["anyOf"], json!([
+            { "required": ["expr"] },
+            { "required": ["exprs"] }
+        ]));
         assert_eq!(query["inputSchema"]["additionalProperties"], false);
     }
 
@@ -2559,6 +2620,45 @@ mod tests {
         assert_eq!(payload["command"], "query");
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["data"]["input"], "file \"src/lib.rs\" | .deps | count");
+        assert_eq!(payload["data"]["result"]["number"], 3);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn handle_message_wraps_multi_expr_query_tool_call_in_jsonrpc_result() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "query",
+                "arguments": {
+                    "repo_root": repo.display().to_string(),
+                    "exprs": [
+                        "let roots = file \"src/lib.rs\" | .deps | unique",
+                        "$roots | count"
+                    ]
+                }
+            }
+        });
+        let response = handle_message(&request).expect("tools/call should return a response");
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 8);
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("content text should be a string");
+        let payload: Value = serde_json::from_str(text).expect("wrapped content should be JSON");
+        assert_eq!(payload["command"], "query");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["data"]["input"], "$roots | count");
         assert_eq!(payload["data"]["result"]["number"], 3);
 
         fs::remove_dir_all(repo).unwrap();
@@ -2971,7 +3071,7 @@ mod tests {
         assert!(query_missing_expr_value["data"]["message"]
             .as_str()
             .expect("error message should be a string")
-            .contains("mcp tool arguments require `expr`"));
+            .contains("mcp tool arguments require `expr` or `exprs`"));
 
         let query_invalid_expr_output = dispatch_tool(
             "query",
@@ -2990,6 +3090,43 @@ mod tests {
             .as_str()
             .expect("error message should be a string")
             .contains("mcp tool argument `expr` must be a string when provided"));
+
+        let query_invalid_exprs_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "exprs": false
+            }),
+        )
+        .unwrap();
+        let query_invalid_exprs_value: Value =
+            serde_json::from_str(&query_invalid_exprs_output).unwrap();
+        assert_eq!(query_invalid_exprs_value["command"], "query");
+        assert_eq!(query_invalid_exprs_value["status"], "error");
+        assert_eq!(query_invalid_exprs_value["data"]["kind"], "invalid_input");
+        assert!(query_invalid_exprs_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("mcp tool argument `exprs` must be an array of strings when provided"));
+
+        let query_both_expr_and_exprs_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "all-files | count",
+                "exprs": ["all-symbols | count"]
+            }),
+        )
+        .unwrap();
+        let query_both_expr_and_exprs_value: Value =
+            serde_json::from_str(&query_both_expr_and_exprs_output).unwrap();
+        assert_eq!(query_both_expr_and_exprs_value["command"], "query");
+        assert_eq!(query_both_expr_and_exprs_value["status"], "error");
+        assert_eq!(query_both_expr_and_exprs_value["data"]["kind"], "invalid_input");
+        assert!(query_both_expr_and_exprs_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("mcp tool arguments accept either `expr` or `exprs`, but not both"));
 
         fs::remove_dir_all(repo).unwrap();
     }
@@ -3030,6 +3167,131 @@ mod tests {
         assert_eq!(gate_value["status"], "error");
         assert_eq!(gate_value["data"]["kind"], "not_found");
         assert_eq!(gate_value["data"]["message"], "snapshot not found: missing");
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gate_warns_for_delta_only_config_without_compare() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+        write_arch_config(
+            &repo,
+            r#"[[gate]]
+metric = "health_score_delta"
+min_delta = -1.0
+severity = "warning"
+message = "health score should not regress much"
+skip = false
+"#,
+        );
+
+        let gate_output = dispatch_tool(
+            "gate",
+            &json!({
+                "repo_root": repo.display().to_string()
+            }),
+        )
+        .unwrap();
+        let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
+        assert_eq!(gate_value["command"], "gate");
+        assert_eq!(gate_value["status"], "ok");
+        assert!(gate_value["data"]["result"]["summary"]["warnings"]
+            .as_u64()
+            .expect("warnings summary should be numeric")
+            >= 1);
+        let evaluations = gate_value["data"]["result"]["evaluations"]
+            .as_array()
+            .expect("evaluations should be an array");
+        let evaluation = evaluations
+            .iter()
+            .find(|evaluation| evaluation["metric"] == "health_score_delta")
+            .expect("health_score_delta evaluation should be present");
+        assert_eq!(evaluation["status"], "warning");
+        assert_eq!(evaluation["severity"], "warning");
+        assert!(evaluation["detail"]
+            .as_str()
+            .expect("detail should be a string")
+            .contains("comparison snapshot required for min_delta"));
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_gate_respects_skipped_custom_gate_config() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+        write_arch_config(
+            &repo,
+            r#"[[gate]]
+metric = "cycles"
+severity = "warning"
+message = "cycles temporarily ignored"
+skip = true
+"#,
+        );
+
+        let gate_output = dispatch_tool(
+            "gate",
+            &json!({
+                "repo_root": repo.display().to_string()
+            }),
+        )
+        .unwrap();
+        let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
+        assert_eq!(gate_value["command"], "gate");
+        assert_eq!(gate_value["status"], "ok");
+        assert!(gate_value["data"]["result"]["summary"]["skipped"]
+            .as_u64()
+            .expect("skipped summary should be numeric")
+            >= 1);
+        let evaluations = gate_value["data"]["result"]["evaluations"]
+            .as_array()
+            .expect("evaluations should be an array");
+        let evaluation = evaluations
+            .iter()
+            .find(|evaluation| evaluation["metric"] == "cycles")
+            .expect("cycles evaluation should be present");
+        assert_eq!(evaluation["status"], "skipped");
+        assert_eq!(evaluation["severity"], "warning");
+        assert_eq!(evaluation["detail"], "gate explicitly skipped by configuration");
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_query_supports_multiple_exprs_with_shared_bindings() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "exprs": [
+                    "let roots = file \"src/lib.rs\" | .deps | unique",
+                    "$roots | count"
+                ]
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "query");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["input"], "$roots | count");
+        assert_eq!(value["data"]["result"]["number"], 3);
 
         fs::remove_dir_all(repo).unwrap();
     }

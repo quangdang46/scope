@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
-    extract::{Query, State},
+    extract::{rejection::QueryRejection, Query, State},
     http::{header, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -282,6 +282,10 @@ fn query_error(command: &'static str, error: ScopeError) -> Response {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     json_error(status, command, error)
+}
+
+fn query_rejection_error(command: &'static str, rejection: QueryRejection) -> Response {
+    query_error(command, ScopeError::InvalidInput(rejection.body_text()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,8 +627,13 @@ async fn api_gate(
 
 async fn api_query(
     State(state): State<Arc<ServeState>>,
-    Query(params): Query<QueryParams>,
+    params: Result<Query<QueryParams>, QueryRejection>,
 ) -> Response {
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(rejection) => return query_rejection_error("query", rejection),
+    };
+
     match (|| {
         let store = open_store(&state)?;
         let mut session = QuerySession::default();
@@ -1214,6 +1223,26 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["input"], "file \"src/lib.rs\" | .deps | count");
         assert!(value["data"]["result"].is_object());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_missing_expr_returns_json_error() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/query").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "query");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("missing field `expr`"));
         fs::remove_dir_all(repo).unwrap();
     }
 
