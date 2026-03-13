@@ -902,3 +902,97 @@ fn gate_command_missing_compare_snapshot_emits_json_error_on_stderr() {
 
     fs::remove_dir_all(repo).unwrap();
 }
+
+#[test]
+fn snapshot_round_trip_and_diff_snapshot_return_live_json_envelopes() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let save_output = run_scope(&repo, &["snapshot", "save", "--name", "baseline"]);
+    assert_eq!(save_output.status.code(), Some(0));
+    let save_value: serde_json::Value =
+        serde_json::from_slice(&save_output.stdout).expect("stdout should be JSON");
+    assert_eq!(save_value["command"], "snapshot-save");
+    assert_eq!(save_value["status"], "ok");
+    assert_eq!(save_value["data"]["result"]["snapshot"]["name"], "baseline");
+
+    let list_output = run_scope(&repo, &["snapshot", "list"]);
+    assert_eq!(list_output.status.code(), Some(0));
+    let list_value: serde_json::Value =
+        serde_json::from_slice(&list_output.stdout).expect("stdout should be JSON");
+    assert_eq!(list_value["command"], "snapshot-list");
+    assert_eq!(list_value["status"], "ok");
+    assert_eq!(list_value["data"]["result"]["summary"]["snapshot_count"], 1);
+
+    let parser_path = repo.join("src/parser.rs");
+    let updated = fs::read_to_string(&parser_path)
+        .unwrap()
+        .replace("pub fn parse", "pub fn parse_token");
+    fs::write(&parser_path, updated).unwrap();
+
+    let reindex_output = run_scope(&repo, &["index"]);
+    assert_eq!(reindex_output.status.code(), Some(0));
+
+    let diff_output = run_scope(&repo, &["diff-snapshot", "baseline", "current"]);
+    assert_eq!(diff_output.status.code(), Some(0));
+    let diff_value: serde_json::Value =
+        serde_json::from_slice(&diff_output.stdout).expect("stdout should be JSON");
+    assert_eq!(diff_value["command"], "diff-snapshot");
+    assert_eq!(diff_value["status"], "ok");
+    assert_eq!(diff_value["data"]["result"]["before"], "baseline");
+    assert_eq!(diff_value["data"]["result"]["after"], "current");
+    assert!(diff_value["data"]["result"]["public_surface"]["modified"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+
+    let delete_output = run_scope(&repo, &["snapshot", "delete", "baseline"]);
+    assert_eq!(delete_output.status.code(), Some(0));
+    let delete_value: serde_json::Value =
+        serde_json::from_slice(&delete_output.stdout).expect("stdout should be JSON");
+    assert_eq!(delete_value["command"], "snapshot-delete");
+    assert_eq!(delete_value["status"], "ok");
+    assert_eq!(delete_value["data"]["result"]["deleted"], true);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn doctor_command_returns_live_json_envelope_for_fixture_repo() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["doctor"]);
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["command"], "doctor");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["fix"], false);
+    assert!(value["data"]["schema_version"].as_u64().unwrap() >= 1);
+    assert_eq!(value["data"]["stats"]["files"], 5);
+    assert!(value["data"]["checks"].as_array().is_some_and(|items| items.len() >= 3));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn benchmark_command_returns_live_json_envelope_for_fixture_repo() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .current_dir(workspace_root())
+        .args(["benchmark", "--fixture", "rust_small", "--iterations", "1"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["command"], "benchmark");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["fixture"], "rust_small");
+    assert_eq!(value["data"]["iterations"], 1);
+    assert_eq!(value["data"]["summary"]["indexed_files"], 5);
+    assert!(value["data"]["summary"]["full"]["avg_ms"].as_f64().unwrap() >= 0.0);
+    assert!(value["data"]["summary"]["incremental"]["avg_ms"].as_f64().unwrap() >= 0.0);
+}
