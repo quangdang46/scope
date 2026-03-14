@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "query",
+  "status": "ok",
+  "data": {
+    "input": "$roots | count",
+    "result": {
+      "number": 3
+    }
+  },
+  "warnings": []
+}

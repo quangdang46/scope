@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "command": "query",
+  "status": "ok",
+  "data": {
+    "input": "let roots = file \"src/lib.rs\" | .deps | unique",
+    "result": {
+      "files": [
+        "src/parser.rs",
+        "src/resolver.rs",
+        "src/utils.rs"
+      ]
+    }
+  },
+  "warnings": []
+}

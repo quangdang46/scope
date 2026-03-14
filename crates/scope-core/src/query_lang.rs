@@ -477,6 +477,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_all_sources_and_var_reference() {
+        assert_eq!(
+            parse_query_statement("all-files | count").unwrap(),
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::AllFiles,
+                steps: vec![QueryStep::Count],
+            })
+        );
+        assert_eq!(
+            parse_query_statement("all-symbols | count").unwrap(),
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::AllSymbols,
+                steps: vec![QueryStep::Count],
+            })
+        );
+        assert_eq!(
+            parse_query_statement("$roots | unique").unwrap(),
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::Var("roots".to_string()),
+                steps: vec![QueryStep::Unique],
+            })
+        );
+    }
+
+    #[test]
+    fn binding_names_are_sorted() {
+        let mut session = QuerySession::default();
+        session.bindings.insert("zeta".to_string(), QueryValue::Number(1));
+        session.bindings.insert("alpha".to_string(), QueryValue::Number(2));
+        session.bindings.insert("middle".to_string(), QueryValue::Number(3));
+
+        assert_eq!(
+            session.binding_names(),
+            vec!["alpha".to_string(), "middle".to_string(), "zeta".to_string()]
+        );
+    }
+
+    #[test]
     fn reject_unknown_step() {
         let error = parse_query_statement("file \"src/lib.rs\" | .impact").unwrap_err();
         assert_eq!(error.kind(), "invalid_input");
@@ -520,6 +558,32 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unterminated quoted string"));
+    }
+
+    #[test]
+    fn reject_unquoted_selector_and_invalid_binding_names() {
+        let unquoted = parse_query_statement("file src/lib.rs | .deps").unwrap_err();
+        assert_eq!(unquoted.kind(), "invalid_input");
+        assert!(unquoted.to_string().contains("quoted string"));
+
+        let invalid_let = parse_query_statement("let bad-name = all-files | count").unwrap_err();
+        assert_eq!(invalid_let.kind(), "invalid_input");
+        assert!(invalid_let.to_string().contains("may only use ASCII letters"));
+
+        let invalid_var = parse_query_statement("$bad-name | count").unwrap_err();
+        assert_eq!(invalid_var.kind(), "invalid_input");
+        assert!(invalid_var.to_string().contains("may only use ASCII letters"));
+    }
+
+    #[test]
+    fn reject_missing_source_and_unsupported_source() {
+        let missing_source = parse_query_statement("| .deps").unwrap_err();
+        assert_eq!(missing_source.kind(), "invalid_input");
+        assert!(missing_source.to_string().contains("empty pipeline segment"));
+
+        let unsupported = parse_query_statement("module \"src/lib.rs\" | count").unwrap_err();
+        assert_eq!(unsupported.kind(), "invalid_input");
+        assert!(unsupported.to_string().contains("unsupported query source"));
     }
 
     #[test]

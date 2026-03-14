@@ -731,6 +731,50 @@ fn query_expr_invalid_step_emits_json_error_on_stderr() {
 }
 
 #[test]
+fn query_expr_trailing_pipe_emits_json_error_on_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["query", "--expr", "file \"src/lib.rs\" | .deps |"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("empty pipeline segment"));
+}
+
+#[test]
+fn query_expr_repeated_pipe_emits_json_error_on_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .args(["query", "--expr", "file \"src/lib.rs\" || .deps"])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("empty pipeline segment"));
+}
+
+#[test]
 fn query_expr_supports_quoted_pipes_escapes_and_let_bindings() {
     let repo = prepare_fixture_copy("rust_small");
     let weird_file = repo.join("src/a|b.rs");
@@ -956,6 +1000,28 @@ fn query_repl_prints_json_errors_and_honors_quit_alias() {
 }
 
 #[test]
+fn query_repl_surfaces_empty_pipeline_errors() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope_with_stdin(
+        &repo,
+        &["query"],
+        "file \"src/lib.rs\" | .deps |\nfile \"src/lib.rs\" || .deps\n:exit\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scope query REPL"));
+    assert!(stdout.contains("empty pipeline segment"));
+    assert!(stdout.matches("\"status\": \"error\"").count() >= 2);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn query_repl_surfaces_unknown_bindings_and_empty_vars_output() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);
@@ -971,6 +1037,25 @@ fn query_repl_surfaces_unknown_bindings_and_empty_vars_output() {
     assert!(stdout.contains("\"command\": \"cli\""));
     assert!(stdout.contains("\"status\": \"error\""));
     assert!(stdout.contains("scope> \nscope>"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_repl_reprompts_after_blank_lines() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope_with_stdin(&repo, &["query"], "\n\nall-files | count\n:exit\n");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scope query REPL"));
+    assert!(stdout.contains("scope> scope> scope> "));
+    assert!(stdout.contains("\"input\": \"all-files | count\""));
+    assert!(stdout.contains("\"number\": 5"));
 
     fs::remove_dir_all(repo).unwrap();
 }

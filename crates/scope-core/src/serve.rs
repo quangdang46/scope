@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
-    extract::{rejection::QueryRejection, Query, State},
+    extract::{rejection::QueryRejection, Query, RawQuery, State},
     http::{header, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -356,9 +356,40 @@ struct GateParams {
     strict: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default)]
 struct QueryParams {
-    expr: String,
+    expr: Option<String>,
+    exprs: Option<Vec<String>>,
+}
+
+impl QueryParams {
+    fn from_query_pairs(pairs: Vec<(String, String)>) -> Result<Self, ScopeError> {
+        let mut params = Self::default();
+        for (key, value) in pairs {
+            match key.as_str() {
+                "expr" => params.expr = Some(value),
+                "exprs" => params.exprs.get_or_insert_with(Vec::new).push(value),
+                _ => {}
+            }
+        }
+        Ok(params)
+    }
+
+    fn query_exprs(self) -> Result<Vec<String>, ScopeError> {
+        match (self.expr, self.exprs) {
+            (Some(_), Some(_)) => Err(ScopeError::InvalidInput(
+                "serve query accepts either `expr` or `exprs`, but not both".to_string(),
+            )),
+            (Some(expr), None) => Ok(vec![expr]),
+            (None, Some(exprs)) if exprs.is_empty() => Err(ScopeError::InvalidInput(
+                "serve query parameter `exprs` must contain at least one expression".to_string(),
+            )),
+            (None, Some(exprs)) => Ok(exprs),
+            (None, None) => Err(ScopeError::InvalidInput(
+                "serve query requires `expr` or `exprs`".to_string(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -600,8 +631,13 @@ async fn api_context(
 
 async fn api_report(
     State(state): State<Arc<ServeState>>,
-    Query(params): Query<ReportParams>,
+    params: Result<Query<ReportParams>, QueryRejection>,
 ) -> Response {
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(rejection) => return query_rejection_error("report", rejection),
+    };
+
     match (|| {
         let store = open_store(&state)?;
         let config = load_arch_config(&state.paths.repo_root)?;
@@ -615,8 +651,13 @@ async fn api_report(
 
 async fn api_gate(
     State(state): State<Arc<ServeState>>,
-    Query(params): Query<GateParams>,
+    params: Result<Query<GateParams>, QueryRejection>,
 ) -> Response {
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(rejection) => return query_rejection_error("gate", rejection),
+    };
+
     match (|| {
         let store = open_store(&state)?;
         let config = load_arch_config(&state.paths.repo_root)?;
@@ -630,18 +671,35 @@ async fn api_gate(
 
 async fn api_query(
     State(state): State<Arc<ServeState>>,
-    params: Result<Query<QueryParams>, QueryRejection>,
+    params: Result<Query<Vec<(String, String)>>, QueryRejection>,
+    raw_query: RawQuery,
 ) -> Response {
-    let Query(params) = match params {
-        Ok(params) => params,
-        Err(rejection) => return query_rejection_error("query", rejection),
+    let params = match params {
+        Ok(Query(pairs)) => match QueryParams::from_query_pairs(pairs) {
+            Ok(params) => params,
+            Err(error) => return query_error("query", error),
+        },
+        Err(rejection) => {
+            if raw_query.0.is_none() {
+                QueryParams::default()
+            } else {
+                return query_rejection_error("query", rejection);
+            }
+        }
     };
 
     match (|| {
         let store = open_store(&state)?;
         let mut session = QuerySession::default();
-        let result = execute_query(&params.expr, &store, &mut session)?;
-        Ok(stub::query(params.expr, result))
+        let exprs = params.query_exprs()?;
+        let mut last_result = None;
+        for expr in exprs {
+            let result = execute_query(&expr, &store, &mut session)?;
+            last_result = Some(stub::query(expr, result));
+        }
+        last_result.ok_or_else(|| {
+            ScopeError::InvalidInput("serve query requires `expr` or `exprs`".to_string())
+        })
     })() {
         Ok(envelope) => json_success(envelope),
         Err(error) => query_error("query", error),
@@ -1213,6 +1271,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gate_endpoint_invalid_strict_returns_json_error() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/gate?strict=yes").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "gate");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("Failed to deserialize query string"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
     async fn query_endpoint_returns_expected_envelope() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);
@@ -1245,7 +1323,7 @@ mod tests {
         assert!(value["data"]["message"]
             .as_str()
             .expect("error message should be a string")
-            .contains("missing field `expr`"));
+            .contains("serve query requires `expr` or `exprs`"));
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1266,6 +1344,118 @@ mod tests {
             .as_str()
             .expect("error message should be a string")
             .contains("unsupported query step `.impact`; supported steps are .deps, .reverse, .symbols, .callers, .callees, unique, and count"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_supports_multiple_exprs_with_shared_bindings() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(
+            app,
+            "/api/query?exprs=let%20roots%20%3D%20file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20unique&exprs=%24roots%20%7C%20count",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "query");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["input"], "$roots | count");
+        assert_eq!(value["data"]["result"]["number"], 3);
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_rejects_expr_and_exprs_together() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(
+            app,
+            "/api/query?expr=all-files%20%7C%20count&exprs=all-symbols%20%7C%20count",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "query");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("serve query accepts either `expr` or `exprs`, but not both"));
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_supports_all_sources_and_reverse_step() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state.clone(), false);
+
+        let all_files_response =
+            call(app.clone(), "/api/query?expr=all-files%20%7C%20count").await;
+        assert_eq!(all_files_response.status(), StatusCode::OK);
+        let all_files_body = axum::body::to_bytes(all_files_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let all_files_value: Value = serde_json::from_slice(&all_files_body).unwrap();
+        assert_eq!(all_files_value["command"], "query");
+        assert_eq!(all_files_value["status"], "ok");
+        assert_eq!(all_files_value["data"]["result"]["number"], 5);
+
+        let all_symbols_response =
+            call(app.clone(), "/api/query?expr=all-symbols%20%7C%20count").await;
+        assert_eq!(all_symbols_response.status(), StatusCode::OK);
+        let all_symbols_body = axum::body::to_bytes(all_symbols_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let all_symbols_value: Value = serde_json::from_slice(&all_symbols_body).unwrap();
+        assert_eq!(all_symbols_value["command"], "query");
+        assert_eq!(all_symbols_value["status"], "ok");
+        assert!(all_symbols_value["data"]["result"]["number"]
+            .as_u64()
+            .expect("symbol count should be numeric")
+            >= 4);
+
+        let reverse_response = call(
+            app,
+            "/api/query?expr=file%20%22src%2Fparser.rs%22%20%7C%20.reverse%20%7C%20unique%20%7C%20count",
+        )
+        .await;
+        assert_eq!(reverse_response.status(), StatusCode::OK);
+        let reverse_body = axum::body::to_bytes(reverse_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reverse_value: Value = serde_json::from_slice(&reverse_body).unwrap();
+        assert_eq!(reverse_value["command"], "query");
+        assert_eq!(reverse_value["status"], "ok");
+        assert_eq!(reverse_value["data"]["result"]["number"], 2);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_unknown_binding_returns_json_error() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/query?expr=%24missing%20%7C%20count").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "query");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("unknown query binding `$missing`"));
         fs::remove_dir_all(repo).unwrap();
     }
 

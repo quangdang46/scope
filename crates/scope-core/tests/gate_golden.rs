@@ -173,3 +173,41 @@ fn gate_query_skipped_matches_golden_json() {
 
     fs::remove_dir_all(repo).unwrap();
 }
+
+#[test]
+fn gate_query_compare_warning_matches_golden_json() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    store.save_snapshot("baseline", Some("HEAD".to_string())).unwrap();
+
+    let parser_path = repo.join("src/parser.rs");
+    let updated = fs::read_to_string(&parser_path)
+        .unwrap()
+        .replace("pub fn parse", "pub fn parse_token");
+    fs::write(&parser_path, updated).unwrap();
+    let _ = index_fixture(&repo);
+
+    let config = ArchConfig {
+        gates: vec![GateConfig {
+            metric: GateMetric::HealthScoreDelta,
+            min: None,
+            max: None,
+            min_delta: Some(-1.0),
+            max_delta: None,
+            severity: GateSeverity::Warning,
+            message: Some("health score should not regress much".to_string()),
+            skip: false,
+        }],
+        ..ArchConfig::default()
+    };
+
+    let gate = store.query_gate(&config, Some("baseline"), false).unwrap();
+    let mut actual = serde_json::to_value(stub::gate(gate)).unwrap();
+    let mut expected = read_golden_json("rust_small_gate_compare_baseline_warning.json");
+    normalize_report_like_json(&mut actual);
+    normalize_report_like_json(&mut expected);
+
+    assert_eq!(actual, expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}

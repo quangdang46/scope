@@ -1278,6 +1278,78 @@ fn generated_cochange_fixture_persists_expected_file_churn() {
 }
 
 #[test]
+fn query_result_matches_golden_json_for_rust_small_fixture() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let mut session = scope_core::QuerySession::default();
+
+    let result = scope_core::execute_query(
+        "file \"src/lib.rs\" | .deps | unique | count",
+        &store,
+        &mut session,
+    )
+    .unwrap();
+    let actual = serde_json::to_value(stub::query(
+        "file \"src/lib.rs\" | .deps | unique | count".to_string(),
+        result,
+    ))
+    .unwrap();
+    let expected = read_golden_json("rust_small_query_deps_count.json");
+
+    assert_eq!(actual, expected);
+    assert!(session.binding_names().is_empty());
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_result_matches_golden_json_for_let_binding_fixture() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let mut session = scope_core::QuerySession::default();
+
+    let result = scope_core::execute_query(
+        "let roots = file \"src/lib.rs\" | .deps | unique",
+        &store,
+        &mut session,
+    )
+    .unwrap();
+    let actual = serde_json::to_value(stub::query(
+        "let roots = file \"src/lib.rs\" | .deps | unique".to_string(),
+        result,
+    ))
+    .unwrap();
+    let expected = read_golden_json("rust_small_query_let_roots.json");
+
+    assert_eq!(actual, expected);
+    assert_eq!(session.binding_names(), vec!["roots".to_string()]);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_result_matches_golden_json_for_shared_binding_followup_fixture() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let mut session = scope_core::QuerySession::default();
+
+    scope_core::execute_query(
+        "let roots = file \"src/lib.rs\" | .deps | unique",
+        &store,
+        &mut session,
+    )
+    .unwrap();
+    let result = scope_core::execute_query("$roots | count", &store, &mut session).unwrap();
+    let actual = serde_json::to_value(stub::query("$roots | count".to_string(), result)).unwrap();
+    let expected = read_golden_json("rust_small_query_shared_binding_count.json");
+
+    assert_eq!(actual, expected);
+    assert_eq!(session.binding_names(), vec!["roots".to_string()]);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn report_query_matches_golden_json_for_rust_small_fixture() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
@@ -1317,9 +1389,23 @@ fn report_query_matches_golden_json_for_snapshot_comparison() {
     assert_eq!(actual, expected);
     assert_eq!(report.metrics.total_files, 5);
     assert!(report.compare.is_some());
-    assert_eq!(report.compare.as_ref().unwrap().target, "baseline");
+    let compare = report.compare.as_ref().unwrap();
+    assert_eq!(compare.target, "baseline");
+    assert_eq!(compare.baseline_health_score, 94.0);
+    assert_eq!(compare.health_score_delta, -12.0);
+    assert_eq!(compare.unreachable_files_delta, 3);
+    assert_eq!(compare.public_surface_removed_delta, 1);
     assert!(report.metrics.public_surface_removed >= 1);
-    assert!(report.compare.as_ref().unwrap().public_surface_removed_delta >= 1);
+    assert_eq!(
+        report.recommendations,
+        vec![
+            "review 3 unreachable files for dead code or missing entry-point declarations"
+                .to_string(),
+            "review 1 removed public surface entries against the comparison snapshot before landing changes"
+                .to_string(),
+            "health score regressed by 12.0 points versus baseline".to_string(),
+        ]
+    );
 
     let envelope = stub::report(report.clone());
     assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));

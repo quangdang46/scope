@@ -2921,7 +2921,30 @@ mod tests {
         assert_eq!(report_value["command"], "report");
         assert_eq!(report_value["status"], "ok");
         assert_eq!(report_value["data"]["result"]["compare"]["target"], "baseline");
+        assert_eq!(
+            report_value["data"]["result"]["compare"]["baseline_health_score"],
+            94.0
+        );
+        assert_eq!(
+            report_value["data"]["result"]["compare"]["health_score_delta"],
+            -6.0
+        );
+        assert_eq!(
+            report_value["data"]["result"]["compare"]["unreachable_files_delta"],
+            3
+        );
+        assert_eq!(
+            report_value["data"]["result"]["compare"]["public_surface_removed_delta"],
+            0
+        );
         assert!(report_value["data"]["result"]["metrics"]["total_files"].as_u64().unwrap() > 0);
+        assert_eq!(
+            report_value["data"]["result"]["recommendations"],
+            json!([
+                "review 3 unreachable files for dead code or missing entry-point declarations",
+                "health score regressed by 6.0 points versus baseline"
+            ])
+        );
 
         let gate_output = dispatch_tool(
             "gate",
@@ -3268,6 +3291,75 @@ skip = true
     }
 
     #[test]
+    fn dispatch_gate_reports_compare_baseline_warning_details() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+        let _ = dispatch_tool(
+            "snapshot_save",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "name": "baseline"
+            }),
+        )
+        .unwrap();
+
+        let parser_path = repo.join("src/parser.rs");
+        let updated = fs::read_to_string(&parser_path)
+            .unwrap()
+            .replace("pub fn parse", "pub fn parse_token");
+        fs::write(&parser_path, updated).unwrap();
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+        write_arch_config(
+            &repo,
+            r#"[[gate]]
+metric = "health_score_delta"
+min_delta = -1.0
+severity = "warning"
+message = "health score should not regress much"
+skip = false
+"#,
+        );
+
+        let gate_output = dispatch_tool(
+            "gate",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "compare": "baseline"
+            }),
+        )
+        .unwrap();
+        let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
+        assert_eq!(gate_value["command"], "gate");
+        assert_eq!(gate_value["status"], "ok");
+        assert_eq!(gate_value["data"]["result"]["compare"], "baseline");
+        assert_eq!(gate_value["data"]["result"]["summary"]["warnings"], 1);
+        assert_eq!(gate_value["data"]["result"]["summary"]["failed"], 0);
+        let evaluations = gate_value["data"]["result"]["evaluations"]
+            .as_array()
+            .expect("evaluations should be an array");
+        let evaluation = evaluations
+            .iter()
+            .find(|evaluation| evaluation["metric"] == "health_score_delta")
+            .expect("health_score_delta evaluation should be present");
+        assert_eq!(evaluation["status"], "warning");
+        assert_eq!(evaluation["severity"], "warning");
+        assert_eq!(evaluation["current_value"], -12.0);
+        assert_eq!(evaluation["baseline_value"], 0.0);
+        assert_eq!(evaluation["delta"], -12.0);
+        assert_eq!(evaluation["detail"], "delta -12.00 is below min_delta -1.00");
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
     fn dispatch_query_supports_multiple_exprs_with_shared_bindings() {
         let repo = prepare_fixture_copy("rust_small");
         let _ = dispatch_tool(
@@ -3292,6 +3384,89 @@ skip = true
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["input"], "$roots | count");
         assert_eq!(value["data"]["result"]["number"], 3);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_query_supports_all_sources_and_reverse_step() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let all_files_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "all-files | count"
+            }),
+        )
+        .unwrap();
+        let all_files_value: Value = serde_json::from_str(&all_files_output).unwrap();
+        assert_eq!(all_files_value["command"], "query");
+        assert_eq!(all_files_value["status"], "ok");
+        assert_eq!(all_files_value["data"]["result"]["number"], 5);
+
+        let all_symbols_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "all-symbols | count"
+            }),
+        )
+        .unwrap();
+        let all_symbols_value: Value = serde_json::from_str(&all_symbols_output).unwrap();
+        assert_eq!(all_symbols_value["command"], "query");
+        assert_eq!(all_symbols_value["status"], "ok");
+        assert!(all_symbols_value["data"]["result"]["number"]
+            .as_u64()
+            .expect("symbol count should be numeric")
+            >= 4);
+
+        let reverse_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/parser.rs\" | .reverse | unique | count"
+            }),
+        )
+        .unwrap();
+        let reverse_value: Value = serde_json::from_str(&reverse_output).unwrap();
+        assert_eq!(reverse_value["command"], "query");
+        assert_eq!(reverse_value["status"], "ok");
+        assert_eq!(reverse_value["data"]["result"]["number"], 2);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_query_surfaces_unknown_bindings() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "$missing | count"
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "query");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("unknown query binding `$missing`"));
 
         fs::remove_dir_all(repo).unwrap();
     }

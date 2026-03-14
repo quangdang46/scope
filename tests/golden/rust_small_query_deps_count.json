@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "query",
+  "status": "ok",
+  "data": {
+    "input": "file \"src/lib.rs\" | .deps | unique | count",
+    "result": {
+      "number": 3
+    }
+  },
+  "warnings": []
+}

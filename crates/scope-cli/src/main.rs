@@ -788,6 +788,11 @@ fn run_query_repl(store: &scope_core::Store) -> Result<(), scope_core::ScopeErro
         let line = line.map_err(|error| scope_core::ScopeError::io("stdin", error))?;
         let input = line.trim();
         if input.is_empty() {
+            write!(stdout, "scope> ")
+                .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+            stdout
+                .flush()
+                .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
             continue;
         }
         match input {
