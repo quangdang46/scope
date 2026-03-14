@@ -934,6 +934,39 @@ fn query_expr_supports_multiple_expr_flags_with_shared_bindings() {
 }
 
 #[test]
+fn query_expr_reports_followup_binding_errors_from_multiple_expr_flags() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(
+        &repo,
+        &[
+            "query",
+            "--expr",
+            "let roots = file \"src/lib.rs\" | .deps | unique",
+            "--expr",
+            "$missing | count",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(value["command"], "cli");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["data"]["kind"], "invalid_input");
+    assert!(value["data"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("unknown query binding `$missing`"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn query_expr_accepts_indexed_empty_file_targets() {
     let repo = prepare_fixture_copy("rust_small");
     let empty_file = repo.join("src/empty.rs");

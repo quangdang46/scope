@@ -618,4 +618,102 @@ mod tests {
             .to_string()
             .contains("unterminated escape sequence"));
     }
+
+    #[test]
+    fn file_steps_reject_symbol_and_number_values() {
+        let symbol_value = QueryValue::Symbols(vec![SymbolRecord {
+            file: RepoPath::from("src/lib.rs"),
+            name: "parse".to_string(),
+            qualname: "crate::parse".to_string(),
+            kind: crate::SymbolKind::Function,
+            visibility: crate::Visibility::Public,
+            exported: true,
+            span: crate::Span {
+                start_byte: 0,
+                end_byte: 32,
+                start_line: 1,
+                end_line: 3,
+            }
+        }]);
+        let deps_error = file_paths(&symbol_value, ".deps").unwrap_err();
+        assert_eq!(deps_error.kind(), "invalid_input");
+        assert!(deps_error
+            .to_string()
+            .contains(".deps requires file results, not symbol results"));
+
+        let count_value = QueryValue::Number(2);
+        let reverse_error = file_paths(&count_value, ".reverse").unwrap_err();
+        assert_eq!(reverse_error.kind(), "invalid_input");
+        assert!(reverse_error
+            .to_string()
+            .contains(".reverse cannot be applied after count"));
+    }
+
+    #[test]
+    fn symbol_steps_reject_file_and_number_values() {
+        let file_value = QueryValue::Files(vec![RepoPath::from("src/lib.rs")]);
+        let callers_error = symbol_names(&file_value, ".callers").unwrap_err();
+        assert_eq!(callers_error.kind(), "invalid_input");
+        assert!(callers_error
+            .to_string()
+            .contains(".callers requires symbol results; try `.symbols` first"));
+
+        let count_value = QueryValue::Number(1);
+        let callees_error = symbol_names(&count_value, ".callees").unwrap_err();
+        assert_eq!(callees_error.kind(), "invalid_input");
+        assert!(callees_error
+            .to_string()
+            .contains(".callees cannot be applied after count"));
+    }
+
+    #[test]
+    fn unique_value_deduplicates_traversals_and_preserves_numbers() {
+        let traversal = TraversalRecord {
+            kind: crate::NodeKind::Symbol,
+            path: Some(RepoPath::from("src/lib.rs")),
+            qualname: Some("crate::parse".to_string()),
+            edge_kind: crate::EdgeKind::Call,
+            certainty: crate::Certainty::Exact,
+            reason: "direct call".to_string(),
+            distance: 1,
+        };
+        let distinct = TraversalRecord {
+            kind: crate::NodeKind::Symbol,
+            path: Some(RepoPath::from("src/parser.rs")),
+            qualname: Some("crate::parser::parse".to_string()),
+            edge_kind: crate::EdgeKind::Call,
+            certainty: crate::Certainty::Resolved,
+            reason: "indirect call".to_string(),
+            distance: 2,
+        };
+
+        let unique = unique_value(QueryValue::Traversals(vec![
+            traversal.clone(),
+            traversal,
+            distinct.clone(),
+        ]));
+        assert_eq!(
+            unique,
+            QueryValue::Traversals(vec![
+                TraversalRecord {
+                    kind: crate::NodeKind::Symbol,
+                    path: Some(RepoPath::from("src/lib.rs")),
+                    qualname: Some("crate::parse".to_string()),
+                    edge_kind: crate::EdgeKind::Call,
+                    certainty: crate::Certainty::Exact,
+                    reason: "direct call".to_string(),
+                    distance: 1,
+                },
+                distinct,
+            ])
+        );
+
+        assert_eq!(unique_value(QueryValue::Number(7)), QueryValue::Number(7));
+    }
+
+    #[test]
+    fn count_value_counts_number_as_single_result() {
+        assert_eq!(count_value(&QueryValue::Files(vec![])), 0);
+        assert_eq!(count_value(&QueryValue::Number(99)), 1);
+    }
 }

@@ -3132,6 +3132,24 @@ mod tests {
             .expect("error message should be a string")
             .contains("mcp tool argument `exprs` must be an array of strings when provided"));
 
+        let query_empty_exprs_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "exprs": []
+            }),
+        )
+        .unwrap();
+        let query_empty_exprs_value: Value =
+            serde_json::from_str(&query_empty_exprs_output).unwrap();
+        assert_eq!(query_empty_exprs_value["command"], "query");
+        assert_eq!(query_empty_exprs_value["status"], "error");
+        assert_eq!(query_empty_exprs_value["data"]["kind"], "invalid_input");
+        assert!(query_empty_exprs_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("mcp tool argument `exprs` must contain at least one expression"));
+
         let query_both_expr_and_exprs_output = dispatch_tool(
             "query",
             &json!({
