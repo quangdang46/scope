@@ -23,8 +23,8 @@ use crate::{
     RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort,
     RiskSummary, ScopeError, ScopeResult, SimulateExtractResult, SimulateExtraction,
     SimulateFileStabilityDelta, SimulateGraphDelta, SimulateRecommendation,
-    SnapshotCentralityDelta, SnapshotDeleteResult, SnapshotDiffResult, SnapshotEdgeDelta,
-    SnapshotEdgeRecord, SnapshotFileRecord, SnapshotGraph, SnapshotListResult,
+    SnapshotCentralityDelta, SnapshotCycleDelta, SnapshotDeleteResult, SnapshotDiffResult,
+    SnapshotEdgeDelta, SnapshotEdgeRecord, SnapshotFileRecord, SnapshotGraph, SnapshotListResult,
     SnapshotListSummary, SnapshotMetadata, SnapshotSaveResult, SnapshotStabilityDelta,
     SnapshotStoredRecord, SnapshotSymbolRecord, SplitCluster, SplitClusterMember, SplitResult,
     SplitSummary, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
@@ -568,6 +568,26 @@ impl Store {
 
         let before_file_edges = snapshot_file_edges(&before.graph);
         let after_file_edges = snapshot_file_edges(&after.graph);
+        let before_cycles = cycle_records_from_file_edges(
+            &before
+                .graph
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            &before_file_edges,
+        );
+        let after_cycles = cycle_records_from_file_edges(
+            &after
+                .graph
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            &after_file_edges,
+        );
+        let before_cycle_keys = cycle_record_keys(&before_cycles);
+        let after_cycle_keys = cycle_record_keys(&after_cycles);
         let (_, before_violations) = arch_check_edges(config, &before_file_edges)?;
         let (_, after_violations) = arch_check_edges(config, &after_file_edges)?;
         let introduced_violations = diff_violations(&before_violations, &after_violations);
@@ -576,7 +596,7 @@ impl Store {
         let before_surface = snapshot_public_surface(&before.graph);
         let after_surface = snapshot_public_surface(&after.graph);
         let surface_diff = diff_public_surfaces(&before_surface, &after_surface);
-        let omitted = vec!["cycle detection delta not implemented yet".to_string()];
+        let omitted = Vec::new();
 
         Ok(SnapshotDiffResult {
             before: before.metadata,
@@ -592,6 +612,12 @@ impl Store {
             added_symbol_edges,
             removed_symbol_edges,
             newly_central_files: diff_snapshot_centrality(&before.graph, &after.graph),
+            cycles: SnapshotCycleDelta {
+                before: before_cycle_keys,
+                after: after_cycle_keys,
+                introduced: after_cycle_keys.saturating_sub(before_cycle_keys),
+                resolved: before_cycle_keys.saturating_sub(after_cycle_keys),
+            },
             introduced_violations,
             resolved_violations,
             stability: diff_snapshot_stability(&before.graph, &after.graph),

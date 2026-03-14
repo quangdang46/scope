@@ -163,6 +163,11 @@ pub struct ArchCheckData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ArchInitData {
+    pub result: crate::ArchInitResult,
+}
+
+#[derive(Debug, Serialize)]
 pub struct AuditData {
     pub result: AuditResult,
 }
@@ -697,6 +702,10 @@ pub fn arch_check(result: ArchCheckResult) -> JsonEnvelope<ArchCheckData> {
             violations: result.violations,
         },
     )
+}
+
+pub fn arch_init(result: crate::ArchInitResult) -> JsonEnvelope<ArchInitData> {
+    JsonEnvelope::success("arch-init", ArchInitData { result })
 }
 
 pub fn audit(result: AuditResult) -> JsonEnvelope<AuditData> {

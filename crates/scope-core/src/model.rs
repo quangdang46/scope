@@ -393,6 +393,14 @@ pub struct SnapshotStabilityDelta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotCycleDelta {
+    pub before: usize,
+    pub after: usize,
+    pub introduced: usize,
+    pub resolved: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotDiffSummary {
     pub files: usize,
     pub symbols: usize,
@@ -410,6 +418,7 @@ pub struct SnapshotDiffResult {
     pub added_symbol_edges: Vec<SnapshotEdgeRecord>,
     pub removed_symbol_edges: Vec<SnapshotEdgeRecord>,
     pub newly_central_files: Vec<SnapshotCentralityDelta>,
+    pub cycles: SnapshotCycleDelta,
     pub introduced_violations: Vec<ArchViolation>,
     pub resolved_violations: Vec<ArchViolation>,
     pub stability: SnapshotStabilityDelta,
@@ -622,6 +631,14 @@ pub struct ArchCheckResult {
     pub checked_edges: usize,
     pub checked_layered_edges: usize,
     pub violations: Vec<ArchViolation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchInitResult {
+    pub config_path: RepoPath,
+    pub layers: Vec<ArchLayer>,
+    pub rules: Vec<ArchRule>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

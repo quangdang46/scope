@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "command": "entry-cone",
+  "status": "ok",
+  "data": {
+    "result": {
+      "entry": "src/workers/job.ts",
+      "reachable": [
+        {
+          "file": "src/workers/job.ts",
+          "distance": 0,
+          "certainty": "exact"
+        },
+        {
+          "file": "src/shared/api.ts",
+          "distance": 1,
+          "certainty": "exact"
+        },
+        {
+          "file": "src/http/client.ts",
+          "distance": 2,
+          "certainty": "exact"
+        }
+      ],
+      "summary": {
+        "reachable_files": 3,
+        "max_distance": 2
+      }
+    }
+  },
+  "warnings": []
+}

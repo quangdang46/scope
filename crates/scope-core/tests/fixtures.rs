@@ -8,8 +8,8 @@ use std::{
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty, CycleSeverity,
     EdgeKind, NodeKind, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceSymbol,
-    RepoPath, ScanConfig, SnapshotDeleteResult, SnapshotListSummary, Store, SupportedLanguage,
-    SymbolKind, TraversalRecord, Visibility,
+    RepoPath, ScanConfig, SnapshotCycleDelta, SnapshotDeleteResult, SnapshotListSummary, Store,
+    SupportedLanguage, SymbolKind, TraversalRecord, Visibility,
 };
 
 fn repo_root() -> PathBuf {
@@ -208,7 +208,16 @@ fn snapshot_round_trip_and_diff_work_for_rust_small_fixture() {
     assert_eq!(second.snapshot.name, "after");
     assert_eq!(diff.before.name, "baseline");
     assert_eq!(diff.after.name, "after");
-    assert!(!diff.omitted.is_empty());
+    assert_eq!(
+        diff.cycles,
+        SnapshotCycleDelta {
+            before: 0,
+            after: 0,
+            introduced: 0,
+            resolved: 0,
+        }
+    );
+    assert!(diff.omitted.is_empty());
 
     let deleted = store.delete_snapshot("baseline").unwrap();
     assert_eq!(
@@ -1350,6 +1359,32 @@ fn query_result_matches_golden_json_for_shared_binding_followup_fixture() {
 }
 
 #[test]
+fn query_followup_error_preserves_existing_shared_binding_fixture() {
+    let repo = prepare_fixture_copy("rust_small");
+    let store = index_fixture(&repo);
+    let mut session = scope_core::QuerySession::default();
+
+    scope_core::execute_query(
+        "let roots = file \"src/lib.rs\" | .deps | unique",
+        &store,
+        &mut session,
+    )
+    .unwrap();
+
+    let error = scope_core::execute_query("$missing | count", &store, &mut session).unwrap_err();
+    assert_eq!(error.kind(), "invalid_input");
+    assert!(error
+        .to_string()
+        .contains("unknown query binding `$missing`"));
+    assert_eq!(session.binding_names(), vec!["roots".to_string()]);
+
+    let followup = scope_core::execute_query("$roots | count", &store, &mut session).unwrap();
+    assert_eq!(followup, scope_core::QueryValue::Number(3));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn report_query_matches_golden_json_for_rust_small_fixture() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
@@ -2283,6 +2318,51 @@ fn capability_audit_fixture_matches_golden_json() {
     let actual = serde_json::to_string_pretty(&envelope).unwrap();
     let expected = read_golden("capability_audit_network.json");
     assert_eq!(actual, expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn capability_audit_entry_queries_match_golden_json() {
+    let repo = prepare_fixture_copy("capability_audit");
+    let store = index_fixture(&repo);
+    let config = load_arch_config(&repo).unwrap();
+
+    let entry_list = store.query_entry_list(&config).unwrap();
+    assert_eq!(entry_list.summary.entry_points, 2);
+    assert_eq!(entry_list.entry_points[0].file, RepoPath::from("src/cli/main.ts"));
+    assert_eq!(entry_list.entry_points[1].file, RepoPath::from("src/workers/job.ts"));
+    let entry_list_actual = serde_json::to_string_pretty(&stub::entry_list(entry_list)).unwrap();
+    let entry_list_expected = read_golden("capability_audit_entry_list.json");
+    assert_eq!(entry_list_actual, entry_list_expected);
+
+    let entry_cone = store
+        .query_entry_cone(&config, &RepoPath::from("src/workers/job.ts"))
+        .unwrap();
+    assert_eq!(entry_cone.summary.reachable_files, 3);
+    assert_eq!(entry_cone.summary.max_distance, 2);
+    let entry_cone_actual = serde_json::to_string_pretty(&stub::entry_cone(entry_cone)).unwrap();
+    let entry_cone_expected = read_golden("capability_audit_entry_cone_job.json");
+    assert_eq!(entry_cone_actual, entry_cone_expected);
+
+    let entry_reaches = store
+        .query_entry_reaches(&config, &RepoPath::from("src/shared/api.ts"))
+        .unwrap();
+    assert_eq!(entry_reaches.summary.reaching_entry_points, 2);
+    assert_eq!(entry_reaches.summary.nearest_distance, Some(1));
+    let entry_reaches_actual =
+        serde_json::to_string_pretty(&stub::entry_reaches(entry_reaches)).unwrap();
+    let entry_reaches_expected = read_golden("capability_audit_entry_reaches_shared_api.json");
+    assert_eq!(entry_reaches_actual, entry_reaches_expected);
+
+    let entry_unreachable = store.query_entry_unreachable(&config, None).unwrap();
+    assert_eq!(entry_unreachable.total_files, 4);
+    assert_eq!(entry_unreachable.reachable_files, 4);
+    assert_eq!(entry_unreachable.unreachable_files, 0);
+    let entry_unreachable_actual =
+        serde_json::to_string_pretty(&stub::entry_unreachable(entry_unreachable)).unwrap();
+    let entry_unreachable_expected = read_golden("capability_audit_entry_unreachable.json");
+    assert_eq!(entry_unreachable_actual, entry_unreachable_expected);
 
     fs::remove_dir_all(repo).unwrap();
 }

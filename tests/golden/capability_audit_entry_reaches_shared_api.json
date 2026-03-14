@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "command": "entry-reaches",
+  "status": "ok",
+  "data": {
+    "result": {
+      "target": "src/shared/api.ts",
+      "entry_points": [
+        {
+          "file": "src/cli/main.ts",
+          "distance": 1,
+          "certainty": "exact"
+        },
+        {
+          "file": "src/workers/job.ts",
+          "distance": 1,
+          "certainty": "exact"
+        }
+      ],
+      "summary": {
+        "reaching_entry_points": 2,
+        "nearest_distance": 1
+      }
+    }
+  },
+  "warnings": []
+}

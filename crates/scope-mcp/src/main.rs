@@ -3811,6 +3811,11 @@ skip = false
         assert_eq!(diff_value["status"], "ok");
         assert_eq!(diff_value["data"]["result"]["before"]["name"], "baseline");
         assert_eq!(diff_value["data"]["result"]["after"]["name"], "baseline");
+        assert_eq!(diff_value["data"]["result"]["cycles"]["before"], 0);
+        assert_eq!(diff_value["data"]["result"]["cycles"]["after"], 0);
+        assert_eq!(diff_value["data"]["result"]["cycles"]["introduced"], 0);
+        assert_eq!(diff_value["data"]["result"]["cycles"]["resolved"], 0);
+        assert_eq!(diff_value["data"]["result"]["omitted"], json!([]));
         assert!(diff_value["data"]["result"]["summary"]["files"]
             .as_u64()
             .is_some());

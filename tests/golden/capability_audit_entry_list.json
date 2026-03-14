@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "command": "entry-list",
+  "status": "ok",
+  "data": {
+    "result": {
+      "entry_points": [
+        {
+          "file": "src/cli/main.ts",
+          "detection": "config"
+        },
+        {
+          "file": "src/workers/job.ts",
+          "detection": "config"
+        }
+      ],
+      "summary": {
+        "entry_points": 2
+      }
+    }
+  },
+  "warnings": []
+}

@@ -4758,17 +4758,17 @@ refactoring the core.
 - Test fixture repos created (empty for now, structure only)
 
 **Tasks:**
-- [ ] `cargo new --lib crates/scope-core`, `cargo new --bin crates/scope-cli`
-- [ ] Root `Cargo.toml` with all workspace dependencies pinned
-- [ ] `config.rs`: `find_repo_root()`, `ensure_scope_dir()`, `Config` struct
-- [ ] `store.rs`: `open_db()`, `run_migrations()`, `MIGRATIONS` const array, `index_meta`
-- [ ] `output.rs`: `JsonEnvelope<T>` with `schema_version`, human formatter trait
-- [ ] Error enum: `ScopeError` variants for all expected failure modes
-- [ ] `main.rs`: clap `Commands` enum with all subcommands, dispatch stubs
-- [ ] `tracing_subscriber` initialization from `RUST_LOG` env var
-- [ ] Fixture directories created: `fixtures/rust_small/`, `fixtures/ts_small/`,
+- [x] `cargo new --lib crates/scope-core`, `cargo new --bin crates/scope-cli`
+- [x] Root `Cargo.toml` with all workspace dependencies pinned
+- [x] `config.rs`: `find_repo_root()`, `ensure_scope_dir()`, `Config` struct
+- [x] `store.rs`: `open_db()`, `run_migrations()`, `MIGRATIONS` const array, `index_meta`
+- [x] `output.rs`: `JsonEnvelope<T>` with `schema_version`, human formatter trait
+- [x] Error enum: `ScopeError` variants for all expected failure modes
+- [x] `main.rs`: clap `Commands` enum with all subcommands, dispatch stubs
+- [x] `tracing_subscriber` initialization from `RUST_LOG` env var
+- [x] Fixture directories created: `fixtures/rust_small/`, `fixtures/ts_small/`,
       `fixtures/dynamic_limits/`, `fixtures/arch_violations/`
-- [ ] Migration `001_initial.sql` with complete schema from §13
+- [x] Migration `001_initial.sql` with complete schema from §13
 
 **Fixture content for `rust_small/`:**
 ```
@@ -4818,17 +4818,17 @@ The foundation of all other features — every subsequent feature builds on file
 - Parse error rate: 0% on `rust_small`, < 5% on `dynamic_limits`
 
 **Tasks:**
-- [ ] `scanner.rs`: `walk_repo(root, config) → Vec<(PathBuf, Metadata)>` using `ignore` crate
-- [ ] `adapters/mod.rs`: `Adapter` trait definition + `ExtractResult`, `ImportRecord`, `Span`
-- [ ] `adapters/rust.rs`: tree-sitter Rust grammar, extract `use` declarations
+- [x] `scanner.rs`: `walk_repo(root, config) → Vec<(PathBuf, Metadata)>` using `ignore` crate
+- [x] `adapters/mod.rs`: `Adapter` trait definition + `ExtractResult`, `ImportRecord`, `Span`
+- [x] `adapters/rust.rs`: tree-sitter Rust grammar, extract `use` declarations
       Handle: `use crate::x`, `use super::x`, `use self::x`, `pub use ...`
       Resolve: `crate::parser` → `src/parser.rs` (try `.rs` and `/mod.rs`)
-- [ ] `store.rs`: `upsert_file()`, `insert_file_edge()`, `query_deps()`, `query_reverse_deps()`
-- [ ] `graph.rs`: load `DiGraph<FileId, EdgeData>` from SQLite, BFS traversal
+- [x] `store.rs`: `upsert_file()`, `insert_file_edge()`, `query_deps()`, `query_reverse_deps()`
+- [x] `graph.rs`: load `DiGraph<FileId, EdgeData>` from SQLite, BFS traversal
 - [ ] `query.rs`: `deps_query(file, direction, transitive, depth)` function
-- [ ] CLI: `scope index` calls indexing pipeline, `scope deps` dispatches to query
+- [x] CLI: `scope index` calls indexing pipeline, `scope deps` dispatches to query
 - [ ] Golden JSON files in `tests/golden/deps_basic.json`, `deps_reverse.json`, `deps_transitive.json`
-- [ ] Integration test: full round-trip on `rust_small` fixture
+- [x] Integration test: full round-trip on `rust_small` fixture
 
 **Rust import patterns to handle:**
 ```rust
@@ -4862,17 +4862,17 @@ Enables `scope symbols`, lays groundwork for call graph and impact analysis.
 - Exported symbols flagged with `exported: true` for `pub` items at crate root
 
 **Tasks:**
-- [ ] `adapters/rust.rs`: add symbol extraction
+- [x] `adapters/rust.rs`: add symbol extraction
       Extract: `fn`, `pub fn`, `struct`, `pub struct`, `enum`, `pub enum`, `type`, `const`,
       `static`, `trait`, `pub trait`, `impl` blocks (collect method names)
-- [ ] Visibility mapping: `pub` → Public, `pub(crate)` → Package, `pub(super)` → Module,
+- [x] Visibility mapping: `pub` → Public, `pub(crate)` → Package, `pub(super)` → Module,
       no modifier → Local (for fn inside impl), Module (for fn at module root)
-- [ ] Qualname construction: `crate::` prefix + module path from file path
-- [ ] `store.rs`: `insert_symbol()`, `query_symbols(file_id, filters)`
-- [ ] CLI: `scope symbols` command with `--public-only`, `--kind` flags
-- [ ] `rust_medium` fixture: nested modules, re-exports, trait impls
-- [ ] Golden JSON tests
-- [ ] Unit tests for qualname construction, visibility mapping
+- [x] Qualname construction: `crate::` prefix + module path from file path
+- [x] `store.rs`: `insert_symbol()`, `query_symbols(file_id, filters)`
+- [x] CLI: `scope symbols` command with `--public-only`, `--kind` flags
+- [x] `rust_medium` fixture: nested modules, re-exports, trait impls
+- [x] Golden JSON tests
+- [x] Unit tests for qualname construction, visibility mapping
 
 **Symbol kinds and tree-sitter node types:**
 ```
@@ -4909,16 +4909,16 @@ resolvable in-repo symbols. Correctness here directly affects impact analysis qu
 - Method calls via trait objects labeled `heuristic` (dynamic dispatch)
 
 **Tasks:**
-- [ ] `adapters/rust.rs`: call site extraction
+- [x] `adapters/rust.rs`: call site extraction
       tree-sitter node types: `call_expression`, `method_call_expression`
       Extract callee: field `function` of `call_expression` → path expression → qualname
-- [ ] Symbol resolution: for each call site, attempt to resolve callee_name to a symbol
+- [x] Symbol resolution: for each call site, attempt to resolve callee_name to a symbol
       Same-file resolution: check symbols in same file_id
       Imported symbol resolution: check `imports` table for matching qualname prefix
       Unresolved: certainty=heuristic
-- [ ] `store.rs`: `insert_symbol_edge()`, `query_callers()`, `query_callees()`
+- [x] `store.rs`: `insert_symbol_edge()`, `query_callers()`, `query_callees()`
 - [ ] `graph.rs`: BFS on symbol_graph for transitive callers/callees
-- [ ] CLI: `scope calls`, `scope callers` commands
+- [x] CLI: `scope calls`, `scope callers` commands
 - [ ] Golden JSON for `rust_small` (simple call chains) and `rust_medium` (cross-module)
 - [ ] Test: `dynamic_limits` fixture — verify all unresolvable calls are `heuristic`
 
@@ -4967,17 +4967,17 @@ with explanations. This milestone unlocks the primary agent use case.
 - Every result node has non-empty `reason` string and correct `distance`
 
 **Tasks:**
-- [ ] `query.rs`: `impact_query(target, change_type, depth_limit)` with traversal rules
+- [x] `query.rs`: `impact_query(target, change_type, depth_limit)` with traversal rules
       per change type (see §12 for rules)
-- [ ] Reason string generation: template-based per edge kind
+- [x] Reason string generation: template-based per edge kind
       `call`: "calls {target} directly"
       `import`: "imports {file} which contains target"
       `re-export`: "re-exports {symbol} from {file}"
-- [ ] Distance tracking through BFS traversal
-- [ ] Certainty propagation: min(path_certainties)
-- [ ] `scope explain <target>`: show all edges incident to a node with certainties
-- [ ] CLI: `scope impact --change-type` dispatch, output grouping, `scope explain`
-- [ ] Golden JSON: `impact_body.json`, `impact_signature.json`, `impact_rename.json`,
+- [x] Distance tracking through BFS traversal
+- [x] Certainty propagation: min(path_certainties)
+- [x] `scope explain <target>`: show all edges incident to a node with certainties
+- [x] CLI: `scope impact --change-type` dispatch, output grouping, `scope explain`
+- [x] Golden JSON: `impact_body.json`, `impact_signature.json`, `impact_rename.json`,
       `impact_delete.json`, `impact_visibility.json`, `impact_side_effect.json`
 
 ---
@@ -5000,15 +5000,15 @@ These are the two highest-value features for agent workflows.
 - `scope why` returns "no path found" for disconnected nodes, not a crash
 
 **Tasks:**
-- [ ] `graph.rs`: `dijkstra_shortest_path(from, to, weight_fn)` using petgraph
+- [x] `graph.rs`: `dijkstra_shortest_path(from, to, weight_fn)` using petgraph
 - [ ] `graph.rs`: `yen_k_shortest_paths(from, to, k)` — Yen's algorithm over petgraph
-- [ ] `query.rs`: `why_query(from, to, max_paths)` with hop annotation
-- [ ] `query.rs`: `context_query(targets, change_type, budget)` with BFS + scoring
+- [x] `query.rs`: `why_query(from, to, max_paths)` with hop annotation
+- [x] `query.rs`: `context_query(targets, change_type, budget)` with BFS + scoring
 - [ ] `context_pack.rs`: `pack_format(context_result, budget)` with tiktoken-rs
       token counting, section-by-section budget enforcement
-- [ ] CLI: `scope why`, `scope context`, `scope pack` commands
-- [ ] Golden JSON: `why_basic.json`, `context_rename.json`
-- [ ] Test: `scope why` with disconnected nodes returns correct error
+- [x] CLI: `scope why`, `scope context`, `scope pack` commands
+- [x] Golden JSON: `why_basic.json`, `context_rename.json`
+- [x] Test: `scope why` with disconnected nodes returns correct error
 
 ---
 
@@ -5032,12 +5032,12 @@ Single-file edits should take <100ms to re-index on a normal laptop.
 - New file that was previously unresolved: its dependent files' imports now resolve
 
 **Tasks:**
-- [ ] `scanner.rs`: hash each file content during scan
-- [ ] `store.rs`: `files_with_hashes() → HashMap<PathBuf, String>` (current DB state)
-- [ ] `indexer.rs` (new): orchestrate changed/new/deleted partition
-- [ ] Verify: after re-index, all golden JSON tests still pass
+- [x] `scanner.rs`: hash each file content during scan
+- [x] `store.rs`: `files_with_hashes() → HashMap<PathBuf, String>` (current DB state)
+- [x] `indexer.rs` (new): orchestrate changed/new/deleted partition
+- [x] Verify: after re-index, all golden JSON tests still pass
 - [ ] `benches/incremental_bench.rs`: measure full vs incremental on `rust_medium`
-- [ ] `scope doctor`: add check — report % of imports unresolved, parse error files
+- [x] `scope doctor`: add check — report % of imports unresolved, parse error files
 
 ---
 
@@ -5057,18 +5057,18 @@ careful handling of barrel files, CommonJS, and dynamic imports.
 - `dynamic_limits` fixture: all dynamic imports labeled `dynamic`
 
 **Tasks:**
-- [ ] `adapters/javascript.rs`: tree-sitter-javascript grammar
+- [x] `adapters/javascript.rs`: tree-sitter-javascript grammar
       Import: `import { } from`, `import * as`, `import()`, `require()`
       Export: `export function`, `export const`, `export default`, `module.exports`
       Calls: `call_expression` nodes
 - [ ] `adapters/typescript.rs`: extends javascript with:
       `interface_declaration`, `type_alias_declaration`, `namespace_declaration`
       `tsconfig.json` path resolution (load baseUrl and paths mappings)
-- [ ] Barrel file detection: flag files where ≥50% of statements are re-exports
-- [ ] Resolution order for `./foo`: try `.ts`, `.tsx`, `.js`, `/index.ts`, `/index.js`
-- [ ] CommonJS: `require('./foo')` → Relative if string literal, Dynamic if variable
+- [x] Barrel file detection: flag files where ≥50% of statements are re-exports
+- [x] Resolution order for `./foo`: try `.ts`, `.tsx`, `.js`, `/index.ts`, `/index.js`
+- [x] CommonJS: `require('./foo')` → Relative if string literal, Dynamic if variable
 - [ ] `dynamic_limits` fixture: `require(variable)`, `import(computedPath)` → `dynamic`
-- [ ] Golden JSON tests for `ts_small` (all commands)
+- [x] Golden JSON tests for `ts_small` (all commands)
 - [ ] Integration test: `scope index` on a real TypeScript project
 
 ---
@@ -5094,19 +5094,19 @@ Enables CI integration for the first time.
 - `scope arch init` on `ts_small` generates a valid arch.toml
 
 **Tasks:**
-- [ ] `arch.rs`: parse `.scope/arch.toml` → `ArchConfig`, pattern matching via `glob` crate
-- [ ] `arch.rs`: `check_violations(graph, arch_config) → Vec<Violation>`
+- [x] `arch.rs`: parse `.scope/arch.toml` → `ArchConfig`, pattern matching via `glob` crate
+- [x] `arch.rs`: `check_violations(graph, arch_config) → Vec<Violation>`
 - [ ] `arch.rs`: `explain_file(file, arch_config) → FileArchExplanation`
 - [ ] `arch.rs`: `arch_init(repo_root) → ArchConfig` (directory name detection)
-- [ ] `stability.rs`: `compute_stability(file_graph) → Vec<StabilityResult>` (SQL queries)
-- [ ] `risk.rs`: `populate_git_churn(db, window_days)` — run `git log --name-only`
+- [x] `stability.rs`: `compute_stability(file_graph) → Vec<StabilityResult>` (SQL queries)
+- [x] `risk.rs`: `populate_git_churn(db, window_days)` — run `git log --name-only`
       Parse output: `commit_sha\n\nfile1\nfile2\n\n` format
       Store in `file_churn` table
-- [ ] `risk.rs`: `compute_risk(db, graph, window_days) → Vec<RiskResult>`
+- [x] `risk.rs`: `compute_risk(db, graph, window_days) → Vec<RiskResult>`
 - [ ] CLI: `scope arch check`, `scope arch explain`, `scope arch init`, `scope stability`, `scope risk`
-- [ ] `arch_violations` fixture with `.scope/arch.toml` and 3 deliberate violations
-- [ ] Golden JSON: `arch_violations.json`, `stability_basic.json`, `risk_basic.json`
-- [ ] Test: `scope arch check` exit codes (0 for clean, 1 for violations)
+- [x] `arch_violations` fixture with `.scope/arch.toml` and 3 deliberate violations
+- [x] Golden JSON: `arch_violations.json`, `stability_basic.json`, `risk_basic.json`
+- [x] Test: `scope arch check` exit codes (0 for clean, 1 for violations)
 
 ---
 
@@ -5130,13 +5130,13 @@ Enables CI integration for the first time.
 - `scope test-map covers src/auth/middleware.js` returns all 3 expected test files
 
 **Tasks:**
-- [ ] `surface.rs`: `extract_surface(db) → Vec<PublicSymbol>`, `diff_surfaces(A, B)`
-- [ ] `rename_plan.rs`: collect all site types, topological sort, substitution list
-- [ ] `rename_plan.rs`: `apply_rename_plan(plan, dry_run)` — atomic file rewriter
+- [x] `surface.rs`: `extract_surface(db) → Vec<PublicSymbol>`, `diff_surfaces(A, B)`
+- [x] `rename_plan.rs`: collect all site types, topological sort, substitution list
+- [x] `rename_plan.rs`: `apply_rename_plan(plan, dry_run)` — atomic file rewriter
       Write temp file, verify, rename into place
       Sort substitutions by start_byte descending before applying
-- [ ] `test_map.rs`: `detect_test_files(db, patterns)`, `build_coverage_map(graph, tests)`
-- [ ] CLI: `scope surface`, `scope surface diff`, `scope rename-plan`, `scope test-map`
+- [x] `test_map.rs`: `detect_test_files(db, patterns)`, `build_coverage_map(graph, tests)`
+- [x] CLI: `scope surface`, `scope surface diff`, `scope rename-plan`, `scope test-map`
 - [ ] `rename_fixtures` fixture with 14 known sites
 - [ ] Test: `--apply` correctly transforms all files, index still valid after rename
 
@@ -5161,15 +5161,15 @@ Enables CI integration for the first time.
 - `CLAUDE.md` tested with Claude Code agent
 
 **Tasks:**
-- [ ] `snapshot.rs`: `save_snapshot(name, git_ref, db) → Snapshot`
+- [x] `snapshot.rs`: `save_snapshot(name, git_ref, db) → Snapshot`
       Serialize: edge list to JSON, compress with zstd
       Store in `snapshots` table
-- [ ] `snapshot.rs`: `load_snapshot(name, db) → SnapshotData`
+- [x] `snapshot.rs`: `load_snapshot(name, db) → SnapshotData`
       Decompress + deserialize
 - [ ] `snapshot.rs`: `diff_snapshots(A, B, arch_config) → SnapshotDiff`
       Edge set diff, cycle re-detection, arch rule re-evaluation, stability delta
-- [ ] CLI: `scope snapshot save/list/delete`, `scope diff-snapshot`
-- [ ] `scope-mcp/src/main.rs`: stdio MCP server
+- [x] CLI: `scope snapshot save/list/delete`, `scope diff-snapshot`
+- [x] `scope-mcp/src/main.rs`: stdio MCP server
       Each tool: parse MCP tool_call JSON, dispatch to `scope-core`, return MCP result
       Tools: deps, symbols, impact, why, context, risk, arch_check, stability, cochange
 - [ ] `CLAUDE.md`: write integration guide with all recommended pre/post-edit commands
@@ -5192,12 +5192,12 @@ Enables CI integration for the first time.
 - Multi-language integration test suite (Rust + TS on same repo)
 
 **Tasks:**
-- [ ] `query.rs`: `unused_exports(db)` — symbols WHERE exported=1 AND no incoming symbol_edges
-- [ ] `graph.rs`: `find_cycles()` — Tarjan's SCC; severity = cycle length (longer = worse)
-- [ ] `query.rs`: `diff_branch(branch)` — git diff `main..branch` → changed files → impact
-- [ ] `output.rs`: `tree_format(nodes, depth)` — ASCII tree rendering
-- [ ] `query.rs`: `doctor(db, graph) → DoctorReport` — coverage stats, error files, index age
-- [ ] CLI: all above commands
+- [x] `query.rs`: `unused_exports(db)` — symbols WHERE exported=1 AND no incoming symbol_edges
+- [x] `graph.rs`: `find_cycles()` — Tarjan's SCC; severity = cycle length (longer = worse)
+- [x] `query.rs`: `diff_branch(branch)` — git diff `main..branch` → changed files → impact
+- [x] `output.rs`: `tree_format(nodes, depth)` — ASCII tree rendering
+- [x] `query.rs`: `doctor(db, graph) → DoctorReport` — coverage stats, error files, index age
+- [x] CLI: all above commands
 - [ ] `benches/`: full benchmark suite across all fixture repos
 
 ---
@@ -5213,22 +5213,22 @@ and in-memory graph simulation for refactoring validation.
 - `cochange` fixture with prepared git history
 
 **Tasks:**
-- [ ] `cochange.rs`: `build_cochange_matrix(db, window_days)`
+- [x] `cochange.rs`: `build_cochange_matrix(db, window_days)`
       SQL: build commit→files map from `file_churn`
       Compute co-occurrence counts in Rust (SQL GROUP BY is too slow for matrix)
       INSERT INTO `file_cochange`
-- [ ] `cochange.rs`: `query_cochange(file, threshold, window_days)`
+- [x] `cochange.rs`: `query_cochange(file, threshold, window_days)`
       Join with `file_edges` to classify expected/unexpected
-- [ ] `simulate.rs`: `simulate_extract(symbols, from_file, into_file, graph, db)`
+- [x] `simulate.rs`: `simulate_extract(symbols, from_file, into_file, graph, db)`
       In-memory graph clone (petgraph graph clone)
       Apply hypothetical mutations
       Cycle detection, stability recompute, arch violation check
       Return SimulateResult without any DB writes
-- [ ] Cochange fixture: `fixtures/cochange/create_git_history.sh`
+- [x] Cochange fixture: `fixtures/cochange/create_git_history.sh`
       Creates a test git repo with 50 commits, known co-change pairs
-- [ ] CLI: `scope cochange`, `scope simulate extract`
-- [ ] Golden JSON: `cochange_basic.json`, `simulate_extract.json`
-- [ ] Tests: matrix computation correctness, simulation stability delta correctness
+- [x] CLI: `scope cochange`, `scope simulate extract`
+- [x] Golden JSON: `cochange_basic.json`, `simulate_extract.json`
+- [x] Tests: matrix computation correctness, simulation stability delta correctness
 
 ---
 
@@ -5244,15 +5244,15 @@ and in-memory graph simulation for refactoring validation.
 - `dead_code` and `capability_audit` and `god_file` fixtures
 
 **Tasks:**
-- [ ] `entry.rs`: `find_entry_points(db, arch_config)`, `reachability_cone(entry, graph)`
-- [ ] `entry.rs`: `unreachable_files(all_files, entry_points, graph)`
-- [ ] `audit.rs`: `load_capabilities(db, arch_config)`, `capability_reach(cap, graph, db)`
+- [x] `entry.rs`: `find_entry_points(db, arch_config)`, `reachability_cone(entry, graph)`
+- [x] `entry.rs`: `unreachable_files(all_files, entry_points, graph)`
+- [x] `audit.rs`: `load_capabilities(db, arch_config)`, `capability_reach(cap, graph, db)`
       Reverse BFS from capability sources, cross-reference with entry points
-- [ ] `split.rs`: `symbol_caller_profiles(file, db)`, jaccard similarity matrix,
+- [x] `split.rs`: `symbol_caller_profiles(file, db)`, jaccard similarity matrix,
       greedy agglomerative clustering, module name suggestion
-- [ ] `mirror.rs`: `graph_signature(file, db)`, `pairwise_similarity(files)`
+- [x] `mirror.rs`: `graph_signature(file, db)`, `pairwise_similarity(files)`
 - [ ] Fixtures: `dead_code/`, `capability_audit/`, `god_file/`, `similarity_pairs/`
-- [ ] CLI: `scope entry`, `scope audit`, `scope split`, `scope mirror`
+- [x] CLI: `scope entry`, `scope audit`, `scope split`, `scope mirror`
 - [ ] Golden JSON for all new commands
 
 ---
@@ -5269,23 +5269,23 @@ The final milestone before v1.0 release.
 - `scope query` — composable REPL with query language
 
 **Tasks:**
-- [ ] `report.rs`: `compute_health_report(db, graph, compare_snapshot)` — aggregates all metrics
+- [x] `report.rs`: `compute_health_report(db, graph, compare_snapshot)` — aggregates all metrics
       Health score formula as specified in §16.17
 - [ ] `report.rs`: `render_markdown(report)` — full Markdown report output
-- [ ] `gate.rs`: `load_gates_toml(.scope/gates.toml)`, `evaluate_gates(gates, report)`
+- [x] `gate.rs`: `load_gates_toml(.scope/gates.toml)`, `evaluate_gates(gates, report)`
       Delta gate evaluation against comparison snapshot
       Proper exit code handling
-- [ ] `serve.rs`: Axum router with all API endpoints, `include_str!` web UI
+- [x] `serve.rs`: Axum router with all API endpoints, `include_str!` web UI
 - [ ] Web UI: single-file HTML/D3 force graph (see §16.19 for feature list)
       Build script: `npm run build` in `crates/scope-core/web_ui/` → `dist/index.html`
       Embedded via `include_str!("../web_ui/dist/index.html")` in serve.rs
-- [ ] `query_lang.rs`: lexer, recursive descent parser, AST, evaluator (see §16.20)
+- [x] `query_lang.rs`: lexer, recursive descent parser, AST, evaluator (see §16.20)
       rustyline REPL with history and tab completion
-- [ ] Non-interactive `--expr` mode
-- [ ] CLI: `scope report`, `scope gate`, `scope serve`, `scope query`
+- [x] Non-interactive `--expr` mode
+- [x] CLI: `scope report`, `scope gate`, `scope serve`, `scope query`
 - [ ] Integration tests: `tests/integration/serve_api.rs` — start server, hit all endpoints
-- [ ] Golden JSON: `report_basic.json`, `gate_violations.json`
-- [ ] Gates: test exit code 0 (pass) and 1 (fail) scenarios
+- [x] Golden JSON: `report_basic.json`, `gate_violations.json`
+- [x] Gates: test exit code 0 (pass) and 1 (fail) scenarios
 
 ---
 
@@ -5595,76 +5595,76 @@ early and get feedback before building M7–M14.
 ## 24. First execution checklist
 
 ### Foundation
-- [ ] Create Cargo workspace with `scope-core`, `scope-cli`, `scope-mcp` crate stubs
-- [ ] Add all workspace dependencies to root `Cargo.toml`
-- [ ] Set up `config.rs`: repo root detection, `.scope/` directory management
-- [ ] Set up `store.rs`: DB open, WAL mode, foreign keys, migration runner
-- [ ] Write `001_initial.sql` migration with complete schema
-- [ ] Set up `output.rs`: `JsonEnvelope<T>`, human formatter trait
-- [ ] Set up `tracing_subscriber` initialization
-- [ ] Define all `ScopeError` variants
-- [ ] Create all CLI command stubs with `clap` derive
-- [ ] Create all fixture repo directories with source files
-- [ ] Verify `scope --help` and all subcommand `--help` work
+- [x] Create Cargo workspace with `scope-core`, `scope-cli`, `scope-mcp` crate stubs
+- [x] Add all workspace dependencies to root `Cargo.toml`
+- [x] Set up `config.rs`: repo root detection, `.scope/` directory management
+- [x] Set up `store.rs`: DB open, WAL mode, foreign keys, migration runner
+- [x] Write `001_initial.sql` migration with complete schema
+- [x] Set up `output.rs`: `JsonEnvelope<T>`, human formatter trait
+- [x] Set up `tracing_subscriber` initialization
+- [x] Define all `ScopeError` variants
+- [x] Create all CLI command stubs with `clap` derive
+- [x] Create all fixture repo directories with source files
+- [x] Verify `scope --help` and all subcommand `--help` work
 
 ### Indexing (M1–M3)
-- [ ] Implement `scanner.rs`: file walker using `ignore` crate
-- [ ] Implement `adapters/mod.rs`: `Adapter` trait + all normalized types
-- [ ] Implement `adapters/rust.rs`: import extraction
-- [ ] Implement `adapters/rust.rs`: symbol extraction
-- [ ] Implement `adapters/rust.rs`: call site extraction
-- [ ] Implement `resolver.rs`: relative import path resolution
-- [ ] Implement `store.rs`: all CRUD operations for all tables
-- [ ] Implement `scope index` command (full)
-- [ ] Add blake3 hashing + incremental detection
+- [x] Implement `scanner.rs`: file walker using `ignore` crate
+- [x] Implement `adapters/mod.rs`: `Adapter` trait + all normalized types
+- [x] Implement `adapters/rust.rs`: import extraction
+- [x] Implement `adapters/rust.rs`: symbol extraction
+- [x] Implement `adapters/rust.rs`: call site extraction
+- [x] Implement `resolver.rs`: relative import path resolution
+- [x] Implement `store.rs`: all CRUD operations for all tables
+- [x] Implement `scope index` command (full)
+- [x] Add blake3 hashing + incremental detection
 
 ### Core queries (M1–M5)
 - [ ] `scope deps` / `scope deps --reverse` / `scope deps --transitive`
-- [ ] `scope symbols` with `--public-only` and `--kind` filters
+- [x] `scope symbols` with `--public-only` and `--kind` filters
 - [ ] `scope calls` / `scope callers` with `--transitive`
-- [ ] `scope impact` for all 6 change types
-- [ ] `scope explain` with full evidence trail
+- [x] `scope impact` for all 6 change types
+- [x] `scope explain` with full evidence trail
 - [ ] `scope why` with Dijkstra + Yen's k-shortest
-- [ ] `scope context` with BFS + scoring + classification
+- [x] `scope context` with BFS + scoring + classification
 - [ ] `scope pack` with tiktoken-rs budget enforcement
-- [ ] `scope doctor`
-- [ ] `scope benchmark`
+- [x] `scope doctor`
+- [x] `scope benchmark`
 
 ### TypeScript/JavaScript (M7)
-- [ ] `adapters/javascript.rs`: ES module imports/exports
-- [ ] `adapters/javascript.rs`: CommonJS require
+- [x] `adapters/javascript.rs`: ES module imports/exports
+- [x] `adapters/javascript.rs`: CommonJS require
 - [ ] `adapters/typescript.rs`: TypeScript-specific types
-- [ ] Barrel file detection and re-export tracing
+- [x] Barrel file detection and re-export tracing
 - [ ] TypeScript path resolution from `tsconfig.json`
 - [ ] Dynamic import/require detection → `dynamic` certainty
 
 ### Architectural analysis (M8–M9)
-- [ ] `arch.rs`: `arch.toml` parser + layer pattern matcher
+- [x] `arch.rs`: `arch.toml` parser + layer pattern matcher
 - [ ] `arch.rs`: violation detector + `arch check` + `arch init`
-- [ ] `stability.rs`: Martin instability metric per file
-- [ ] `risk.rs`: git log churn population + risk score formula
-- [ ] `surface.rs`: public surface extraction + diff
-- [ ] `rename_plan.rs`: topological plan + byte-offset safe `--apply`
-- [ ] `test_map.rs`: test file detection + BFS coverage map
+- [x] `stability.rs`: Martin instability metric per file
+- [x] `risk.rs`: git log churn population + risk score formula
+- [x] `surface.rs`: public surface extraction + diff
+- [x] `rename_plan.rs`: topological plan + byte-offset safe `--apply`
+- [x] `test_map.rs`: test file detection + BFS coverage map
 
 ### Snapshots and agent integration (M10)
-- [ ] `snapshot.rs`: save/load/delete/list with zstd compression
+- [x] `snapshot.rs`: save/load/delete/list with zstd compression
 - [ ] `snapshot.rs`: diff between two snapshots
-- [ ] `scope-mcp`: MCP stdio server wrapping all core commands
+- [x] `scope-mcp`: MCP stdio server wrapping all core commands
 - [ ] Write and test `CLAUDE.md` integration guide
 
 ### Round 2 features (M12–M14)
-- [ ] `cochange.rs`: co-occurrence matrix + rate computation + unexpected classification
-- [ ] `simulate.rs`: in-memory graph clone + mutation + stability projection
-- [ ] `entry.rs`: entry point detection + cone BFS + unreachable computation
-- [ ] `audit.rs`: capability tags + reverse-BFS reach + unexpected path detection
-- [ ] `split.rs`: caller profile extraction + Jaccard clustering + module naming
-- [ ] `mirror.rs`: graph signature vectors + weighted Jaccard similarity
+- [x] `cochange.rs`: co-occurrence matrix + rate computation + unexpected classification
+- [x] `simulate.rs`: in-memory graph clone + mutation + stability projection
+- [x] `entry.rs`: entry point detection + cone BFS + unreachable computation
+- [x] `audit.rs`: capability tags + reverse-BFS reach + unexpected path detection
+- [x] `split.rs`: caller profile extraction + Jaccard clustering + module naming
+- [x] `mirror.rs`: graph signature vectors + weighted Jaccard similarity
 - [ ] `report.rs`: health report aggregation + health score formula + Markdown renderer
-- [ ] `gate.rs`: gates.toml parser + metric evaluation + delta gates + exit codes
-- [ ] `serve.rs`: Axum HTTP server + all API endpoints + CORS
+- [x] `gate.rs`: gates.toml parser + metric evaluation + delta gates + exit codes
+- [x] `serve.rs`: Axum HTTP server + all API endpoints + CORS
 - [ ] Web UI: D3 force graph + all overlay modes + search (single HTML file)
-- [ ] `query_lang.rs`: lexer + recursive descent parser + evaluator
+- [x] `query_lang.rs`: lexer + recursive descent parser + evaluator
 - [ ] REPL: rustyline integration + tab completion + history
 
 ### Quality

@@ -14,13 +14,16 @@ pub mod stub;
 pub mod tracing;
 
 pub use adapters::{adapter_for_language, Adapter, RustAdapter, TsJsAdapter};
-pub use arch::{arch_check, arch_check_edges, load_arch_config, validate_gate_config};
+pub use arch::{
+    arch_check, arch_check_edges, arch_init, load_arch_config, validate_gate_config,
+};
 pub use bootstrap::{bootstrap, AppContext};
 pub use config::{BootstrapOptions, RuntimePaths};
 pub use error::{ScopeError, ScopeResult};
 pub use json::{JsonEnvelope, JsonStatus, SCHEMA_VERSION};
 pub use model::{
-    ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation,
+    ArchCheckResult, ArchConfig, ArchFileEdge, ArchInitResult, ArchLayer, ArchRule,
+    ArchViolation,
     AuditCapabilitySource, AuditEntryReachRecord, AuditResult, AuditSummary,
     BranchDiffAffectedFile, BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary,
     CallSiteRecord, CapabilityConfig, Certainty, CochangeRecord, CochangeResult, CochangeSort,
@@ -38,7 +41,7 @@ pub use model::{
     RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
     RiskRecord, RiskResult, RiskSort, RiskSummary, SimulateExtractResult, SimulateExtraction,
     SimulateFileStabilityDelta, SimulateGraphDelta, SimulateRecommendation,
-    SnapshotCentralityDelta, SnapshotDeleteResult, SnapshotDiffResult, SnapshotDiffSummary, SnapshotEdgeDelta, SnapshotEdgeRecord,
+    SnapshotCentralityDelta, SnapshotCycleDelta, SnapshotDeleteResult, SnapshotDiffResult, SnapshotDiffSummary, SnapshotEdgeDelta, SnapshotEdgeRecord,
     SnapshotFileRecord, SnapshotGraph, SnapshotListResult, SnapshotListSummary, SnapshotMetadata,
     SnapshotSaveResult, SnapshotStabilityDelta, SnapshotStoredRecord, SnapshotSymbolRecord, Span,
     SplitCluster, SplitClusterMember, SplitResult, SplitSummary, StabilityCategory,

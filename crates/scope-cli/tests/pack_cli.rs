@@ -1391,6 +1391,11 @@ fn snapshot_round_trip_and_diff_snapshot_return_live_json_envelopes() {
     assert_eq!(diff_value["status"], "ok");
     assert_eq!(diff_value["data"]["result"]["before"]["name"], "baseline");
     assert_eq!(diff_value["data"]["result"]["after"]["name"], "current");
+    assert_eq!(diff_value["data"]["result"]["cycles"]["before"], 0);
+    assert_eq!(diff_value["data"]["result"]["cycles"]["after"], 0);
+    assert_eq!(diff_value["data"]["result"]["cycles"]["introduced"], 0);
+    assert_eq!(diff_value["data"]["result"]["cycles"]["resolved"], 0);
+    assert_eq!(diff_value["data"]["result"]["omitted"], serde_json::json!([]));
     assert_eq!(diff_value["data"]["result"]["surface_diff"]["summary"]["added_count"], 1);
     assert_eq!(diff_value["data"]["result"]["surface_diff"]["summary"]["removed_count"], 1);
     assert!(diff_value["data"]["result"]["surface_diff"]["changes"]

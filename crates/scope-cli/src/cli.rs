@@ -215,10 +215,15 @@ pub struct ArchArgs {
 pub enum ArchCommand {
     /// Check layer rules against direct indexed file edges
     Check(ArchCheckArgs),
+    /// Generate a starter .scope/arch.toml from detected layer directories
+    Init(ArchInitArgs),
 }
 
 #[derive(Debug, clap::Args)]
 pub struct ArchCheckArgs {}
+
+#[derive(Debug, clap::Args)]
+pub struct ArchInitArgs {}
 
 #[derive(Debug, clap::Args)]
 pub struct AuditArgs {

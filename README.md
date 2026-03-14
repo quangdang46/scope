@@ -1,8 +1,8 @@
 # scope
 
-> Local static-analysis workspace for dependency and impact queries.
+> Local static-analysis workspace for dependency, impact, and architecture queries.
 >
-> Today, `scope` is an early Rust-first prototype: it can scan a repository, build a local SQLite index for supported Rust files, and answer machine-readable `deps`, `symbols`, `calls`, and `callers` queries. Transitive traversal, impact analysis, richer parsing, and a real MCP server are still in progress.
+> Today, `scope` is a working local static-analysis workspace with a SQLite-backed index, a broad Rust CLI, a local HTTP API/UI, and a stdio MCP wrapper. The strongest semantic indexing support today is heuristic Rust and TS/JS extraction; parser-backed resolution, some transitive traversals, and richer module resolution are still in progress.
 
 ---
 
@@ -12,20 +12,22 @@ The repository currently implements:
 
 - a Rust workspace with `scope-core`, `scope-cli`, and `scope-mcp`
 - bootstrap logic for discovering the repo root and creating `.scope/index.db`
-- SQLite initialization, schema version tracking, and persisted file/symbol/call-edge records
-- ignore-aware repository scanning for supported source file types
-- heuristic Rust extraction for modules, imports, symbols, visibility, and direct call sites
-- machine-readable CLI queries for direct file dependencies, symbol inventory, and direct callers/callees
-- fixture-based golden tests for current query behavior
+- SQLite initialization, schema version tracking, and persisted file/import/symbol/symbol-edge/churn/snapshot records
+- ignore-aware repository scanning across Rust, TS/JS, Python, Ruby, and Go file types
+- heuristic semantic extraction for Rust and TS/JS imports, exports, symbols, visibility, and direct call sites
+- machine-readable CLI commands for dependency, symbol, impact, architecture, report/gate, diff, and simulation workflows
+- a local HTTP `/api/*` server with a minimal embedded UI
+- a stdio MCP tool server exposing the same core store/query surface to external clients
+- fixture-based golden tests plus CLI integration coverage for the current contract
 
 The repository does **not** yet implement:
 
 - tree-sitter or other AST-backed parsing
-- transitive call traversal
-- impact or explain traversal
-- non-Rust indexing adapters in the CLI path
-- persisted parse diagnostics / export records for queries
-- a working MCP server
+- true transitive `calls` / `callers` traversal
+- true transitive `deps` traversal behind the current flag surface
+- semantic extraction adapters for Python, Ruby, or Go (those file types are scanned but not yet indexed deeply)
+- tsconfig path mapping and other richer module-resolution cases
+- the planned query-REPL ergonomics such as history, completion, and saved-query workflows
 
 ## The Goal
 
@@ -51,16 +53,16 @@ The intended architecture is:
 
 2. Index source files
    └── walk source files with ignore-aware scanning
-   └── extract imports / symbols / call sites from supported Rust files
-   └── persist file, symbol, and direct call-edge data
+   └── extract imports / exports / symbols / call sites from supported Rust and TS/JS files
+   └── persist file, symbol, call-edge, and related analysis data
 
 3. Query the graph
-   └── deps / symbols / direct calls / direct callers work today
-   └── impact / explain / transitive traversal remain planned
-   └── return structured JSON for agents and tooling
+   └── deps / symbols / calls / callers / impact / explain / why / context work today
+   └── report / gate / serve / MCP reuse the same core store queries
+   └── some transitive traversals and richer resolution remain planned
 ```
 
-The current codebase has working stage-2 and early stage-3 slices for Rust, but larger graph traversal and explanation features are still scaffolded.
+The current codebase has working stage-2 and stage-3 slices across the CLI, local HTTP server, and stdio MCP wrapper, but parser fidelity and several transitive/resolution features are still incomplete.
 
 ## Current Tech Stack
 
@@ -88,33 +90,43 @@ The current codebase has working stage-2 and early stage-3 slices for Rust, but 
 scope/
 ├── crates/
 │   ├── scope-cli/    # CLI entrypoint
-│   ├── scope-core/   # shared models, bootstrap, storage, JSON contracts
-│   └── scope-mcp/    # future MCP server (currently stubbed)
+│   ├── scope-core/   # shared models, bootstrap, storage, query/report/serve logic
+│   └── scope-mcp/    # stdio MCP/JSON-RPC wrapper over scope-core
 └── .scope/
-    └── index.db      # local SQLite database
+    └── index.db      # local SQLite index database
 ```
 
 ## Command Surface
 
-The current CLI exposes these commands:
+The current CLI exposes these command families:
 
 ```bash
 scope index [PATH]
-scope deps <file>
-scope symbols <file>
-scope calls <symbol>
-scope callers <symbol>
+scope deps <file> [--reverse] [--transitive] [--depth N]
+scope symbols <file> [--public-only] [--kind ...]
+scope calls <symbol> [--transitive]
+scope callers <symbol> [--transitive]
 scope impact <target> --change-type <body|signature|rename|delete|visibility|side-effect>
+scope explain <target> [--to ...] [--depth N]
+scope why <from> <to> [--depth N]
+scope context --target <symbol-or-file>... --change-type <...> [--budget N]
+scope pack <target> --change-type <...> --budget <N>
+scope arch check | scope audit --capability <name> | scope surface [diff]
+scope stability | risk | cochange | test-map | rename-plan | snapshot | diff-snapshot
+scope simulate extract ... | report | gate | unused | cycles | diff | tree | split | mirror | entry
+scope serve [--port 7777] [--no-ui]
+scope query [--expr ...]
+scope doctor [--fix] | benchmark [--fixture ...]
 ```
 
 Right now:
 
-- `scope index` scans the repo, indexes supported Rust files, and refreshes direct call edges in `.scope/index.db`
-- `scope deps` returns direct forward and reverse file dependencies from the SQLite index
-- `scope symbols` returns indexed symbols, with `--public-only` and `--kind` filtering
-- `scope calls` and `scope callers` return direct, conservative call edges for supported Rust cases
-- `scope impact`, `scope explain`, and `scope doctor` return structured JSON backed by the current index
-- `scope benchmark` benchmarks full versus incremental indexing on an isolated writable copy and returns timing summary JSON
+- `scope index` scans supported files, indexes Rust and TS/JS extracts, and refreshes dependency/call edges in `.scope/index.db`
+- `scope deps`, `scope symbols`, `scope calls`, `scope callers`, `scope impact`, `scope explain`, `scope why`, `scope context`, and `scope pack` return structured envelopes from the SQLite-backed graph
+- architecture, audit, surface, risk/stability/cochange, test-map, snapshot/diff, simulation, report/gate, unused/cycles, entry, tree/split/mirror, doctor, and benchmark commands are all wired through the CLI today
+- `scope serve` exposes the same core analyses through `/api/*` endpoints with a minimal embedded UI
+- `scope query` supports both single-expression execution and a basic interactive REPL over the query language
+- `scope-mcp` exposes core operations as stdio MCP tools backed by the same store/query layer
 
 ## Agent Usage Patterns
 
@@ -168,10 +180,13 @@ Compact mode is intended for agent loops and transport efficiency, not for human
 
 ### Current limitations for agents
 
-- `scope` is currently Rust-first in the main CLI path
-- several traversal-oriented commands still return stub JSON while implementation is in progress
+- semantic extraction is strongest today for Rust and TS/JS; Python, Ruby, and Go are currently scan-only
+- transitive `calls` / `callers` still return stub envelopes, and `deps --transitive` does not yet walk a real closure
+- parsing and resolution are still heuristic and may miss language-specific edge cases
+- TypeScript module resolution is conservative and does not yet cover `tsconfig` path mapping
+- the query REPL exists, but it does not yet implement the planned history/completion/save-load ergonomics
 - results are static approximations and may omit dynamic behavior
-- `scope-mcp` now provides an early MCP/stdIO wrapper over `scope-core`, but the CLI remains the more mature integration surface today
+- `scope-mcp` is functional today, but the CLI remains the most mature integration surface
 
 ## Example Current Output
 
@@ -247,17 +262,19 @@ For local development:
 cargo run -p scope-cli -- --help
 cargo run -p scope-cli -- index .
 cargo run -p scope-cli -- --compact deps src/lib.rs
+cargo run -p scope-cli -- report
+cargo run -p scope-cli -- serve --port 7777
+cargo run -p scope-mcp
 ```
 
 ## Near-Term Roadmap
 
-- strengthen Rust extraction with parser-backed logic instead of line heuristics
-- implement transitive traversal for calls / callers / impact / explain
-- persist additional analysis data such as exports and parse diagnostics
-- add non-Rust adapters and wire them into the indexing pipeline
-- replace stub MCP output with a real MCP integration
-- keep JSON contracts stable for agent consumption
-- add compact JSON response shaping for token-sensitive agent workflows
+- replace heuristic Rust and TS/JS extraction with parser-backed logic
+- wire true transitive traversal for `deps`, `calls`, and `callers`
+- persist richer diagnostics/export data and tighten certainty reporting
+- add semantic adapters beyond Rust and TS/JS, including better TypeScript module resolution
+- improve the query REPL with history, completion, and saved-query workflows
+- deepen MCP polish/coverage while keeping JSON contracts stable for agent consumption
 
 ## Scope Boundaries
 
@@ -269,7 +286,7 @@ It should not be described as:
 - a guarantee that a change is safe
 - a substitute for tests, builds, or human review
 
-When the engine lands, results should be interpreted as structured static evidence with explicit certainty levels.
+Results should be interpreted as structured static evidence with explicit certainty levels.
 
 ## Intended Certainty Model
 

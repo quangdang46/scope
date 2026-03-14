@@ -1,11 +1,38 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use glob::Pattern;
+use serde::Serialize;
 
 use crate::{
-    ArchCheckResult, ArchConfig, ArchFileEdge, ArchLayer, ArchRule, ArchViolation, GateConfig,
-    GateMetric, RepoPath, ScopeError, ScopeResult, Store, TestConfig,
+    ArchCheckResult, ArchConfig, ArchFileEdge, ArchInitResult, ArchLayer, ArchRule,
+    ArchViolation, GateConfig, GateMetric, RepoPath, ScopeError, ScopeResult, Store, TestConfig,
 };
+
+pub const ARCH_INIT_MESSAGE: &str =
+    "Generated .scope/arch.toml — review and customize before using in CI";
+
+const ARCH_INIT_MAX_DEPTH: usize = 2;
+const ARCH_INIT_SKIP_DIRS: &[&str] = &[".git", ".scope", "node_modules", "target"];
+const ARCH_INIT_LAYER_ALIASES: &[(&str, &[&str])] = &[
+    ("routes", &["routes", "controllers", "views"]),
+    ("middleware", &["middleware"]),
+    ("services", &["services", "use-cases"]),
+    ("models", &["models", "entities", "domain"]),
+    ("utils", &["utils", "helpers", "lib"]),
+    ("config", &["config"]),
+];
+
+#[derive(Debug, Serialize)]
+struct StarterArchConfig {
+    #[serde(rename = "layer", skip_serializing_if = "Vec::is_empty")]
+    layers: Vec<ArchLayer>,
+    #[serde(rename = "rule", skip_serializing_if = "Vec::is_empty")]
+    rules: Vec<ArchRule>,
+}
 
 pub fn load_arch_config(repo_root: &Path) -> ScopeResult<ArchConfig> {
     let config_path = repo_root.join(".scope/arch.toml");
@@ -31,6 +58,44 @@ pub fn arch_check(store: &Store, config: &ArchConfig) -> ScopeResult<ArchCheckRe
         checked_edges: edges.len(),
         checked_layered_edges,
         violations,
+    })
+}
+
+pub fn arch_init(repo_root: &Path) -> ScopeResult<ArchInitResult> {
+    let layers = detect_arch_init_layers(repo_root)?;
+    if layers.is_empty() {
+        return Err(ScopeError::InvalidInput(
+            "scope arch init could not detect any common layer directories".to_string(),
+        ));
+    }
+
+    let rules = build_arch_init_rules(&layers);
+    let config = ArchConfig {
+        layers: layers.clone(),
+        rules: rules.clone(),
+        ..ArchConfig::default()
+    };
+    validate_arch_config(&config)?;
+
+    let config_path = repo_root.join(".scope/arch.toml");
+    if config_path.exists() {
+        return Err(ScopeError::InvalidInput(format!(
+            "arch config already exists at {}",
+            config_path.display()
+        )));
+    }
+
+    let source = render_arch_init_toml(&layers, &rules)?;
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| ScopeError::io(parent, error))?;
+    }
+    fs::write(&config_path, source).map_err(|error| ScopeError::io(&config_path, error))?;
+
+    Ok(ArchInitResult {
+        config_path: RepoPath::from(".scope/arch.toml"),
+        layers,
+        rules,
+        message: ARCH_INIT_MESSAGE.to_string(),
     })
 }
 
@@ -84,6 +149,130 @@ pub fn arch_check_edges(
     });
 
     Ok((checked_layered_edges, violations))
+}
+
+fn detect_arch_init_layers(repo_root: &Path) -> ScopeResult<Vec<ArchLayer>> {
+    let mut matched_paths = Vec::new();
+    collect_arch_init_layer_dirs(repo_root, repo_root, 0, &mut matched_paths)?;
+    matched_paths.sort();
+    matched_paths.dedup();
+
+    let mut layers = Vec::new();
+    let mut seen_names = HashSet::new();
+    for (name, pattern) in matched_paths {
+        if !seen_names.insert(name.clone()) {
+            continue;
+        }
+        layers.push(ArchLayer {
+            name,
+            pattern,
+            description: None,
+        });
+    }
+    Ok(layers)
+}
+
+fn collect_arch_init_layer_dirs(
+    repo_root: &Path,
+    current: &Path,
+    depth: usize,
+    matched_paths: &mut Vec<(String, String)>,
+) -> ScopeResult<()> {
+    if depth > ARCH_INIT_MAX_DEPTH {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(current).map_err(|error| ScopeError::io(current, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| ScopeError::io(current, error))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| ScopeError::io(&path, error))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if ARCH_INIT_SKIP_DIRS.iter().any(|skip| skip == &name) {
+            continue;
+        }
+
+        if let Some(layer_name) = canonical_arch_layer_name(name) {
+            let relative = path.strip_prefix(repo_root).map_err(|error| {
+                ScopeError::Internal(format!(
+                    "failed to derive relative layer path for {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            matched_paths.push((layer_name.to_string(), format!("{relative}/**")));
+        }
+
+        collect_arch_init_layer_dirs(repo_root, &path, depth + 1, matched_paths)?;
+    }
+
+    Ok(())
+}
+
+fn canonical_arch_layer_name(name: &str) -> Option<&'static str> {
+    ARCH_INIT_LAYER_ALIASES.iter().find_map(|(canonical, aliases)| {
+        aliases
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(name))
+            .then_some(*canonical)
+    })
+}
+
+fn build_arch_init_rules(layers: &[ArchLayer]) -> Vec<ArchRule> {
+    let layer_names: HashSet<&str> = layers.iter().map(|layer| layer.name.as_str()).collect();
+    let mut rules = Vec::new();
+
+    if layer_names.contains("services") && layer_names.contains("routes") {
+        rules.push(ArchRule {
+            from: "services".to_string(),
+            may_not_import: vec!["routes".to_string()],
+            message: Some("services must not import routes".to_string()),
+        });
+    }
+
+    let model_targets: Vec<String> = ["services", "routes"]
+        .into_iter()
+        .filter(|name| layer_names.contains(*name))
+        .map(str::to_string)
+        .collect();
+    if layer_names.contains("models") && !model_targets.is_empty() {
+        rules.push(ArchRule {
+            from: "models".to_string(),
+            may_not_import: model_targets,
+            message: Some("models must not import services or routes".to_string()),
+        });
+    }
+
+    let utils_targets: Vec<String> = ["models", "services", "routes"]
+        .into_iter()
+        .filter(|name| layer_names.contains(*name))
+        .map(str::to_string)
+        .collect();
+    if layer_names.contains("utils") && !utils_targets.is_empty() {
+        rules.push(ArchRule {
+            from: "utils".to_string(),
+            may_not_import: utils_targets,
+            message: Some("utils must stay infrastructure-only".to_string()),
+        });
+    }
+
+    rules
+}
+
+fn render_arch_init_toml(layers: &[ArchLayer], rules: &[ArchRule]) -> ScopeResult<String> {
+    toml::to_string_pretty(&StarterArchConfig {
+        layers: layers.to_vec(),
+        rules: rules.to_vec(),
+    })
+    .map_err(|error| ScopeError::Serialization(error.to_string()))
 }
 
 fn validate_arch_config(config: &ArchConfig) -> ScopeResult<()> {

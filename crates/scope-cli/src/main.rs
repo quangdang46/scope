@@ -15,8 +15,8 @@ use cli::{
     SimulateCommand, SnapshotCommand, StabilitySortArg, SurfaceCommand, TestMapCommand,
 };
 use scope_core::{
-    adapter_for_language, arch_check, load_arch_config, scan_repo, BootstrapOptions, CochangeSort,
-    CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind, Verbosity,
+    adapter_for_language, arch_check, arch_init, load_arch_config, scan_repo, BootstrapOptions,
+    CochangeSort, CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind, Verbosity,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -270,6 +270,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                         exit_code = 1;
                     }
                     serialize_output(&scope_core::stub::arch_check(result), compact)
+                }
+                ArchCommand::Init(_) => {
+                    let result = arch_init(&context.paths.repo_root)?;
+                    serialize_output(&scope_core::stub::arch_init(result), compact)
                 }
             }
         }
