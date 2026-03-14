@@ -684,30 +684,57 @@ fn calls_and_callers_commands_return_live_json_for_direct_mode() {
 }
 
 #[test]
-fn calls_and_callers_commands_report_stub_status_for_transitive_mode() {
+fn calls_and_callers_commands_return_live_json_for_transitive_mode() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);
     assert_eq!(index_output.status.code(), Some(0));
 
-    let calls_output = run_scope(&repo, &["calls", "lib::run", "--transitive"]);
+    let calls_output = run_scope(&repo, &["calls", "lib::greet", "--transitive"]);
     assert_eq!(calls_output.status.code(), Some(0));
     let calls_value: serde_json::Value =
         serde_json::from_slice(&calls_output.stdout).expect("stdout should be JSON");
     assert_eq!(calls_value["command"], "calls");
-    assert_eq!(calls_value["status"], "stub");
-    assert_eq!(calls_value["data"]["symbol"], "lib::run");
+    assert_eq!(calls_value["status"], "ok");
+    assert_eq!(calls_value["data"]["symbol"], "lib::greet");
     assert_eq!(calls_value["data"]["transitive"], true);
-    assert!(calls_value["warnings"].as_array().is_some_and(|items| !items.is_empty()));
+    assert!(calls_value["warnings"].as_array().is_some_and(|items| items.is_empty()));
+    let calls_traversals = calls_value["data"]["traversals"]
+        .as_array()
+        .expect("transitive calls should return an array");
+    assert!(calls_traversals.iter().any(|item| {
+        item["qualname"].as_str() == Some("parser::parse") && item["distance"].as_u64() == Some(1)
+    }));
+    assert!(calls_traversals.iter().any(|item| {
+        item["qualname"].as_str() == Some("utils::format_output")
+            && item["distance"].as_u64() == Some(1)
+    }));
+    assert!(calls_traversals.iter().any(|item| {
+        item["qualname"].as_str() == Some("parser::tokenize")
+            && item["distance"].as_u64() == Some(2)
+    }));
 
     let callers_output = run_scope(&repo, &["callers", "parser::parse", "--transitive"]);
     assert_eq!(callers_output.status.code(), Some(0));
     let callers_value: serde_json::Value =
         serde_json::from_slice(&callers_output.stdout).expect("stdout should be JSON");
     assert_eq!(callers_value["command"], "callers");
-    assert_eq!(callers_value["status"], "stub");
+    assert_eq!(callers_value["status"], "ok");
     assert_eq!(callers_value["data"]["symbol"], "parser::parse");
     assert_eq!(callers_value["data"]["transitive"], true);
-    assert!(callers_value["warnings"].as_array().is_some_and(|items| !items.is_empty()));
+    assert!(callers_value["warnings"].as_array().is_some_and(|items| items.is_empty()));
+    let callers_traversals = callers_value["data"]["traversals"]
+        .as_array()
+        .expect("transitive callers should return an array");
+    assert!(callers_traversals.iter().any(|item| {
+        item["qualname"].as_str() == Some("lib::greet") && item["distance"].as_u64() == Some(1)
+    }));
+    assert!(callers_traversals.iter().any(|item| {
+        item["qualname"].as_str() == Some("resolver::resolve")
+            && item["distance"].as_u64() == Some(1)
+    }));
+    assert!(callers_traversals.iter().any(|item| {
+        item["qualname"].as_str() == Some("main::main") && item["distance"].as_u64() == Some(2)
+    }));
 
     fs::remove_dir_all(repo).unwrap();
 }
