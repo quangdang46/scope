@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "command": "audit",
+  "status": "ok",
+  "data": {
+    "result": {
+      "capability": "network",
+      "capability_sources": [
+        {
+          "kind": "file_pattern",
+          "value": "src/http/client.ts"
+        },
+        {
+          "kind": "symbol",
+          "value": "fetch"
+        }
+      ],
+      "entry_points": [
+        {
+          "file": "src/cli/main.ts",
+          "detection": "config"
+        },
+        {
+          "file": "src/workers/job.ts",
+          "detection": "config"
+        }
+      ],
+      "reaches": [
+        {
+          "entry_point": "src/workers/job.ts",
+          "distance": 2,
+          "certainty": "exact",
+          "expected": true,
+          "path": [
+            "src/workers/job.ts",
+            "src/shared/api.ts",
+            "src/http/client.ts"
+          ]
+        },
+        {
+          "entry_point": "src/cli/main.ts",
+          "distance": 2,
+          "certainty": "exact",
+          "expected": false,
+          "path": [
+            "src/cli/main.ts",
+            "src/shared/api.ts",
+            "src/http/client.ts"
+          ]
+        }
+      ],
+      "summary": {
+        "capability_sources": 1,
+        "reaching_entry_points": 2,
+        "expected_entry_points": 1,
+        "unexpected_entry_points": 1
+      }
+    }
+  },
+  "warnings": []
+}

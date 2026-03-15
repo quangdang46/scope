@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "command": "mirror",
+  "status": "ok",
+  "data": {
+    "result": {
+      "target": "src/lib.rs",
+      "other": "src/parser.rs",
+      "threshold": 0,
+      "top": null,
+      "target_signature": {
+        "language": "rust",
+        "imports": [],
+        "exported_symbol_kinds": [
+          "function",
+          "function",
+          "module",
+          "module",
+          "module"
+        ],
+        "inbound_neighbor_count": 0,
+        "outbound_neighbor_count": 0,
+        "exported_symbol_count": 5
+      },
+      "other_signature": {
+        "language": "rust",
+        "imports": [],
+        "exported_symbol_kinds": [
+          "function"
+        ],
+        "inbound_neighbor_count": 1,
+        "outbound_neighbor_count": 0,
+        "exported_symbol_count": 1
+      },
+      "similarity_score": 0.76,
+      "matches": [
+        {
+          "path": "src/parser.rs",
+          "score": 0.76,
+          "normalized_score": 76,
+          "reasons": [
+            "shared import profile 100%",
+            "shared exported symbol kinds 50%",
+            "neighbor counts 0/0 vs 1/0",
+            "exported symbol counts 5 vs 1"
+          ]
+        }
+      ],
+      "summary": {
+        "candidates_considered": 1,
+        "matches_returned": 1,
+        "threshold": 0
+      }
+    }
+  },
+  "warnings": []
+}

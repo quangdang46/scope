@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "command": "split",
+  "status": "ok",
+  "data": {
+    "result": {
+      "target": "src/lib.rs",
+      "requested_clusters": 2,
+      "warnings": [],
+      "clusters": [
+        {
+          "id": 1,
+          "members": [
+            {
+              "qualname": "lib::greet",
+              "name": "greet",
+              "kind": "function",
+              "exported": true,
+              "inbound_calls": 0,
+              "inbound_files": 0,
+              "line": 5
+            }
+          ],
+          "cohesion_score": 1.0,
+          "suggested_name": "cluster_1_functions",
+          "rationale": "symbols share little external call evidence and are grouped by local structure"
+        },
+        {
+          "id": 2,
+          "members": [
+            {
+              "qualname": "lib::farewell",
+              "name": "farewell",
+              "kind": "function",
+              "exported": true,
+              "inbound_calls": 0,
+              "inbound_files": 0,
+              "line": 10
+            }
+          ],
+          "cohesion_score": 1.0,
+          "suggested_name": "cluster_2_functions",
+          "rationale": "symbols share little external call evidence and are grouped by local structure"
+        }
+      ],
+      "summary": {
+        "target_symbols": 2,
+        "exported_symbols": 2,
+        "clusters": 2,
+        "isolated_symbols": 2
+      }
+    }
+  },
+  "warnings": []
+}
