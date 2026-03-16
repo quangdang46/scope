@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::{RepoPath, ScopeError, ScopeResult, Store, SymbolRecord, TraversalRecord};
+use crate::{
+    RepoPath, ScopeError, ScopeResult, Store, SymbolKind, SymbolRecord, TraversalRecord,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuerySource {
@@ -17,7 +19,11 @@ pub enum QuerySource {
 pub enum QueryStep {
     Deps,
     Reverse,
-    Symbols,
+    DepsTransitive { reverse: bool, depth: Option<usize> },
+    Symbols {
+        public_only: bool,
+        kind: Option<SymbolKind>,
+    },
     Callers,
     CallersTransitive,
     Callees,
@@ -59,6 +65,10 @@ impl QuerySession {
         names
     }
 }
+
+const SUPPORTED_QUERY_STEPS: &str = ".deps, .reverse, .deps_transitive, .reverse_transitive, .symbols, .callers, .callees, unique, and count; plus .callers_transitive and .callees_transitive";
+const SUPPORTED_QUERY_SYMBOL_KINDS: &str =
+    "function, struct, enum, trait, method, module, constant, and variable";
 
 pub fn execute_query(
     input: &str,
@@ -189,17 +199,220 @@ fn parse_source(input: &str) -> ScopeResult<QuerySource> {
 
 fn parse_step(input: &str) -> ScopeResult<QueryStep> {
     match input {
-        ".deps" => Ok(QueryStep::Deps),
-        ".reverse" => Ok(QueryStep::Reverse),
-        ".symbols" => Ok(QueryStep::Symbols),
-        ".callers" => Ok(QueryStep::Callers),
-        ".callers_transitive" => Ok(QueryStep::CallersTransitive),
-        ".callees" => Ok(QueryStep::Callees),
-        ".callees_transitive" => Ok(QueryStep::CalleesTransitive),
-        "unique" | ".unique" => Ok(QueryStep::Unique),
-        "count" | ".count" => Ok(QueryStep::Count),
+        ".deps" => return Ok(QueryStep::Deps),
+        ".reverse" => return Ok(QueryStep::Reverse),
+        ".deps_transitive" => {
+            return Ok(QueryStep::DepsTransitive {
+                reverse: false,
+                depth: None,
+            })
+        }
+        ".reverse_transitive" => {
+            return Ok(QueryStep::DepsTransitive {
+                reverse: true,
+                depth: None,
+            })
+        }
+        ".symbols" => {
+            return Ok(QueryStep::Symbols {
+                public_only: false,
+                kind: None,
+            })
+        }
+        ".callers" => return Ok(QueryStep::Callers),
+        ".callers_transitive" => return Ok(QueryStep::CallersTransitive),
+        ".callees" => return Ok(QueryStep::Callees),
+        ".callees_transitive" => return Ok(QueryStep::CalleesTransitive),
+        "unique" | ".unique" => return Ok(QueryStep::Unique),
+        "count" | ".count" => return Ok(QueryStep::Count),
+        _ => {}
+    }
+
+    if let Some(args) = step_call_args(input, ".deps_transitive")? {
+        return parse_transitive_dependency_step(args, ".deps_transitive", false);
+    }
+    if let Some(args) = step_call_args(input, ".reverse_transitive")? {
+        return parse_transitive_dependency_step(args, ".reverse_transitive", true);
+    }
+    if let Some(args) = step_call_args(input, ".symbols")? {
+        return parse_symbols_step(args);
+    }
+
+    Err(ScopeError::InvalidInput(format!(
+        "unsupported query step `{input}`; supported steps are {SUPPORTED_QUERY_STEPS}"
+    )))
+}
+
+fn step_call_args<'a>(input: &'a str, name: &str) -> ScopeResult<Option<&'a str>> {
+    let Some(rest) = input.strip_prefix(name) else {
+        return Ok(None);
+    };
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    if !(rest.starts_with('(') && rest.ends_with(')')) {
+        return Err(ScopeError::InvalidInput(format!(
+            "query step `{input}` has malformed arguments"
+        )));
+    }
+    Ok(Some(rest[1..rest.len() - 1].trim()))
+}
+
+fn parse_transitive_dependency_step(
+    args: &str,
+    step_name: &str,
+    reverse: bool,
+) -> ScopeResult<QueryStep> {
+    if args.is_empty() {
+        return Ok(QueryStep::DepsTransitive {
+            reverse,
+            depth: None,
+        });
+    }
+
+    let depth = args.parse::<usize>().map_err(|_| {
+        ScopeError::InvalidInput(format!(
+            "query step `{step_name}` expects an optional non-negative integer depth"
+        ))
+    })?;
+
+    Ok(QueryStep::DepsTransitive {
+        reverse,
+        depth: Some(depth),
+    })
+}
+
+fn parse_symbols_step(args: &str) -> ScopeResult<QueryStep> {
+    let mut public_only = false;
+    let mut kind = None;
+    let mut seen_public_only = false;
+    let mut seen_kind = false;
+
+    for arg in split_step_args(args)? {
+        let (name, value) = arg.split_once('=').ok_or_else(|| {
+            ScopeError::InvalidInput(
+                "query step `.symbols` arguments must use `name=value` syntax".to_string(),
+            )
+        })?;
+        match name.trim() {
+            "public_only" => {
+                if seen_public_only {
+                    return Err(ScopeError::InvalidInput(
+                        "query step `.symbols` received duplicate `public_only` arguments"
+                            .to_string(),
+                    ));
+                }
+                public_only = parse_bool_arg(value.trim(), ".symbols", "public_only")?;
+                seen_public_only = true;
+            }
+            "kind" => {
+                if seen_kind {
+                    return Err(ScopeError::InvalidInput(
+                        "query step `.symbols` received duplicate `kind` arguments".to_string(),
+                    ));
+                }
+                kind = Some(parse_symbol_kind_arg(value.trim())?);
+                seen_kind = true;
+            }
+            other => {
+                return Err(ScopeError::InvalidInput(format!(
+                    "unsupported query step `.symbols` argument `{other}`; supported arguments are `public_only` and `kind`"
+                )));
+            }
+        }
+    }
+
+    Ok(QueryStep::Symbols { public_only, kind })
+}
+
+fn split_step_args(raw: &str) -> ScopeResult<Vec<String>> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if in_quotes && escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_quotes => {
+                current.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            ',' if !in_quotes => {
+                let arg = current.trim();
+                if arg.is_empty() {
+                    return Err(ScopeError::InvalidInput(
+                        "query step arguments cannot contain empty entries".to_string(),
+                    ));
+                }
+                args.push(arg.to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if in_quotes {
+        return Err(ScopeError::InvalidInput(
+            "query step arguments contain an unterminated quoted string".to_string(),
+        ));
+    }
+
+    let tail = current.trim();
+    if tail.is_empty() {
+        return Err(ScopeError::InvalidInput(
+            "query step arguments cannot contain empty entries".to_string(),
+        ));
+    }
+    args.push(tail.to_string());
+    Ok(args)
+}
+
+fn parse_bool_arg(raw: &str, step_name: &str, arg_name: &str) -> ScopeResult<bool> {
+    match raw {
+        "true" => Ok(true),
+        "false" => Ok(false),
         _ => Err(ScopeError::InvalidInput(format!(
-            "unsupported query step `{input}`; supported steps are .deps, .reverse, .symbols, .callers, .callees, unique, and count; plus .callers_transitive and .callees_transitive"
+            "query step `{step_name}` argument `{arg_name}` must be `true` or `false`"
+        ))),
+    }
+}
+
+fn parse_symbol_kind_arg(raw: &str) -> ScopeResult<SymbolKind> {
+    if !(raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2) {
+        return Err(ScopeError::InvalidInput(
+            "query step `.symbols` argument `kind` must use a quoted string".to_string(),
+        ));
+    }
+    let value = decode_quoted_selector(&raw[1..raw.len() - 1])?;
+    parse_query_symbol_kind(&value)
+}
+
+fn parse_query_symbol_kind(value: &str) -> ScopeResult<SymbolKind> {
+    match value {
+        "function" => Ok(SymbolKind::Function),
+        "struct" => Ok(SymbolKind::Struct),
+        "enum" => Ok(SymbolKind::Enum),
+        "trait" => Ok(SymbolKind::Trait),
+        "method" => Ok(SymbolKind::Method),
+        "module" => Ok(SymbolKind::Module),
+        "constant" => Ok(SymbolKind::Constant),
+        "variable" => Ok(SymbolKind::Variable),
+        _ => Err(ScopeError::InvalidInput(format!(
+            "unsupported query symbol kind `{value}`; supported kinds are {SUPPORTED_QUERY_SYMBOL_KINDS}"
         ))),
     }
 }
@@ -351,11 +564,29 @@ fn apply_step(value: QueryValue, step: &QueryStep, store: &Store) -> ScopeResult
             }
             Ok(QueryValue::Files(next))
         }
-        QueryStep::Symbols => {
+        QueryStep::DepsTransitive { reverse, depth } => {
+            let step_name = if *reverse {
+                ".reverse_transitive"
+            } else {
+                ".deps_transitive"
+            };
+            let files = file_paths(&value, step_name)?;
+            let mut next = Vec::new();
+            for path in files {
+                next.extend(
+                    store
+                        .query_deps_transitive(&path, *reverse, *depth)?
+                        .into_iter()
+                        .map(|record| record.path),
+                );
+            }
+            Ok(QueryValue::Files(next))
+        }
+        QueryStep::Symbols { public_only, kind } => {
             let files = file_paths(&value, ".symbols")?;
             let mut next = Vec::new();
             for path in files {
-                next.extend(store.query_symbols(&path, false, None)?);
+                next.extend(store.query_symbols(&path, *public_only, kind.clone())?);
             }
             Ok(QueryValue::Symbols(next))
         }
@@ -553,6 +784,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_transitive_dependency_steps() {
+        assert_eq!(
+            parse_query_statement("file \"src/index.ts\" | .deps_transitive | .reverse_transitive(2)")
+                .unwrap(),
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::File(RepoPath::from("src/index.ts")),
+                steps: vec![
+                    QueryStep::DepsTransitive {
+                        reverse: false,
+                        depth: None,
+                    },
+                    QueryStep::DepsTransitive {
+                        reverse: true,
+                        depth: Some(2),
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_symbols_step_filters() {
+        assert_eq!(
+            parse_query_statement(
+                "file \"src/parser.rs\" | .symbols(public_only=true, kind=\"function\")"
+            )
+            .unwrap(),
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::File(RepoPath::from("src/parser.rs")),
+                steps: vec![QueryStep::Symbols {
+                    public_only: true,
+                    kind: Some(SymbolKind::Function),
+                }],
+            })
+        );
+    }
+
+    #[test]
     fn binding_names_are_sorted() {
         let mut session = QuerySession::default();
         session
@@ -580,6 +849,41 @@ mod tests {
         let error = parse_query_statement("file \"src/lib.rs\" | .impact").unwrap_err();
         assert_eq!(error.kind(), "invalid_input");
         assert!(error.to_string().contains("unsupported query step"));
+    }
+
+    #[test]
+    fn reject_invalid_step_arguments() {
+        let malformed =
+            parse_query_statement("file \"src/index.ts\" | .deps_transitive(foo)").unwrap_err();
+        assert_eq!(malformed.kind(), "invalid_input");
+        assert!(malformed.to_string().contains("optional non-negative integer depth"));
+
+        let unknown_symbols_arg = parse_query_statement(
+            "file \"src/parser.rs\" | .symbols(exported=true)",
+        )
+        .unwrap_err();
+        assert_eq!(unknown_symbols_arg.kind(), "invalid_input");
+        assert!(unknown_symbols_arg
+            .to_string()
+            .contains("unsupported query step `.symbols` argument `exported`"));
+
+        let duplicate_symbols_arg = parse_query_statement(
+            "file \"src/parser.rs\" | .symbols(public_only=true, public_only=false)",
+        )
+        .unwrap_err();
+        assert_eq!(duplicate_symbols_arg.kind(), "invalid_input");
+        assert!(duplicate_symbols_arg
+            .to_string()
+            .contains("duplicate `public_only`"));
+
+        let invalid_symbol_kind = parse_query_statement(
+            "file \"src/parser.rs\" | .symbols(kind=\"class\")",
+        )
+        .unwrap_err();
+        assert_eq!(invalid_symbol_kind.kind(), "invalid_input");
+        assert!(invalid_symbol_kind
+            .to_string()
+            .contains("unsupported query symbol kind `class`"));
     }
 
     #[test]

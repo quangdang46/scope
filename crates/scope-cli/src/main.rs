@@ -916,6 +916,10 @@ fn query_repl_keywords() -> Vec<String> {
         "all-symbols",
         "unique",
         "count",
+        ".deps_transitive",
+        ".reverse_transitive",
+        ".symbols(public_only=true)",
+        ".symbols(kind=\"function\")",
     ]
     .into_iter()
     .map(str::to_string)
@@ -926,7 +930,11 @@ fn query_repl_steps() -> Vec<&'static str> {
     vec![
         ".deps",
         ".reverse",
+        ".deps_transitive",
+        ".reverse_transitive",
         ".symbols",
+        ".symbols(public_only=true)",
+        ".symbols(kind=\"function\")",
         ".callers",
         ".callers_transitive",
         ".callees",
@@ -1052,7 +1060,7 @@ fn run_query_repl(
                 .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
                 writeln!(
                     stdout,
-                    "Steps: .deps, .reverse, .symbols, .callers, .callers_transitive, .callees, .callees_transitive, unique, count"
+                    "Steps: .deps, .reverse, .deps_transitive(depth?), .reverse_transitive(depth?), .symbols, .symbols(public_only=true), .symbols(kind=\"function\"), .callers, .callers_transitive, .callees, .callees_transitive, unique, count"
                 )
                 .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
                 writeln!(stdout, "Bindings: let name = <expr>")

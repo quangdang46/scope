@@ -1277,7 +1277,7 @@ mod tests {
         assert!(value["data"]["message"]
             .as_str()
             .expect("error message should be a string")
-            .contains("unsupported query step `.impact`; supported steps are .deps, .reverse, .symbols, .callers, .callees, unique, and count; plus .callers_transitive and .callees_transitive"));
+            .contains("unsupported query step `.impact`; supported steps are .deps, .reverse, .deps_transitive, .reverse_transitive, .symbols, .callers, .callees, unique, and count; plus .callers_transitive and .callees_transitive"));
         fs::remove_dir_all(repo).unwrap();
     }
 

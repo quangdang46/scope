@@ -3616,6 +3616,139 @@ skip = false
     }
 
     #[test]
+    fn dispatch_query_supports_transitive_dependency_and_symbol_filter_steps() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let deps_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/lib.rs\" | .deps_transitive(1) | count"
+            }),
+        )
+        .unwrap();
+        let deps_value: Value = serde_json::from_str(&deps_output).unwrap();
+        assert_eq!(deps_value["command"], "query");
+        assert_eq!(deps_value["status"], "ok");
+        assert_eq!(deps_value["data"]["result"]["number"], 3);
+
+        let reverse_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/parser.rs\" | .reverse_transitive(2) | count"
+            }),
+        )
+        .unwrap();
+        let reverse_value: Value = serde_json::from_str(&reverse_output).unwrap();
+        assert_eq!(reverse_value["command"], "query");
+        assert_eq!(reverse_value["status"], "ok");
+        assert_eq!(reverse_value["data"]["result"]["number"], 2);
+
+        let symbols_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/lib.rs\" | .symbols(public_only=true, kind=\"function\") | count"
+            }),
+        )
+        .unwrap();
+        let symbols_value: Value = serde_json::from_str(&symbols_output).unwrap();
+        assert_eq!(symbols_value["command"], "query");
+        assert_eq!(symbols_value["status"], "ok");
+        assert_eq!(symbols_value["data"]["result"]["number"], 2);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_query_surfaces_invalid_step_argument_errors() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let malformed_depth_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/main.rs\" | .deps_transitive(foo)"
+            }),
+        )
+        .unwrap();
+        let malformed_depth_value: Value = serde_json::from_str(&malformed_depth_output).unwrap();
+        assert_eq!(malformed_depth_value["command"], "query");
+        assert_eq!(malformed_depth_value["status"], "error");
+        assert_eq!(malformed_depth_value["data"]["kind"], "invalid_input");
+        assert!(malformed_depth_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("optional non-negative integer depth"));
+
+        let invalid_symbol_kind_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/lib.rs\" | .symbols(kind=\"class\")"
+            }),
+        )
+        .unwrap();
+        let invalid_symbol_kind_value: Value =
+            serde_json::from_str(&invalid_symbol_kind_output).unwrap();
+        assert_eq!(invalid_symbol_kind_value["command"], "query");
+        assert_eq!(invalid_symbol_kind_value["status"], "error");
+        assert_eq!(invalid_symbol_kind_value["data"]["kind"], "invalid_input");
+        assert!(invalid_symbol_kind_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("unsupported query symbol kind `class`"));
+
+        let duplicate_symbols_arg_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/lib.rs\" | .symbols(public_only=true, public_only=false)"
+            }),
+        )
+        .unwrap();
+        let duplicate_symbols_arg_value: Value =
+            serde_json::from_str(&duplicate_symbols_arg_output).unwrap();
+        assert_eq!(duplicate_symbols_arg_value["command"], "query");
+        assert_eq!(duplicate_symbols_arg_value["status"], "error");
+        assert_eq!(duplicate_symbols_arg_value["data"]["kind"], "invalid_input");
+        assert!(duplicate_symbols_arg_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("duplicate `public_only`"));
+
+        let unsupported_step_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "file \"src/lib.rs\" | .impact"
+            }),
+        )
+        .unwrap();
+        let unsupported_step_value: Value = serde_json::from_str(&unsupported_step_output).unwrap();
+        assert_eq!(unsupported_step_value["command"], "query");
+        assert_eq!(unsupported_step_value["status"], "error");
+        assert_eq!(unsupported_step_value["data"]["kind"], "invalid_input");
+        assert!(unsupported_step_value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("unsupported query step `.impact`; supported steps are .deps, .reverse, .deps_transitive, .reverse_transitive, .symbols, .callers, .callees, unique, and count; plus .callers_transitive and .callees_transitive"));
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
     fn dispatch_query_surfaces_unknown_bindings() {
         let repo = prepare_fixture_copy("rust_small");
         let _ = dispatch_tool(

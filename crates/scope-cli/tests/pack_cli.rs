@@ -1164,7 +1164,7 @@ fn query_repl_supports_help_bindings_and_exit() {
     assert!(stdout.contains("scope query REPL"));
     assert!(stdout.contains("Type :help for commands, :exit to quit."));
     assert!(stdout.contains("Sources: file \"...\", symbol \"...\", all-files, all-symbols, $name"));
-    assert!(stdout.contains("Steps: .deps, .reverse, .symbols, .callers, .callers_transitive, .callees, .callees_transitive, unique, count"));
+    assert!(stdout.contains("Steps: .deps, .reverse, .deps_transitive(depth?), .reverse_transitive(depth?), .symbols, .symbols(public_only=true), .symbols(kind=\"function\"), .callers, .callers_transitive, .callees, .callees_transitive, unique, count"));
     assert!(stdout.contains("Bindings: let name = <expr>"));
     assert!(stdout.contains("\"command\": \"query\""));
     assert!(stdout.contains("roots"));
