@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "command": "rename-plan",
+  "status": "ok",
+  "data": {
+    "result": {
+      "target": "src/parser.rs",
+      "target_file": "src/parser.rs",
+      "old_name": "parser",
+      "new_name": "parser2",
+      "apply_requested": false,
+      "force_requested": false,
+      "applied": false,
+      "steps": [
+        {
+          "path": "src/resolver.rs",
+          "distance": 1,
+          "certainty": "exact",
+          "roles": [
+            "importer"
+          ],
+          "reasons": [
+            "import path resolves to target file src/parser.rs"
+          ],
+          "edits": [
+            {
+              "start_byte": 11,
+              "end_byte": 17,
+              "line": 1,
+              "before_text": "parser",
+              "after_text": "parser2",
+              "kind": "import_path",
+              "verified": true,
+              "deferred_reason": null
+            }
+          ],
+          "apply_safe": true
+        }
+      ],
+      "skipped": [],
+      "warnings": [
+        "file-target rename planning does not move files yet; only import-path rewrites are planned"
+      ],
+      "summary": {
+        "files_considered": 2,
+        "files_planned": 1,
+        "files_skipped": 0,
+        "edits_planned": 1,
+        "safe_edits_planned": 1,
+        "deferred_edits_planned": 0,
+        "applied_files": 0,
+        "applied_edits": 0,
+        "blocked": false
+      }
+    }
+  },
+  "warnings": []
+}

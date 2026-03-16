@@ -1,15 +1,13 @@
-use std::{
-    collections::HashSet,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, fs, path::Path};
 
 use glob::Pattern;
 use serde::Serialize;
 
 use crate::{
-    ArchCheckResult, ArchConfig, ArchFileEdge, ArchInitResult, ArchLayer, ArchRule,
-    ArchViolation, GateConfig, GateMetric, RepoPath, ScopeError, ScopeResult, Store, TestConfig,
+    model::{ArchExplainImport, ArchExplainRule},
+    ArchCheckResult, ArchConfig, ArchExplainResult, ArchFileEdge, ArchInitResult, ArchLayer,
+    ArchRule, ArchViolation, GateConfig, GateMetric, RepoPath, ScopeError, ScopeResult, Store,
+    TestConfig,
 };
 
 pub const ARCH_INIT_MESSAGE: &str =
@@ -96,6 +94,89 @@ pub fn arch_init(repo_root: &Path) -> ScopeResult<ArchInitResult> {
         layers,
         rules,
         message: ARCH_INIT_MESSAGE.to_string(),
+    })
+}
+
+pub fn arch_explain(
+    repo_root: &Path,
+    _config_path: &Path,
+    target: &str,
+) -> ScopeResult<ArchExplainResult> {
+    let config = load_arch_config(repo_root)?;
+    let target_path = RepoPath::from(target);
+    let layer = resolve_layer(&config.layers, &target_path)?.cloned();
+    let db_path = repo_root.join(".scope").join("index.db");
+    let store = Store::open(&db_path)?;
+    let indexed_files = store.list_indexed_files()?;
+    let mut warnings = Vec::new();
+
+    if config.layers.is_empty() {
+        warnings.push("arch config defines no layers".to_string());
+    }
+    if !indexed_files.iter().any(|path| path == &target_path) {
+        warnings.push(format!("File '{}' is not indexed", target_path.0));
+    }
+    if layer.is_none() {
+        warnings.push(format!(
+            "File '{}' is not in any defined layer",
+            target_path.0
+        ));
+    }
+
+    let applicable_rules: Vec<ArchRule> = layer
+        .as_ref()
+        .map(|layer| {
+            config
+                .rules
+                .iter()
+                .filter(|rule| rule.from == layer.name)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let rules = applicable_rules
+        .iter()
+        .cloned()
+        .map(|rule| ArchExplainRule {
+            applies: true,
+            reason: layer.as_ref().map(|layer| {
+                format!(
+                    "rule applies because '{}' matches layer '{}'",
+                    target_path.0, layer.name
+                )
+            }),
+            rule,
+        })
+        .collect();
+
+    let mut imports = Vec::new();
+    for dependency in store.query_deps(&target_path)? {
+        let to_file = dependency.path;
+        let to_layer = resolve_layer(&config.layers, &to_file)?.map(|layer| layer.name.clone());
+        let rule = applicable_rules
+            .iter()
+            .find(|rule| {
+                to_layer.as_ref().is_some_and(|to_layer| {
+                    rule.may_not_import.iter().any(|target| target == to_layer)
+                })
+            })
+            .cloned();
+        imports.push(ArchExplainImport {
+            to_file,
+            to_layer,
+            rule: rule.clone(),
+            violation: rule.is_some(),
+            rule_source: rule.as_ref().map(|rule| rule.from.clone()),
+        });
+    }
+    imports.sort_by(|left, right| left.to_file.0.cmp(&right.to_file.0));
+
+    Ok(ArchExplainResult {
+        target: target_path,
+        layer,
+        rules,
+        imports,
+        warnings,
     })
 }
 
@@ -218,12 +299,14 @@ fn collect_arch_init_layer_dirs(
 }
 
 fn canonical_arch_layer_name(name: &str) -> Option<&'static str> {
-    ARCH_INIT_LAYER_ALIASES.iter().find_map(|(canonical, aliases)| {
-        aliases
-            .iter()
-            .any(|alias| alias.eq_ignore_ascii_case(name))
-            .then_some(*canonical)
-    })
+    ARCH_INIT_LAYER_ALIASES
+        .iter()
+        .find_map(|(canonical, aliases)| {
+            aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name))
+                .then_some(*canonical)
+        })
 }
 
 fn build_arch_init_rules(layers: &[ArchLayer]) -> Vec<ArchRule> {
@@ -420,7 +503,9 @@ pub fn validate_gate_config(config: &[GateConfig]) -> ScopeResult<()> {
         }
 
         match gate.metric {
-            GateMetric::HealthScore | GateMetric::ImportsUnresolvedPct | GateMetric::ImportsResolvedPct => {
+            GateMetric::HealthScore
+            | GateMetric::ImportsUnresolvedPct
+            | GateMetric::ImportsResolvedPct => {
                 for (label, value) in [("min", gate.min), ("max", gate.max)] {
                     if let Some(value) = value {
                         if !(0.0..=100.0).contains(&value) {

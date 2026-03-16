@@ -2,7 +2,7 @@
 
 > Local static-analysis workspace for dependency, impact, and architecture queries.
 >
-> Today, `scope` is a working local static-analysis workspace with a SQLite-backed index, a broad Rust CLI, a local HTTP API/UI, and a stdio MCP wrapper. The strongest semantic indexing support today is heuristic Rust and TS/JS extraction; parser-backed resolution, some transitive traversals, and richer module resolution are still in progress.
+> Today, `scope` is a working local static-analysis workspace with a SQLite-backed index, a broad Rust CLI, a local HTTP API/UI, and a stdio MCP wrapper. The strongest semantic indexing support today is heuristic Rust and TS/JS extraction; parser-backed resolution, tighter traversal precision, and richer module resolution are still in progress.
 
 ---
 
@@ -16,15 +16,14 @@ The repository currently implements:
 - ignore-aware repository scanning across Rust, TS/JS, Python, Ruby, and Go file types
 - heuristic semantic extraction for Rust and TS/JS imports, exports, symbols, visibility, and direct call sites
 - machine-readable CLI commands for dependency, symbol, impact, architecture, report/gate, diff, and simulation workflows
-- a local HTTP `/api/*` server with a minimal embedded UI
+- a local HTTP `/api/*` server with a bundled embedded UI
 - a stdio MCP tool server exposing the same core store/query surface to external clients
 - fixture-based golden tests plus CLI integration coverage for the current contract
 
 The repository does **not** yet implement:
 
 - tree-sitter or other AST-backed parsing
-- true transitive `calls` / `callers` traversal
-- true transitive `deps` traversal behind the current flag surface
+- parser-backed precision improvements for traversal and impact analysis
 - semantic extraction adapters for Python, Ruby, or Go (those file types are scanned but not yet indexed deeply)
 - tsconfig path mapping and other richer module-resolution cases
 - the planned query-REPL ergonomics such as history, completion, and saved-query workflows
@@ -59,10 +58,10 @@ The intended architecture is:
 3. Query the graph
    └── deps / symbols / calls / callers / impact / explain / why / context work today
    └── report / gate / serve / MCP reuse the same core store queries
-   └── some transitive traversals and richer resolution remain planned
+   └── richer resolution and precision improvements remain planned
 ```
 
-The current codebase has working stage-2 and stage-3 slices across the CLI, local HTTP server, and stdio MCP wrapper, but parser fidelity and several transitive/resolution features are still incomplete.
+The current codebase has working stage-2 and stage-3 slices across the CLI, local HTTP server, and stdio MCP wrapper, but parser fidelity and several resolution/precision features are still incomplete.
 
 ## Current Tech Stack
 
@@ -124,7 +123,7 @@ Right now:
 - `scope index` scans supported files, indexes Rust and TS/JS extracts, and refreshes dependency/call edges in `.scope/index.db`
 - `scope deps`, `scope symbols`, `scope calls`, `scope callers`, `scope impact`, `scope explain`, `scope why`, `scope context`, and `scope pack` return structured envelopes from the SQLite-backed graph
 - architecture, audit, surface, risk/stability/cochange, test-map, snapshot/diff, simulation, report/gate, unused/cycles, entry, tree/split/mirror, doctor, and benchmark commands are all wired through the CLI today
-- `scope serve` exposes the same core analyses through `/api/*` endpoints with a minimal embedded UI
+- `scope serve` exposes the same core analyses through `/api/*` endpoints with a bundled embedded UI
 - `scope query` supports both single-expression execution and a basic interactive REPL over the query language
 - `scope-mcp` exposes core operations as stdio MCP tools backed by the same store/query layer
 
@@ -181,7 +180,7 @@ Compact mode is intended for agent loops and transport efficiency, not for human
 ### Current limitations for agents
 
 - semantic extraction is strongest today for Rust and TS/JS; Python, Ruby, and Go are currently scan-only
-- transitive `calls` / `callers` still return stub envelopes, and `deps --transitive` does not yet walk a real closure
+- transitive `deps`, `calls`, and `callers` are available today, but they remain static approximations built on heuristic extraction and conservative resolution
 - parsing and resolution are still heuristic and may miss language-specific edge cases
 - TypeScript module resolution is conservative and does not yet cover `tsconfig` path mapping
 - the query REPL exists, but it does not yet implement the planned history/completion/save-load ergonomics
@@ -270,7 +269,7 @@ cargo run -p scope-mcp
 ## Near-Term Roadmap
 
 - replace heuristic Rust and TS/JS extraction with parser-backed logic
-- wire true transitive traversal for `deps`, `calls`, and `callers`
+- tighten transitive traversal precision for `deps`, `calls`, and `callers`
 - persist richer diagnostics/export data and tighten certainty reporting
 - add semantic adapters beyond Rust and TS/JS, including better TypeScript module resolution
 - improve the query REPL with history, completion, and saved-query workflows

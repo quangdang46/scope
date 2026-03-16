@@ -118,7 +118,10 @@ fn normalize_report_like_json(value: &mut serde_json::Value) {
         "/data/result/unreachable_detail",
         "/data/result/report/unreachable_detail",
     ] {
-        if let Some(items) = value.pointer_mut(pointer).and_then(|node| node.as_array_mut()) {
+        if let Some(items) = value
+            .pointer_mut(pointer)
+            .and_then(|node| node.as_array_mut())
+        {
             for item in items {
                 if let Some(days) = item.get_mut("last_modified_days_ago") {
                     *days = serde_json::Value::from(0);
@@ -252,6 +255,23 @@ fn ts_small_fixture_has_expected_files() {
 }
 
 #[test]
+fn dynamic_limits_fixture_has_expected_files() {
+    let root = fixture_root("dynamic_limits");
+    for relative in [
+        "README.txt",
+        "package.json",
+        "src/index.js",
+        "src/computed_import.ts",
+        "src/dynamic_require.js",
+    ] {
+        assert!(
+            root.join(relative).is_file(),
+            "missing dynamic_limits file: {relative}"
+        );
+    }
+}
+
+#[test]
 fn test_map_ts_fixture_has_expected_files() {
     let root = fixture_root("test_map_ts");
     for relative in [
@@ -373,14 +393,22 @@ fn mixed_repo_fixture_has_expected_files() {
 fn mixed_repo_scans_and_indexes_rust_and_typescript_together() {
     let entries = scan_repo(&fixture_root("mixed_repo"), &ScanConfig::default()).unwrap();
     assert_eq!(entries.len(), 4);
-    assert!(entries.iter().any(|entry| entry.path == RepoPath::from("src/lib.rs")
-        && entry.language == SupportedLanguage::Rust));
-    assert!(entries.iter().any(|entry| entry.path == RepoPath::from("src/parser.rs")
-        && entry.language == SupportedLanguage::Rust));
-    assert!(entries.iter().any(|entry| entry.path == RepoPath::from("web/index.ts")
-        && entry.language == SupportedLanguage::TypeScript));
-    assert!(entries.iter().any(|entry| entry.path == RepoPath::from("web/auth.ts")
-        && entry.language == SupportedLanguage::TypeScript));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path == RepoPath::from("src/lib.rs")
+            && entry.language == SupportedLanguage::Rust));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path == RepoPath::from("src/parser.rs")
+            && entry.language == SupportedLanguage::Rust));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path == RepoPath::from("web/index.ts")
+            && entry.language == SupportedLanguage::TypeScript));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.path == RepoPath::from("web/auth.ts")
+            && entry.language == SupportedLanguage::TypeScript));
 
     let repo = prepare_fixture_copy("mixed_repo");
     let store = index_fixture(&repo);
@@ -636,13 +664,18 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
     );
     let parser_calls_transitive_actual =
         serde_json::to_string_pretty(&parser_calls_transitive_envelope).unwrap();
-    let parser_calls_transitive_expected =
-        read_golden("rust_small_parse_calls_transitive_stub.json");
+    let parser_calls_transitive_expected = read_golden("rust_small_parse_calls_transitive.json");
     assert_eq!(
         parser_calls_transitive_actual,
         parser_calls_transitive_expected
     );
-    assert!(parser_calls_transitive.is_empty());
+    // parser::parse reaches parser::tokenize directly, so transitive traversal matches the direct edge
+    assert_eq!(parser_calls_transitive.len(), 1);
+    assert_eq!(
+        parser_calls_transitive[0].qualname.as_deref(),
+        Some("parser::tokenize")
+    );
+    assert_eq!(parser_calls_transitive[0].distance, 1);
 
     let farewell_calls = store.query_callees("lib::farewell", false).unwrap();
     let farewell_envelope = stub::calls("lib::farewell".to_string(), false, farewell_calls.clone());
@@ -678,12 +711,13 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
     let parser_callers_transitive_actual =
         serde_json::to_string_pretty(&parser_callers_transitive_envelope).unwrap();
     let parser_callers_transitive_expected =
-        read_golden("rust_small_parse_callers_transitive_stub.json");
+        read_golden("rust_small_parse_callers_transitive.json");
     assert_eq!(
         parser_callers_transitive_actual,
         parser_callers_transitive_expected
     );
-    assert!(parser_callers_transitive.is_empty());
+    // parser::parse is called transitively by the same two indexed callers that the golden captures.
+    assert_eq!(parser_callers_transitive.len(), 2);
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -906,6 +940,48 @@ fn doctor_output_reports_index_health_counts() {
     assert_eq!(envelope.data.checks.len(), 3);
     assert_eq!(envelope.data.checks[0].name, "files_indexed");
     assert_eq!(envelope.data.checks[0].status, "ok");
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn dynamic_limits_fixture_reports_partial_parse_health_without_false_edges() {
+    let repo = prepare_fixture_copy("dynamic_limits");
+    let store = index_fixture(&repo);
+
+    let stats = store.index_health_stats().unwrap();
+    assert_eq!(stats.files, 3);
+    assert_eq!(stats.imports, 2);
+    assert_eq!(stats.unresolved_imports, 0);
+    assert_eq!(stats.symbols, 3);
+    assert_eq!(stats.call_edges, 2);
+    assert_eq!(stats.parse_status.ok, 1);
+    assert_eq!(stats.parse_status.partial, 2);
+    assert_eq!(stats.parse_status.error, 0);
+
+    let doctor = stub::doctor(false, stats.clone());
+    assert_eq!(doctor.data.checks[2].name, "parse_status");
+    assert_eq!(doctor.data.checks[2].status, "warn");
+
+    let deps = store.query_deps(&RepoPath::from("src/index.js")).unwrap();
+    let dep_paths: Vec<_> = deps.iter().map(|dep| dep.path.0.clone()).collect();
+    assert_eq!(
+        dep_paths,
+        vec![
+            "src/computed_import.ts".to_string(),
+            "src/dynamic_require.js".to_string()
+        ]
+    );
+
+    let feature_calls = store
+        .query_callees("computed_import::loadFeature", false)
+        .unwrap();
+    assert!(feature_calls.is_empty());
+
+    let plugin_calls = store
+        .query_callees("dynamic_require::loadPlugin", false)
+        .unwrap();
+    assert!(plugin_calls.is_empty());
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -1405,7 +1481,9 @@ fn report_query_matches_golden_json_for_rust_small_fixture() {
 fn report_query_matches_golden_json_for_snapshot_comparison() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
-    store.save_snapshot("baseline", Some("HEAD".to_string())).unwrap();
+    store
+        .save_snapshot("baseline", Some("HEAD".to_string()))
+        .unwrap();
 
     let parser_path = repo.join("src/parser.rs");
     let updated = fs::read_to_string(&parser_path)
@@ -2330,8 +2408,14 @@ fn capability_audit_entry_queries_match_golden_json() {
 
     let entry_list = store.query_entry_list(&config).unwrap();
     assert_eq!(entry_list.summary.entry_points, 2);
-    assert_eq!(entry_list.entry_points[0].file, RepoPath::from("src/cli/main.ts"));
-    assert_eq!(entry_list.entry_points[1].file, RepoPath::from("src/workers/job.ts"));
+    assert_eq!(
+        entry_list.entry_points[0].file,
+        RepoPath::from("src/cli/main.ts")
+    );
+    assert_eq!(
+        entry_list.entry_points[1].file,
+        RepoPath::from("src/workers/job.ts")
+    );
     let entry_list_actual = serde_json::to_string_pretty(&stub::entry_list(entry_list)).unwrap();
     let entry_list_expected = read_golden("capability_audit_entry_list.json");
     assert_eq!(entry_list_actual, entry_list_expected);

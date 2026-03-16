@@ -3,7 +3,7 @@ mod cli;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{self, BufRead, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -14,9 +14,21 @@ use cli::{
     ArchCommand, ChangeType, Cli, CochangeSortArg, Commands, CycleSeverityArg, RiskSortArg,
     SimulateCommand, SnapshotCommand, StabilitySortArg, SurfaceCommand, TestMapCommand,
 };
+use rustyline::{
+    completion::{Completer, Pair},
+    config::{CompletionType, Config},
+    error::ReadlineError,
+    highlight::Highlighter,
+    hint::{Hinter, HistoryHinter},
+    history::DefaultHistory,
+    validate::Validator,
+    Context as ReadlineContext, Editor, Helper,
+};
+use scope_core::config::ensure_scope_dir;
 use scope_core::{
-    adapter_for_language, arch_check, arch_init, load_arch_config, scan_repo, BootstrapOptions,
-    CochangeSort, CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind, Verbosity,
+    adapter_for_language, arch_check, arch_explain, arch_init, load_arch_config, scan_repo,
+    BootstrapOptions, CochangeSort, CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind,
+    Verbosity,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -57,7 +69,6 @@ fn serialize_output<T: serde::Serialize>(
         serde_json::to_string_pretty(value)
     }
 }
-
 
 fn compact_json_value(value: &mut serde_json::Value) {
     match value {
@@ -124,7 +135,13 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let dependencies = if args.reverse {
+            let dependencies = if args.transitive {
+                context.store.query_deps_transitive(
+                    &scope_core::RepoPath::from(args.file.clone()),
+                    args.reverse,
+                    args.depth,
+                )?
+            } else if args.reverse {
                 context
                     .store
                     .query_reverse_deps(&scope_core::RepoPath::from(args.file.clone()))?
@@ -275,6 +292,14 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     let result = arch_init(&context.paths.repo_root)?;
                     serialize_output(&scope_core::stub::arch_init(result), compact)
                 }
+                ArchCommand::Explain(ref args) => {
+                    let result = arch_explain(
+                        &context.paths.repo_root,
+                        &context.paths.repo_root,
+                        &args.target,
+                    )?;
+                    serialize_output(&scope_core::stub::arch_explain(result), compact)
+                }
             }
         }
         Commands::Audit(args) => {
@@ -418,7 +443,6 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            validate_new_name(&args.new_name)?;
             let plan = context.store.build_rename_plan(
                 &context.paths.repo_root,
                 &args.target,
@@ -474,9 +498,11 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             match args.command {
                 SimulateCommand::Extract(args) => {
                     let symbols = parse_symbol_csv(&args.symbols)?;
-                    let result = context
-                        .store
-                        .simulate_extract(&symbols, &RepoPath::from(args.into_file), &config)?;
+                    let result = context.store.simulate_extract(
+                        &symbols,
+                        &RepoPath::from(args.into_file),
+                        &config,
+                    )?;
                     serialize_output(&scope_core::stub::simulate_extract(result), compact)
                 }
             }
@@ -488,8 +514,29 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let config = load_arch_config(&context.paths.repo_root)?;
-            let result = context.store.query_report(&config, args.compare.as_deref())?;
-            serialize_output(&scope_core::stub::report(result), compact)
+            let result = context
+                .store
+                .query_report(&config, args.compare.as_deref())?;
+
+            let prefer_json = args.json || compact;
+            if prefer_json {
+                let rendered = serialize_output(&scope_core::stub::report(result), compact)
+                    .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
+                if let Some(output_path) = args.output {
+                    fs::write(&output_path, &rendered).map_err(|error| {
+                        scope_core::ScopeError::io(output_path.display().to_string(), error)
+                    })?;
+                }
+                Ok(rendered)
+            } else {
+                let markdown = scope_core::render_markdown_report(&result);
+                if let Some(output_path) = args.output {
+                    fs::write(&output_path, &markdown).map_err(|error| {
+                        scope_core::ScopeError::io(output_path.display().to_string(), error)
+                    })?;
+                }
+                Ok(markdown)
+            }
         }
         Commands::Gate(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -631,7 +678,7 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             if args.expr.is_empty() {
-                run_query_repl(&context.store)?;
+                run_query_repl(&context.store, &context.paths.scope_dir)?;
                 return Ok(exit_code);
             }
 
@@ -640,7 +687,11 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             let mut last_result = None;
             for expr in args.expr {
                 last_input = expr.clone();
-                last_result = Some(scope_core::execute_query(&expr, &context.store, &mut session)?);
+                last_result = Some(scope_core::execute_query(
+                    &expr,
+                    &context.store,
+                    &mut session,
+                )?);
             }
 
             serialize_output(
@@ -773,39 +824,237 @@ fn change_type_name(change_type: ChangeType) -> String {
     .to_string()
 }
 
-fn run_query_repl(store: &scope_core::Store) -> Result<(), scope_core::ScopeError> {
-    let stdin = io::stdin();
+struct QueryReplHelper {
+    keywords: Vec<String>,
+    file_paths: Vec<String>,
+    symbols: Vec<String>,
+    hinter: HistoryHinter,
+    bindings: Vec<String>,
+}
+
+impl QueryReplHelper {
+    fn new(store: &scope_core::Store) -> Result<Self, scope_core::ScopeError> {
+        Ok(Self {
+            keywords: query_repl_keywords(),
+            file_paths: store
+                .list_indexed_files()?
+                .into_iter()
+                .map(|path| path.0)
+                .collect(),
+            symbols: store
+                .list_indexed_symbols()?
+                .into_iter()
+                .map(|symbol| symbol.qualname)
+                .collect(),
+            hinter: HistoryHinter::new(),
+            bindings: Vec::new(),
+        })
+    }
+
+    fn set_bindings(&mut self, bindings: Vec<String>) {
+        self.bindings = bindings;
+    }
+
+    fn complete_candidates(&self, line: &str, pos: usize) -> (usize, Vec<Pair>) {
+        let prefix = &line[..pos];
+        if let Some((start, needle)) = quoted_completion_target(prefix, "file \"") {
+            return (start, complete_matches(&self.file_paths, needle));
+        }
+        if let Some((start, needle)) = quoted_completion_target(prefix, "symbol \"") {
+            return (start, complete_matches(&self.symbols, needle));
+        }
+        if let Some((start, needle)) = binding_completion_target(prefix) {
+            return (
+                start,
+                complete_prefixed_matches(&self.bindings, needle, "$"),
+            );
+        }
+        let start = token_start(prefix);
+        let needle = &prefix[start..];
+        if needle.starts_with('.') {
+            return (start, complete_step_matches(needle));
+        }
+        (start, complete_matches(&self.keywords, needle))
+    }
+}
+
+impl Completer for QueryReplHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &ReadlineContext<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        Ok(self.complete_candidates(line, pos))
+    }
+}
+
+impl Hinter for QueryReplHelper {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, ctx: &ReadlineContext<'_>) -> Option<Self::Hint> {
+        self.hinter.hint(line, pos, ctx)
+    }
+}
+
+impl Highlighter for QueryReplHelper {}
+impl Validator for QueryReplHelper {}
+impl Helper for QueryReplHelper {}
+
+fn query_repl_keywords() -> Vec<String> {
+    [
+        ":help",
+        ":exit",
+        ":quit",
+        ":vars",
+        "let",
+        "file",
+        "symbol",
+        "all-files",
+        "all-symbols",
+        "unique",
+        "count",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn query_repl_steps() -> Vec<&'static str> {
+    vec![
+        ".deps",
+        ".reverse",
+        ".symbols",
+        ".callers",
+        ".callers_transitive",
+        ".callees",
+        ".callees_transitive",
+        ".unique",
+        ".count",
+    ]
+}
+
+fn token_start(prefix: &str) -> usize {
+    prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace() || *ch == '|')
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(0)
+}
+
+fn quoted_completion_target<'a>(prefix: &'a str, marker: &str) -> Option<(usize, &'a str)> {
+    let marker_index = prefix.rfind(marker)?;
+    let value_start = marker_index + marker.len();
+    let value = &prefix[value_start..];
+    if value.contains('"') {
+        return None;
+    }
+    Some((value_start, value))
+}
+
+fn binding_completion_target(prefix: &str) -> Option<(usize, &str)> {
+    let start = token_start(prefix);
+    let token = &prefix[start..];
+    let needle = token.strip_prefix('$')?;
+    Some((start + 1, needle))
+}
+
+fn complete_matches(candidates: &[String], needle: &str) -> Vec<Pair> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.starts_with(needle))
+        .map(|candidate| Pair {
+            display: candidate.clone(),
+            replacement: candidate.clone(),
+        })
+        .collect()
+}
+
+fn complete_prefixed_matches(candidates: &[String], needle: &str, prefix: &str) -> Vec<Pair> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.starts_with(needle))
+        .map(|candidate| Pair {
+            display: format!("{prefix}{candidate}"),
+            replacement: candidate.clone(),
+        })
+        .collect()
+}
+
+fn complete_step_matches(needle: &str) -> Vec<Pair> {
+    query_repl_steps()
+        .into_iter()
+        .filter(|step| step.starts_with(needle))
+        .map(|step| Pair {
+            display: step.to_string(),
+            replacement: step.to_string(),
+        })
+        .collect()
+}
+
+fn query_history_path_for_scope_dir(scope_dir: &Path) -> Result<PathBuf, scope_core::ScopeError> {
+    ensure_scope_dir(scope_dir)?;
+    Ok(scope_dir.join("query_history.txt"))
+}
+
+fn run_query_repl(
+    store: &scope_core::Store,
+    scope_dir: &Path,
+) -> Result<(), scope_core::ScopeError> {
     let mut session = scope_core::QuerySession::default();
     let mut stdout = io::stdout();
+    let history_path = query_history_path_for_scope_dir(scope_dir)?;
+    let piped_input = !io::stdin().is_terminal();
+    let config = Config::builder()
+        .auto_add_history(false)
+        .completion_type(CompletionType::List)
+        .build();
+    let mut editor = Editor::<QueryReplHelper, DefaultHistory>::with_config(config)
+        .map_err(|error| scope_core::ScopeError::Internal(error.to_string()))?;
+    editor.set_helper(Some(QueryReplHelper::new(store)?));
+    let _ = editor.load_history(&history_path);
 
     writeln!(stdout, "scope query REPL")
         .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
     writeln!(stdout, "Type :help for commands, :exit to quit.")
         .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
-    write!(stdout, "scope> ")
-        .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
-    stdout
-        .flush()
-        .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
 
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|error| scope_core::ScopeError::io("stdin", error))?;
-        let input = line.trim();
-        if input.is_empty() {
+    loop {
+        if piped_input {
             write!(stdout, "scope> ")
                 .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
             stdout
                 .flush()
                 .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+        }
+        let line = match editor.readline(if piped_input { "" } else { "scope> " }) {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+            Err(error) => return Err(scope_core::ScopeError::Internal(error.to_string())),
+        };
+        let input = line.trim();
+        if input.is_empty() {
             continue;
+        }
+        if let Some(helper) = editor.helper_mut() {
+            helper.set_bindings(session.binding_names());
         }
         match input {
             ":exit" | ":quit" => break,
             ":help" => {
-                writeln!(stdout, "Sources: file \"...\", symbol \"...\", all-files, all-symbols, $name")
-                    .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
-                writeln!(stdout, "Steps: .deps, .reverse, .symbols, .callers, .callees, unique, count")
-                    .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+                writeln!(
+                    stdout,
+                    "Sources: file \"...\", symbol \"...\", all-files, all-symbols, $name"
+                )
+                .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+                writeln!(
+                    stdout,
+                    "Steps: .deps, .reverse, .symbols, .callers, .callers_transitive, .callees, .callees_transitive, unique, count"
+                )
+                .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
                 writeln!(stdout, "Bindings: let name = <expr>")
                     .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
             }
@@ -815,6 +1064,7 @@ fn run_query_repl(store: &scope_core::Store) -> Result<(), scope_core::ScopeErro
             }
             _ => match scope_core::execute_query(input, store, &mut session) {
                 Ok(result) => {
+                    let _ = editor.add_history_entry(input);
                     let rendered = serde_json::to_string_pretty(&scope_core::stub::query(
                         input.to_string(),
                         result,
@@ -829,13 +1079,12 @@ fn run_query_repl(store: &scope_core::Store) -> Result<(), scope_core::ScopeErro
                 }
             },
         }
-        write!(stdout, "scope> ")
-            .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
-        stdout
-            .flush()
-            .map_err(|error| scope_core::ScopeError::io("stdout", error))?;
+        if let Some(helper) = editor.helper_mut() {
+            helper.set_bindings(session.binding_names());
+        }
     }
 
+    let _ = editor.save_history(&history_path);
     Ok(())
 }
 
@@ -1076,19 +1325,6 @@ fn format_context_record_line(record: &ContextFileRecord) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
-}
-
-fn validate_new_name(new_name: &str) -> Result<(), scope_core::ScopeError> {
-    if new_name.is_empty()
-        || !new_name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-    {
-        return Err(scope_core::ScopeError::InvalidInput(
-            "rename-plan requires a simple identifier for --to".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn parse_symbol_csv(value: &str) -> Result<Vec<String>, scope_core::ScopeError> {
@@ -1434,8 +1670,10 @@ fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_context_pack, format_public_surface, index_repo, render_cli_error, run_benchmark,
-        serialize_output,
+        binding_completion_target, build_context_pack, complete_matches, complete_prefixed_matches,
+        complete_step_matches, format_public_surface, index_repo, query_history_path_for_scope_dir,
+        quoted_completion_target, render_cli_error, run_benchmark, serialize_output, token_start,
+        QueryReplHelper,
     };
     use scope_core::{
         BranchDiffAffectedFile, BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary,
@@ -1512,6 +1750,142 @@ mod tests {
             .unwrap()
             .trim_end_matches('\n')
             .to_string()
+    }
+
+    #[test]
+    fn token_start_respects_whitespace_and_pipelines() {
+        assert_eq!(token_start("all-files"), 0);
+        assert_eq!(token_start("all-files | cou"), 12);
+        assert_eq!(token_start("let roots = file \"src/lib.rs\" | .dep"), 32);
+    }
+
+    #[test]
+    fn quoted_and_binding_completion_targets_detect_active_segment() {
+        assert_eq!(
+            quoted_completion_target("file \"src/pa", "file \""),
+            Some((6, "src/pa"))
+        );
+        assert_eq!(
+            quoted_completion_target("symbol \"parser::pa", "symbol \""),
+            Some((8, "parser::pa"))
+        );
+        assert_eq!(binding_completion_target("$roo"), Some((1, "roo")));
+        assert_eq!(
+            binding_completion_target("let roots = $roo"),
+            Some((13, "roo"))
+        );
+    }
+
+    #[test]
+    fn completion_match_helpers_filter_prefixes() {
+        let file_matches = complete_matches(
+            &["src/lib.rs".to_string(), "src/parser.rs".to_string()],
+            "src/p",
+        );
+        assert_eq!(file_matches.len(), 1);
+        assert_eq!(file_matches[0].replacement, "src/parser.rs");
+
+        let binding_matches =
+            complete_prefixed_matches(&["roots".to_string(), "results".to_string()], "ro", "$");
+        assert_eq!(binding_matches.len(), 1);
+        assert_eq!(binding_matches[0].display, "$roots");
+        assert_eq!(binding_matches[0].replacement, "roots");
+
+        let step_matches = complete_step_matches(".ca");
+        assert!(step_matches
+            .iter()
+            .any(|pair| pair.replacement == ".callers"));
+        assert!(step_matches
+            .iter()
+            .any(|pair| pair.replacement == ".callees"));
+    }
+
+    #[test]
+    fn query_history_path_points_at_scope_query_history_file() {
+        let repo = prepare_fixture_copy("rust_small");
+        let scope_dir = repo.join(".scope");
+        let history_path = query_history_path_for_scope_dir(&scope_dir).unwrap();
+        assert_eq!(history_path, repo.join(".scope/query_history.txt"));
+        assert!(history_path.parent().unwrap().is_dir());
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn query_repl_helper_offers_keyword_binding_file_and_symbol_completions() {
+        let repo = prepare_fixture_copy("rust_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let mut helper = QueryReplHelper::new(&store).unwrap();
+        helper.set_bindings(vec!["roots".to_string()]);
+
+        let (_, keyword_matches) = helper.complete_candidates("all", 3);
+        assert!(keyword_matches
+            .iter()
+            .any(|pair| pair.replacement == "all-files"));
+        assert!(keyword_matches
+            .iter()
+            .any(|pair| pair.replacement == "all-symbols"));
+
+        let (_, binding_matches) = helper.complete_candidates("$roo", 4);
+        assert_eq!(binding_matches.len(), 1);
+        assert_eq!(binding_matches[0].display, "$roots");
+
+        let (_, file_matches) = helper.complete_candidates("file \"src/pa", 12);
+        assert!(file_matches
+            .iter()
+            .any(|pair| pair.replacement == "src/parser.rs"));
+
+        let (_, symbol_matches) = helper.complete_candidates("symbol \"parser::pa", 18);
+        assert!(symbol_matches
+            .iter()
+            .any(|pair| pair.replacement == "parser::parse"));
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn deps_branch_uses_transitive_closure_when_requested() {
+        let repo = prepare_fixture_copy("ts_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let dependencies = store
+            .query_deps_transitive(&RepoPath::from("src/index.ts"), false, Some(2))
+            .unwrap();
+        let envelope = scope_core::stub::deps(
+            "src/index.ts".to_string(),
+            false,
+            true,
+            Some(2),
+            dependencies,
+        );
+        let compact = serialize_output(&envelope, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&compact).unwrap();
+
+        assert_eq!(value["command"], "deps");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "src/index.ts");
+        assert_eq!(value["data"]["transitive"], true);
+        assert_eq!(value["data"]["depth"], 2);
+        assert_eq!(
+            value["data"]["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "src/auth/index.ts",
+                "src/utils/formatter.ts",
+                "src/auth/aliases.ts",
+                "src/auth/middleware.ts",
+                "src/utils/logger.ts"
+            ]
+        );
+
+        fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]
@@ -2262,7 +2636,32 @@ mod tests {
         assert_eq!(plan.target_file, RepoPath::from("src/parser.rs"));
         assert_eq!(plan.old_name, "parser");
         assert_eq!(plan.new_name, "parser2");
-        assert!(!plan.warnings.is_empty());
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("does not move files")));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("import-path rewrites")));
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn rename_plan_file_target_rejects_path_like_destination() {
+        let repo = prepare_fixture_copy("rust_small");
+        let store = scope_core::Store::open(&repo.join(".scope/index.db")).unwrap();
+        let _ = index_repo(&repo, &store).unwrap();
+
+        let error = store
+            .build_rename_plan(&repo, "src/parser.rs", "src/parser2.rs", false, false)
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid command input: rename-plan file targets currently accept only a bare file stem for --to; file moves are not implemented"
+        );
 
         let _ = fs::remove_dir_all(repo);
     }

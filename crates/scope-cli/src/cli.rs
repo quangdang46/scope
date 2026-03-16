@@ -82,7 +82,7 @@ pub enum Commands {
     Mirror(MirrorArgs),
     /// Detect entry points and analyze file reachability
     Entry(EntryArgs),
-    /// Start a local HTTP API server with a minimal embedded UI
+    /// Start a local HTTP API server with a bundled embedded UI
     Serve(ServeArgs),
     /// Explore the indexed graph with a composable query language
     Query(QueryArgs),
@@ -217,6 +217,8 @@ pub enum ArchCommand {
     Check(ArchCheckArgs),
     /// Generate a starter .scope/arch.toml from detected layer directories
     Init(ArchInitArgs),
+    /// Explain which rules apply to a file
+    Explain(ArchExplainArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -224,6 +226,13 @@ pub struct ArchCheckArgs {}
 
 #[derive(Debug, clap::Args)]
 pub struct ArchInitArgs {}
+
+#[derive(Debug, clap::Args)]
+pub struct ArchExplainArgs {
+    /// File to explain
+    #[arg(value_name = "FILE")]
+    pub target: String,
+}
 
 #[derive(Debug, clap::Args)]
 pub struct AuditArgs {
@@ -402,6 +411,12 @@ pub struct SimulateExtractArgs {
 pub struct ReportArgs {
     #[arg(long)]
     pub compare: Option<String>,
+    /// Force JSON envelope output even on interactive terminals
+    #[arg(long)]
+    pub json: bool,
+    /// Write the rendered Markdown report to a file
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]

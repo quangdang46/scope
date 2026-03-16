@@ -59,6 +59,13 @@ fn prepare_fixture_copy(name: &str) -> PathBuf {
     dst
 }
 
+fn read_golden(name: &str) -> String {
+    fs::read_to_string(workspace_root().join("tests/golden").join(name))
+        .unwrap()
+        .trim_end_matches('\n')
+        .to_string()
+}
+
 fn run_scope(repo: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_scope"))
         .current_dir(repo)
@@ -111,12 +118,17 @@ fn wait_for_serve_url(child: &mut Child) -> String {
 
     loop {
         line.clear();
-        let read = reader.read_line(&mut line).expect("stderr should be readable");
+        let read = reader
+            .read_line(&mut line)
+            .expect("stderr should be readable");
         if read == 0 {
             if let Some(status) = child.try_wait().expect("child status should be available") {
                 panic!("scope serve exited before reporting a URL: {status}");
             }
-            assert!(Instant::now() < deadline, "timed out waiting for scope serve URL");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for scope serve URL"
+            );
             thread::sleep(Duration::from_millis(25));
             continue;
         }
@@ -131,7 +143,9 @@ fn http_get(url: &str) -> (String, String) {
     let without_scheme = url
         .strip_prefix("http://")
         .expect("test URLs should use http");
-    let (host_port, path) = without_scheme.split_once('/').unwrap_or((without_scheme, ""));
+    let (host_port, path) = without_scheme
+        .split_once('/')
+        .unwrap_or((without_scheme, ""));
     let request_path = format!("/{}", path);
     let mut stream = TcpStream::connect(host_port).expect("server should accept connections");
     stream
@@ -331,11 +345,8 @@ fn cochange_command_returns_json_envelope_for_generated_git_fixture() {
     assert_eq!(value["data"]["result"]["summary"]["target_commits"], 4);
     assert_eq!(value["data"]["result"]["files"][0]["path"], "src/utils.rs");
 
-    let expected = fs::read_to_string(
-        workspace_root().join("tests/golden/cochange_generated_cli.json"),
-    )
-    .unwrap();
-    assert_eq!(actual, expected.trim_end_matches('\n'));
+    let expected = read_golden("cochange_generated_cli.json");
+    assert_eq!(actual, expected);
 
     let _ = fs::remove_dir_all(repo);
 }
@@ -399,12 +410,18 @@ fn split_command_returns_json_envelope_for_fixture_repo() {
     assert_eq!(output.status.code(), Some(0));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
     assert_eq!(value["command"], "split");
     assert_eq!(value["status"], "ok");
     assert_eq!(value["data"]["result"]["target"], "src/lib.rs");
     assert_eq!(value["data"]["result"]["requested_clusters"], 2);
-    assert!(value["data"]["result"]["summary"]["clusters"].as_u64().unwrap() >= 1);
+    assert!(
+        value["data"]["result"]["summary"]["clusters"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -429,7 +446,8 @@ fn mirror_command_returns_json_envelope_for_fixture_repo() {
     assert_eq!(output.status.code(), Some(0));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
     assert_eq!(value["command"], "mirror");
     assert_eq!(value["status"], "ok");
     assert_eq!(value["data"]["result"]["target"], "src/lib.rs");
@@ -569,7 +587,10 @@ fn tree_reverse_command_returns_reverse_dependency_json_for_fixture_repo() {
     let index_output = run_scope(&repo, &["index"]);
     assert_eq!(index_output.status.code(), Some(0));
 
-    let output = run_scope(&repo, &["tree", "src/parser.rs", "--reverse", "--depth", "2"]);
+    let output = run_scope(
+        &repo,
+        &["tree", "src/parser.rs", "--reverse", "--depth", "2"],
+    );
     assert_eq!(output.status.code(), Some(0));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -583,8 +604,14 @@ fn tree_reverse_command_returns_reverse_dependency_json_for_fixture_repo() {
     assert_eq!(value["data"]["result"]["summary"]["reverse"], true);
     assert_eq!(value["data"]["result"]["summary"]["nodes"], 4);
     assert_eq!(value["data"]["result"]["tree"]["path"], "src/parser.rs");
-    assert_eq!(value["data"]["result"]["tree"]["children"][0]["path"], "src/lib.rs");
-    assert_eq!(value["data"]["result"]["tree"]["children"][1]["path"], "src/resolver.rs");
+    assert_eq!(
+        value["data"]["result"]["tree"]["children"][0]["path"],
+        "src/lib.rs"
+    );
+    assert_eq!(
+        value["data"]["result"]["tree"]["children"][1]["path"],
+        "src/resolver.rs"
+    );
     assert_eq!(
         value["data"]["result"]["tree"]["children"][1]["children"][0]["path"],
         "src/lib.rs"
@@ -642,7 +669,14 @@ fn query_expr_returns_json_envelope_for_fixture_repo() {
     let index_output = run_scope(&repo, &["index"]);
     assert_eq!(index_output.status.code(), Some(0));
 
-    let output = run_scope(&repo, &["query", "--expr", "file \"src/lib.rs\" | .deps | unique | count"]);
+    let output = run_scope(
+        &repo,
+        &[
+            "query",
+            "--expr",
+            "file \"src/lib.rs\" | .deps | unique | count",
+        ],
+    );
     assert_eq!(output.status.code(), Some(0));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -650,7 +684,10 @@ fn query_expr_returns_json_envelope_for_fixture_repo() {
         serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
     assert_eq!(value["command"], "query");
     assert_eq!(value["status"], "ok");
-    assert_eq!(value["data"]["input"], "file \"src/lib.rs\" | .deps | unique | count");
+    assert_eq!(
+        value["data"]["input"],
+        "file \"src/lib.rs\" | .deps | unique | count"
+    );
     assert_eq!(value["data"]["result"]["number"], 3);
 
     fs::remove_dir_all(repo).unwrap();
@@ -684,57 +721,103 @@ fn calls_and_callers_commands_return_live_json_for_direct_mode() {
 }
 
 #[test]
-fn calls_and_callers_commands_return_live_json_for_transitive_mode() {
+fn calls_command_returns_golden_json_for_rust_small_transitive() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);
     assert_eq!(index_output.status.code(), Some(0));
 
-    let calls_output = run_scope(&repo, &["calls", "lib::greet", "--transitive"]);
-    assert_eq!(calls_output.status.code(), Some(0));
-    let calls_value: serde_json::Value =
-        serde_json::from_slice(&calls_output.stdout).expect("stdout should be JSON");
-    assert_eq!(calls_value["command"], "calls");
-    assert_eq!(calls_value["status"], "ok");
-    assert_eq!(calls_value["data"]["symbol"], "lib::greet");
-    assert_eq!(calls_value["data"]["transitive"], true);
-    assert!(calls_value["warnings"].as_array().is_some_and(|items| items.is_empty()));
-    let calls_traversals = calls_value["data"]["traversals"]
-        .as_array()
-        .expect("transitive calls should return an array");
-    assert!(calls_traversals.iter().any(|item| {
-        item["qualname"].as_str() == Some("parser::parse") && item["distance"].as_u64() == Some(1)
-    }));
-    assert!(calls_traversals.iter().any(|item| {
-        item["qualname"].as_str() == Some("utils::format_output")
-            && item["distance"].as_u64() == Some(1)
-    }));
-    assert!(calls_traversals.iter().any(|item| {
-        item["qualname"].as_str() == Some("parser::tokenize")
-            && item["distance"].as_u64() == Some(2)
-    }));
+    let output = run_scope(&repo, &["calls", "parser::parse", "--transitive"]);
+    assert_eq!(output.status.code(), Some(0));
 
-    let callers_output = run_scope(&repo, &["callers", "parser::parse", "--transitive"]);
-    assert_eq!(callers_output.status.code(), Some(0));
-    let callers_value: serde_json::Value =
-        serde_json::from_slice(&callers_output.stdout).expect("stdout should be JSON");
-    assert_eq!(callers_value["command"], "callers");
-    assert_eq!(callers_value["status"], "ok");
-    assert_eq!(callers_value["data"]["symbol"], "parser::parse");
-    assert_eq!(callers_value["data"]["transitive"], true);
-    assert!(callers_value["warnings"].as_array().is_some_and(|items| items.is_empty()));
-    let callers_traversals = callers_value["data"]["traversals"]
-        .as_array()
-        .expect("transitive callers should return an array");
-    assert!(callers_traversals.iter().any(|item| {
-        item["qualname"].as_str() == Some("lib::greet") && item["distance"].as_u64() == Some(1)
-    }));
-    assert!(callers_traversals.iter().any(|item| {
-        item["qualname"].as_str() == Some("resolver::resolve")
-            && item["distance"].as_u64() == Some(1)
-    }));
-    assert!(callers_traversals.iter().any(|item| {
-        item["qualname"].as_str() == Some("main::main") && item["distance"].as_u64() == Some(2)
-    }));
+    let actual = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(actual.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "calls");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["symbol"], "parser::parse");
+    assert_eq!(value["data"]["transitive"], true);
+
+    let expected = read_golden("rust_small_parse_calls_transitive.json");
+    assert_eq!(actual.trim(), expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn callers_command_returns_golden_json_for_rust_small_transitive() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(&repo, &["callers", "parser::parse", "--transitive"]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let actual = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(actual.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "callers");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["symbol"], "parser::parse");
+    assert_eq!(value["data"]["transitive"], true);
+
+    let expected = read_golden("rust_small_parse_callers_transitive.json");
+    assert_eq!(actual.trim(), expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn deps_command_returns_golden_json_for_ts_small_forward_transitive_depth_two() {
+    let repo = prepare_fixture_copy("ts_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(
+        &repo,
+        &["deps", "src/index.ts", "--transitive", "--depth", "2"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let actual = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(actual.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "deps");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["target"], "src/index.ts");
+    assert_eq!(value["data"]["reverse"], false);
+    assert_eq!(value["data"]["transitive"], true);
+    assert_eq!(value["data"]["depth"], 2);
+
+    let expected = read_golden("ts_small_index_deps_transitive_depth_2.json");
+    assert_eq!(actual.trim(), expected);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn deps_command_returns_golden_json_for_ts_small_reverse_transitive() {
+    let repo = prepare_fixture_copy("ts_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope(
+        &repo,
+        &["deps", "src/auth/jwt.ts", "--reverse", "--transitive"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let actual = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(actual.trim()).expect("stdout should be JSON");
+    assert_eq!(value["command"], "deps");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["data"]["target"], "src/auth/jwt.ts");
+    assert_eq!(value["data"]["reverse"], true);
+    assert_eq!(value["data"]["transitive"], true);
+    assert!(value["data"]["depth"].is_null());
+
+    let expected = read_golden("ts_small_auth_jwt_reverse_deps_transitive.json");
+    assert_eq!(actual.trim(), expected);
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -814,13 +897,19 @@ fn query_expr_supports_quoted_pipes_escapes_and_let_bindings() {
     let index_output = run_scope(&repo, &["index"]);
     assert_eq!(index_output.status.code(), Some(0));
 
-    let quoted_output = run_scope(&repo, &["query", "--expr", "file \"src/a|b.rs\" | .symbols | count"]);
+    let quoted_output = run_scope(
+        &repo,
+        &["query", "--expr", "file \"src/a|b.rs\" | .symbols | count"],
+    );
     assert_eq!(quoted_output.status.code(), Some(0));
     let quoted_value: serde_json::Value =
         serde_json::from_slice(&quoted_output.stdout).expect("stdout should be JSON");
     assert_eq!(quoted_value["command"], "query");
     assert_eq!(quoted_value["status"], "ok");
-    assert_eq!(quoted_value["data"]["input"], "file \"src/a|b.rs\" | .symbols | count");
+    assert_eq!(
+        quoted_value["data"]["input"],
+        "file \"src/a|b.rs\" | .symbols | count"
+    );
     assert_eq!(quoted_value["data"]["result"]["number"], 1);
 
     let escaped_quote_output = run_scope(
@@ -855,14 +944,21 @@ fn query_expr_supports_quoted_pipes_escapes_and_let_bindings() {
 
     let let_output = run_scope(
         &repo,
-        &["query", "--expr", "let roots = file \"src/lib.rs\" | .deps | unique"],
+        &[
+            "query",
+            "--expr",
+            "let roots = file \"src/lib.rs\" | .deps | unique",
+        ],
     );
     assert_eq!(let_output.status.code(), Some(0));
     let let_value: serde_json::Value =
         serde_json::from_slice(&let_output.stdout).expect("stdout should be JSON");
     assert_eq!(let_value["command"], "query");
     assert_eq!(let_value["status"], "ok");
-    assert_eq!(let_value["data"]["input"], "let roots = file \"src/lib.rs\" | .deps | unique");
+    assert_eq!(
+        let_value["data"]["input"],
+        "let roots = file \"src/lib.rs\" | .deps | unique"
+    );
     let files = let_value["data"]["result"]["files"]
         .as_array()
         .expect("files result should be an array");
@@ -894,7 +990,7 @@ fn query_expr_unterminated_quote_emits_json_error_on_stderr() {
 }
 
 #[test]
-fn query_expr_supports_all_sources_and_reverse_step() {
+fn query_expr_supports_all_sources_and_transitive_steps() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);
     assert_eq!(index_output.status.code(), Some(0));
@@ -913,14 +1009,20 @@ fn query_expr_supports_all_sources_and_reverse_step() {
         serde_json::from_slice(&all_symbols_output.stdout).expect("stdout should be JSON");
     assert_eq!(all_symbols_value["command"], "query");
     assert_eq!(all_symbols_value["status"], "ok");
-    assert!(all_symbols_value["data"]["result"]["number"]
-        .as_u64()
-        .expect("symbol count should be numeric")
-        >= 4);
+    assert!(
+        all_symbols_value["data"]["result"]["number"]
+            .as_u64()
+            .expect("symbol count should be numeric")
+            >= 4
+    );
 
     let reverse_output = run_scope(
         &repo,
-        &["query", "--expr", "file \"src/parser.rs\" | .reverse | unique | count"],
+        &[
+            "query",
+            "--expr",
+            "file \"src/parser.rs\" | .reverse | unique | count",
+        ],
     );
     assert_eq!(reverse_output.status.code(), Some(0));
     let reverse_value: serde_json::Value =
@@ -928,6 +1030,36 @@ fn query_expr_supports_all_sources_and_reverse_step() {
     assert_eq!(reverse_value["command"], "query");
     assert_eq!(reverse_value["status"], "ok");
     assert_eq!(reverse_value["data"]["result"]["number"], 2);
+
+    let callers_output = run_scope(
+        &repo,
+        &[
+            "query",
+            "--expr",
+            "symbol \"parser::parse\" | .callers_transitive | count",
+        ],
+    );
+    assert_eq!(callers_output.status.code(), Some(0));
+    let callers_value: serde_json::Value =
+        serde_json::from_slice(&callers_output.stdout).expect("stdout should be JSON");
+    assert_eq!(callers_value["command"], "query");
+    assert_eq!(callers_value["status"], "ok");
+    assert_eq!(callers_value["data"]["result"]["number"], 2);
+
+    let callees_output = run_scope(
+        &repo,
+        &[
+            "query",
+            "--expr",
+            "symbol \"parser::parse\" | .callees_transitive | count",
+        ],
+    );
+    assert_eq!(callees_output.status.code(), Some(0));
+    let callees_value: serde_json::Value =
+        serde_json::from_slice(&callees_output.stdout).expect("stdout should be JSON");
+    assert_eq!(callees_value["command"], "query");
+    assert_eq!(callees_value["status"], "ok");
+    assert_eq!(callees_value["data"]["result"]["number"], 1);
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -1032,7 +1164,7 @@ fn query_repl_supports_help_bindings_and_exit() {
     assert!(stdout.contains("scope query REPL"));
     assert!(stdout.contains("Type :help for commands, :exit to quit."));
     assert!(stdout.contains("Sources: file \"...\", symbol \"...\", all-files, all-symbols, $name"));
-    assert!(stdout.contains("Steps: .deps, .reverse, .symbols, .callers, .callees, unique, count"));
+    assert!(stdout.contains("Steps: .deps, .reverse, .symbols, .callers, .callers_transitive, .callees, .callees_transitive, unique, count"));
     assert!(stdout.contains("Bindings: let name = <expr>"));
     assert!(stdout.contains("\"command\": \"query\""));
     assert!(stdout.contains("roots"));
@@ -1121,7 +1253,7 @@ fn query_repl_reprompts_after_blank_lines() {
 }
 
 #[test]
-fn query_repl_supports_all_sources_and_reverse_step() {
+fn query_repl_supports_all_sources_and_transitive_steps() {
     let repo = prepare_fixture_copy("rust_small");
     let index_output = run_scope(&repo, &["index"]);
     assert_eq!(index_output.status.code(), Some(0));
@@ -1129,7 +1261,7 @@ fn query_repl_supports_all_sources_and_reverse_step() {
     let output = run_scope_with_stdin(
         &repo,
         &["query"],
-        "all-files | count\nall-symbols | count\nfile \"src/parser.rs\" | .reverse | unique | count\n:exit\n",
+        "all-files | count\nall-symbols | count\nfile \"src/parser.rs\" | .reverse | unique | count\nsymbol \"parser::parse\" | .callers_transitive | count\nsymbol \"parser::parse\" | .callees_transitive | count\n:exit\n",
     );
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
@@ -1138,9 +1270,34 @@ fn query_repl_supports_all_sources_and_reverse_step() {
     assert!(stdout.contains("scope query REPL"));
     assert!(stdout.contains("\"input\": \"all-files | count\""));
     assert!(stdout.contains("\"input\": \"all-symbols | count\""));
-    assert!(stdout.contains("\"input\": \"file \\\"src/parser.rs\\\" | .reverse | unique | count\""));
+    assert!(
+        stdout.contains("\"input\": \"file \\\"src/parser.rs\\\" | .reverse | unique | count\"")
+    );
+    assert!(stdout
+        .contains("\"input\": \"symbol \\\"parser::parse\\\" | .callers_transitive | count\""));
+    assert!(stdout
+        .contains("\"input\": \"symbol \\\"parser::parse\\\" | .callees_transitive | count\""));
     assert!(stdout.contains("\"number\": 5"));
     assert!(stdout.contains("\"number\": 1"));
+    assert!(stdout.matches("\"number\": 2").count() >= 2);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+fn query_repl_persists_successful_history_entries() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let output = run_scope_with_stdin(&repo, &["query"], "all-files | count\n:exit\n");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+
+    let history = fs::read_to_string(repo.join(".scope/query_history.txt"))
+        .expect("query history should be written");
+    assert!(history.contains("#V2"));
+    assert!(history.contains("all-files | count"));
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -1190,6 +1347,28 @@ fn serve_command_supports_ephemeral_port_and_reports_live_url() {
 }
 
 #[test]
+fn serve_command_serves_bundled_ui_when_enabled() {
+    let repo = prepare_fixture_copy("rust_small");
+    let index_output = run_scope(&repo, &["index", "--no-git"]);
+    assert_eq!(index_output.status.code(), Some(0));
+
+    let mut child = spawn_scope_serve(&repo, &["serve", "--port", "0"]);
+    let url = wait_for_serve_url(&mut child);
+    assert!(url.starts_with("http://127.0.0.1:"));
+
+    let (root_headers, root_body) = http_get(&url);
+    assert!(root_headers.starts_with("HTTP/1.1 200 OK"));
+    assert!(root_headers.contains("content-type: text/html; charset=utf-8"));
+    assert!(root_body.contains("<title>scope serve</title>"));
+    assert!(root_body.contains("Bundled local API explorer for the indexed repository."));
+    assert!(root_body.contains("/api/audit?capability=network"));
+    assert!(root_body.contains("/api/tree?target=src/lib.rs"));
+
+    stop_child(child);
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
 fn report_and_gate_help_include_expected_flags() {
     let report_output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .args(["report", "--help"])
@@ -1218,14 +1397,22 @@ fn report_and_gate_commands_return_live_json_envelopes() {
     let snapshot_output = run_scope(&repo, &["snapshot", "save", "--name", "baseline"]);
     assert_eq!(snapshot_output.status.code(), Some(0));
 
-    let report_output = run_scope(&repo, &["report", "--compare", "baseline"]);
+    let report_output = run_scope(&repo, &["report", "--compare", "baseline", "--json"]);
     assert_eq!(report_output.status.code(), Some(0));
     let report_value: serde_json::Value =
         serde_json::from_slice(&report_output.stdout).expect("stdout should be JSON");
     assert_eq!(report_value["command"], "report");
     assert_eq!(report_value["status"], "ok");
-    assert_eq!(report_value["data"]["result"]["compare"]["target"], "baseline");
-    assert!(report_value["data"]["result"]["metrics"]["total_files"].as_u64().unwrap() > 0);
+    assert_eq!(
+        report_value["data"]["result"]["compare"]["target"],
+        "baseline"
+    );
+    assert!(
+        report_value["data"]["result"]["metrics"]["total_files"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let gate_output = run_scope(&repo, &["gate", "--compare", "baseline", "--strict"]);
     assert_eq!(gate_output.status.code(), Some(1));
@@ -1235,7 +1422,12 @@ fn report_and_gate_commands_return_live_json_envelopes() {
     assert_eq!(gate_value["status"], "ok");
     assert_eq!(gate_value["data"]["result"]["compare"], "baseline");
     assert_eq!(gate_value["data"]["result"]["summary"]["failed"], 1);
-    assert!(gate_value["data"]["result"]["summary"]["passed"].as_u64().unwrap() > 0);
+    assert!(
+        gate_value["data"]["result"]["summary"]["passed"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -1313,10 +1505,12 @@ skip = false
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(value["command"], "gate");
     assert_eq!(value["status"], "ok");
-    assert!(value["data"]["result"]["summary"]["warnings"]
-        .as_u64()
-        .expect("warnings summary should be numeric")
-        >= 1);
+    assert!(
+        value["data"]["result"]["summary"]["warnings"]
+            .as_u64()
+            .expect("warnings summary should be numeric")
+            >= 1
+    );
     let evaluations = value["data"]["result"]["evaluations"]
         .as_array()
         .expect("evaluations should be an array");
@@ -1358,10 +1552,12 @@ skip = true
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(value["command"], "gate");
     assert_eq!(value["status"], "ok");
-    assert!(value["data"]["result"]["summary"]["skipped"]
-        .as_u64()
-        .expect("skipped summary should be numeric")
-        >= 1);
+    assert!(
+        value["data"]["result"]["summary"]["skipped"]
+            .as_u64()
+            .expect("skipped summary should be numeric")
+            >= 1
+    );
     let evaluations = value["data"]["result"]["evaluations"]
         .as_array()
         .expect("evaluations should be an array");
@@ -1371,7 +1567,10 @@ skip = true
         .expect("cycles evaluation should be present");
     assert_eq!(evaluation["status"], "skipped");
     assert_eq!(evaluation["severity"], "warning");
-    assert_eq!(evaluation["detail"], "gate explicitly skipped by configuration");
+    assert_eq!(
+        evaluation["detail"],
+        "gate explicitly skipped by configuration"
+    );
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -1422,9 +1621,18 @@ fn snapshot_round_trip_and_diff_snapshot_return_live_json_envelopes() {
     assert_eq!(diff_value["data"]["result"]["cycles"]["after"], 0);
     assert_eq!(diff_value["data"]["result"]["cycles"]["introduced"], 0);
     assert_eq!(diff_value["data"]["result"]["cycles"]["resolved"], 0);
-    assert_eq!(diff_value["data"]["result"]["omitted"], serde_json::json!([]));
-    assert_eq!(diff_value["data"]["result"]["surface_diff"]["summary"]["added_count"], 1);
-    assert_eq!(diff_value["data"]["result"]["surface_diff"]["summary"]["removed_count"], 1);
+    assert_eq!(
+        diff_value["data"]["result"]["omitted"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        diff_value["data"]["result"]["surface_diff"]["summary"]["added_count"],
+        1
+    );
+    assert_eq!(
+        diff_value["data"]["result"]["surface_diff"]["summary"]["removed_count"],
+        1
+    );
     assert!(diff_value["data"]["result"]["surface_diff"]["changes"]
         .as_array()
         .is_some_and(|items| items.len() >= 2));
@@ -1455,7 +1663,9 @@ fn doctor_command_returns_live_json_envelope_for_fixture_repo() {
     assert_eq!(value["data"]["fix"], false);
     assert!(value["data"]["schema_version"].as_u64().unwrap() >= 1);
     assert_eq!(value["data"]["stats"]["files"], 5);
-    assert!(value["data"]["checks"].as_array().is_some_and(|items| items.len() >= 3));
+    assert!(value["data"]["checks"]
+        .as_array()
+        .is_some_and(|items| items.len() >= 3));
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -1477,5 +1687,10 @@ fn benchmark_command_returns_live_json_envelope_for_fixture_repo() {
     assert_eq!(value["data"]["iterations"], 1);
     assert_eq!(value["data"]["summary"]["indexed_files"], 5);
     assert!(value["data"]["summary"]["full"]["avg_ms"].as_f64().unwrap() >= 0.0);
-    assert!(value["data"]["summary"]["incremental"]["avg_ms"].as_f64().unwrap() >= 0.0);
+    assert!(
+        value["data"]["summary"]["incremental"]["avg_ms"]
+            .as_f64()
+            .unwrap()
+            >= 0.0
+    );
 }

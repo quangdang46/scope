@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "command": "deps",
+  "status": "ok",
+  "data": {
+    "target": "src/index.ts",
+    "reverse": false,
+    "transitive": true,
+    "depth": 2,
+    "dependencies": [
+      {
+        "kind": "file",
+        "path": "src/auth/index.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "export { verifyToken } from \"./auth/index\";",
+        "line": 1
+      },
+      {
+        "kind": "file",
+        "path": "src/utils/formatter.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "export { format } from \"./utils/formatter\";",
+        "line": 2
+      },
+      {
+        "kind": "file",
+        "path": "src/auth/aliases.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "export { verifyJwt, signJwt } from \"./aliases\";",
+        "line": 2
+      },
+      {
+        "kind": "file",
+        "path": "src/auth/middleware.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "export { verifyToken } from \"./middleware\";",
+        "line": 1
+      },
+      {
+        "kind": "file",
+        "path": "src/utils/logger.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "import { log } from \"./logger\";",
+        "line": 1
+      }
+    ]
+  },
+  "warnings": []
+}

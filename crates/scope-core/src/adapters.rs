@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use crate::model::CallSiteRecord;
+use crate::model::{CallSiteRecord, TsConfig};
 use crate::{
-    Certainty, DiagnosticSeverity, ExportRecord, ExtractResult, FileRecord, ImportPath,
-    ImportRecord, ModuleRecord, ParseDiagnostic, ParseStatus, RepoPath, ScanEntry, Span,
-    SupportedLanguage, SymbolKind, SymbolRecord, Visibility,
+    load_tsconfig, Certainty, DiagnosticSeverity, ExportRecord, ExtractResult, FileRecord,
+    ImportPath, ImportRecord, ModuleRecord, ParseDiagnostic, ParseStatus, RepoPath, ScanEntry,
+    Span, SupportedLanguage, SymbolKind, SymbolRecord, Visibility,
 };
 
 pub trait Adapter: Send + Sync {
@@ -191,6 +191,7 @@ impl Adapter for TsJsAdapter {
 
     fn extract(&self, entry: &ScanEntry, source: &str) -> ExtractResult {
         let repo_root = infer_repo_root(entry);
+        let ts_config = load_tsconfig(&repo_root);
         let mut imports = Vec::new();
         let mut exports = Vec::new();
         let mut symbols = Vec::new();
@@ -212,7 +213,8 @@ impl Adapter for TsJsAdapter {
                 saw_non_export_statement = true;
             }
 
-            if let Some(import_record) = parse_ts_js_import(trimmed, &entry.path, &repo_root, &span)
+            if let Some(import_record) =
+                parse_ts_js_import(trimmed, &entry.path, &repo_root, &ts_config, &span)
             {
                 imports.push(import_record);
             }
@@ -227,6 +229,7 @@ impl Adapter for TsJsAdapter {
             {
                 symbols.push(symbol);
             }
+            apply_ts_js_commonjs_exports(trimmed, &entry.path, &span, &mut symbols, &mut exports);
 
             let function_qualname_for_line = current_function_qualname.as_deref();
             call_sites.extend(extract_call_sites_from_line(
@@ -443,10 +446,11 @@ fn parse_ts_js_import(
     trimmed: &str,
     file: &RepoPath,
     repo_root: &Path,
+    ts_config: &TsConfig,
     span: &Span,
 ) -> Option<ImportRecord> {
     let specifier = quoted_specifier(trimmed)?;
-    let import_path = normalize_ts_js_import_path(file, repo_root, &specifier);
+    let import_path = normalize_ts_js_import_path(file, repo_root, &specifier, ts_config);
     let certainty = match import_path {
         ImportPath::Relative(_) => Certainty::Exact,
         ImportPath::External(_) => Certainty::Heuristic,
@@ -490,6 +494,122 @@ fn parse_ts_js_reexport_function_binding(
         exported: true,
         span: span.clone(),
     })
+}
+
+fn apply_ts_js_commonjs_exports(
+    trimmed: &str,
+    file: &RepoPath,
+    span: &Span,
+    symbols: &mut Vec<SymbolRecord>,
+    exports: &mut Vec<ExportRecord>,
+) {
+    if let Some(names) = parse_ts_js_module_exports_names(trimmed) {
+        for name in names {
+            upsert_ts_js_exported_symbol(file, span, &name, SymbolKind::Function, symbols, exports);
+        }
+    }
+
+    if let Some(name) = parse_ts_js_exports_assignment_name(trimmed) {
+        upsert_ts_js_exported_symbol(file, span, &name, SymbolKind::Function, symbols, exports);
+    }
+}
+
+fn upsert_ts_js_exported_symbol(
+    file: &RepoPath,
+    span: &Span,
+    name: &str,
+    fallback_kind: SymbolKind,
+    symbols: &mut Vec<SymbolRecord>,
+    exports: &mut Vec<ExportRecord>,
+) {
+    let qualname = qualified_symbol_name(file, name);
+    let (kind, visibility) = if let Some(existing) = symbols
+        .iter_mut()
+        .find(|symbol| symbol.qualname == qualname)
+    {
+        existing.exported = true;
+        existing.visibility = Visibility::Public;
+        (existing.kind.clone(), existing.visibility.clone())
+    } else {
+        let symbol = SymbolRecord {
+            file: file.clone(),
+            name: name.to_string(),
+            qualname: qualname.clone(),
+            kind: fallback_kind.clone(),
+            visibility: Visibility::Public,
+            exported: true,
+            span: span.clone(),
+        };
+        let kind = symbol.kind.clone();
+        let visibility = symbol.visibility.clone();
+        symbols.push(symbol);
+        (kind, visibility)
+    };
+
+    exports.push(ExportRecord {
+        file: file.clone(),
+        name: name.to_string(),
+        qualname: Some(qualname),
+        kind,
+        visibility,
+        span: span.clone(),
+    });
+}
+
+fn parse_ts_js_module_exports_names(trimmed: &str) -> Option<Vec<String>> {
+    let body = trimmed
+        .strip_prefix("module.exports = ")?
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    let inner = body.strip_prefix('{')?.strip_suffix('}')?.trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    let names = inner
+        .split(',')
+        .filter_map(|entry| {
+            let candidate = entry
+                .trim()
+                .split_once(':')
+                .map(|(name, _)| name)
+                .unwrap_or(entry)
+                .trim();
+            if candidate.is_empty()
+                || candidate.starts_with('"')
+                || candidate.starts_with('\'')
+                || candidate.starts_with("...")
+                || !candidate
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            {
+                None
+            } else {
+                Some(candidate.to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if names.is_empty() {
+        None
+    } else {
+        Some(names)
+    }
+}
+
+fn parse_ts_js_exports_assignment_name(trimmed: &str) -> Option<String> {
+    let remainder = trimmed.strip_prefix("exports.")?;
+    let (name, _) = remainder.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 fn ts_js_exported_name(trimmed: &str) -> Option<String> {
@@ -540,11 +660,32 @@ fn parse_ts_js_top_level_symbol(
     file: &RepoPath,
     span: &Span,
 ) -> Option<SymbolRecord> {
-    let (body, exported) = if let Some(remainder) = trimmed.strip_prefix("export ") {
+    let (body, exported) = if let Some(remainder) = trimmed.strip_prefix("export default ") {
+        (remainder.trim_start(), true)
+    } else if let Some(remainder) = trimmed.strip_prefix("export ") {
         (remainder.trim_start(), true)
     } else {
         (trimmed, false)
     };
+
+    if body
+        .strip_prefix("function")
+        .is_some_and(|remainder| remainder.trim_start().starts_with('('))
+    {
+        return Some(SymbolRecord {
+            file: file.clone(),
+            name: "default".to_string(),
+            qualname: qualified_symbol_name(file, "default"),
+            kind: SymbolKind::Function,
+            visibility: if exported {
+                Visibility::Public
+            } else {
+                Visibility::Local
+            },
+            exported,
+            span: span.clone(),
+        });
+    }
 
     let (prefix, kind) = [
         ("async function ", SymbolKind::Function),
@@ -590,31 +731,143 @@ fn quoted_specifier(trimmed: &str) -> Option<String> {
     Some(remainder[..end].to_string())
 }
 
-fn normalize_ts_js_import_path(file: &RepoPath, repo_root: &Path, specifier: &str) -> ImportPath {
-    if !specifier.starts_with('.') {
-        return ImportPath::External(specifier.to_string());
+fn normalize_ts_js_import_path(
+    file: &RepoPath,
+    repo_root: &Path,
+    specifier: &str,
+    ts_config: &TsConfig,
+) -> ImportPath {
+    // Handle relative imports with standard resolution
+    if specifier.starts_with('.') {
+        let importer = repo_root.join(&file.0);
+        let Some(importer_dir) = importer.parent() else {
+            return ImportPath::Unresolved;
+        };
+        let base = importer_dir.join(specifier);
+
+        for candidate in ts_js_candidates(&base) {
+            if candidate.exists() {
+                let normalized = candidate.canonicalize().unwrap_or(candidate.clone());
+                let normalized_repo_root = repo_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| repo_root.to_path_buf());
+                return ImportPath::Relative(path_under_explicit_repo(
+                    &normalized,
+                    &normalized_repo_root,
+                ));
+            }
+        }
+
+        return ImportPath::Unresolved;
     }
 
-    let importer = repo_root.join(&file.0);
-    let Some(importer_dir) = importer.parent() else {
-        return ImportPath::Unresolved;
-    };
-    let base = importer_dir.join(specifier);
+    // Handle absolute/aliased imports via tsconfig paths
+    if let Some(resolved_path) = resolve_tsconfig_path(specifier, repo_root, ts_config) {
+        return ImportPath::Relative(resolved_path);
+    }
 
-    for candidate in ts_js_candidates(&base) {
-        if candidate.exists() {
-            let normalized = candidate.canonicalize().unwrap_or(candidate.clone());
-            let normalized_repo_root = repo_root
-                .canonicalize()
-                .unwrap_or_else(|_| repo_root.to_path_buf());
-            return ImportPath::Relative(path_under_explicit_repo(
-                &normalized,
-                &normalized_repo_root,
-            ));
+    // Fall back to external for non-relative imports without tsconfig mapping
+    ImportPath::External(specifier.to_string())
+}
+
+/// Resolve an import specifier using tsconfig path mappings.
+///
+/// Returns Some(RepoPath) if the specifier matches a tsconfig path
+/// and the resolved file exists, otherwise None.
+fn resolve_tsconfig_path(
+    specifier: &str,
+    repo_root: &Path,
+    ts_config: &TsConfig,
+) -> Option<RepoPath> {
+    let tsconfig_base = ts_config
+        .base_url
+        .as_deref()
+        .map(|base_url| repo_root.join(base_url))
+        .unwrap_or_else(|| repo_root.to_path_buf());
+
+    // First, try to match against explicit paths mappings
+    for (pattern, replacements) in &ts_config.paths {
+        if let Some(mapped) =
+            apply_tsconfig_pattern(specifier, pattern, replacements, &tsconfig_base, repo_root)
+        {
+            return Some(mapped);
         }
     }
 
-    ImportPath::Unresolved
+    // Then, if baseUrl is set, try resolving relative to baseUrl
+    if let Some(base_url) = &ts_config.base_url {
+        let base_path = repo_root.join(base_url);
+        let specifier_path = base_path.join(specifier);
+
+        for candidate in ts_js_candidates(&specifier_path) {
+            if candidate.exists() {
+                let normalized = candidate.canonicalize().unwrap_or(candidate.clone());
+                let normalized_repo_root = repo_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| repo_root.to_path_buf());
+                return Some(path_under_explicit_repo(&normalized, &normalized_repo_root));
+            }
+        }
+    }
+
+    None
+}
+
+/// Apply a tsconfig paths pattern to an import specifier.
+///
+/// Patterns use `*` as a wildcard that can match any path segment.
+/// For example, `"@/*"` matches `"@/foo"` and maps it using
+/// the replacement `"src/*"` to `"src/foo"`.
+fn apply_tsconfig_pattern(
+    specifier: &str,
+    pattern: &str,
+    replacements: &[String],
+    replacement_base: &Path,
+    repo_root: &Path,
+) -> Option<RepoPath> {
+    let wildcard_pos = pattern.find('*')?;
+    let pattern_prefix = &pattern[..wildcard_pos];
+    let pattern_suffix = pattern.get(wildcard_pos + 1..).unwrap_or("");
+
+    if !specifier.starts_with(pattern_prefix) {
+        return None;
+    }
+
+    let specifier_suffix = specifier.get(pattern_prefix.len()..)?;
+    if !pattern_suffix.is_empty() && !specifier_suffix.ends_with(pattern_suffix) {
+        return None;
+    }
+
+    let wildcard_match = if pattern_suffix.is_empty() {
+        specifier_suffix
+    } else {
+        specifier_suffix.strip_suffix(pattern_suffix)?
+    };
+
+    // Try each replacement in order until we find a match
+    for replacement in replacements {
+        let wildcard_pos = replacement.find('*')?;
+        let replacement_prefix = &replacement[..wildcard_pos];
+        let replacement_suffix = replacement.get(wildcard_pos + 1..).unwrap_or("");
+
+        let resolved_path = replacement_base.join(format!(
+            "{}{}{}",
+            replacement_prefix, wildcard_match, replacement_suffix
+        ));
+
+        // Check if the resolved file exists with any TS/JS extension
+        for candidate in ts_js_candidates(&resolved_path) {
+            if candidate.exists() {
+                let normalized = candidate.canonicalize().unwrap_or(candidate.clone());
+                let normalized_repo_root = repo_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| repo_root.to_path_buf());
+                return Some(path_under_explicit_repo(&normalized, &normalized_repo_root));
+            }
+        }
+    }
+
+    None
 }
 
 fn ts_js_candidates(base: &Path) -> Vec<PathBuf> {
@@ -1195,6 +1448,108 @@ mod tests {
                 .map(|symbol| symbol.name.clone())
                 .collect::<Vec<_>>(),
             vec!["verifyJwt"]
+        );
+    }
+
+    #[test]
+    fn resolves_tsconfig_path_aliases_and_base_url_imports() {
+        let adapter = TsJsAdapter;
+        let entry = fixture_entry_in(
+            "ts_with_paths",
+            "src/index.ts",
+            SupportedLanguage::TypeScript,
+        );
+        let source = std::fs::read_to_string(&entry.absolute_path).unwrap();
+
+        let result = adapter.extract(&entry, &source);
+        assert_eq!(
+            result
+                .imports
+                .iter()
+                .map(|import| import.import_path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                ImportPath::Relative(RepoPath::from("src/utils/logger.ts")),
+                ImportPath::Relative(RepoPath::from("src/components/Button.ts")),
+            ]
+        );
+
+        let base_url_result = adapter.extract(
+            &entry,
+            "import { logger } from \"utils/logger\";\nexport { logger };\n",
+        );
+        assert_eq!(
+            base_url_result.imports[0].import_path,
+            ImportPath::Relative(RepoPath::from("src/utils/logger.ts"))
+        );
+    }
+
+    #[test]
+    fn extracts_ts_js_default_and_commonjs_exports() {
+        let adapter = TsJsAdapter;
+
+        let default_entry = fixture_entry_in(
+            "ts_small",
+            "src/auth/default_export.ts",
+            SupportedLanguage::TypeScript,
+        );
+        let default_source =
+            "export default function (token: string): boolean {\n  return token.startsWith(\"signed:\");\n}\n";
+        let default_result = adapter.extract(&default_entry, default_source);
+
+        assert_eq!(
+            default_result
+                .symbols
+                .iter()
+                .map(|symbol| (
+                    symbol.name.clone(),
+                    symbol.exported,
+                    symbol.visibility.clone()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("default".to_string(), true, Visibility::Public)]
+        );
+        assert_eq!(default_result.exports.len(), 1);
+        assert_eq!(default_result.exports[0].name, "default");
+        assert_eq!(
+            default_result.exports[0].qualname.as_deref(),
+            Some("auth::default_export::default")
+        );
+
+        let commonjs_entry = fixture_entry_in(
+            "ts_small",
+            "src/auth/commonjs.ts",
+            SupportedLanguage::TypeScript,
+        );
+        let commonjs_source = concat!(
+            "const jwt = require(\"./jwt\");\n",
+            "const verifyJwt = (token: string) => jwt.verify(token);\n",
+            "module.exports = { verifyJwt };\n",
+            "exports.signJwt = (payload: string) => jwt.sign(payload);\n",
+        );
+        let commonjs_result = adapter.extract(&commonjs_entry, commonjs_source);
+
+        assert_eq!(commonjs_result.imports.len(), 1);
+        assert_eq!(
+            commonjs_result.imports[0].import_path,
+            ImportPath::Relative(RepoPath::from("src/auth/jwt.ts"))
+        );
+        assert_eq!(
+            commonjs_result
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.exported)
+                .map(|symbol| symbol.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["verifyJwt".to_string(), "signJwt".to_string()]
+        );
+        assert_eq!(
+            commonjs_result
+                .exports
+                .iter()
+                .map(|export| export.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["verifyJwt".to_string(), "signJwt".to_string()]
         );
     }
 

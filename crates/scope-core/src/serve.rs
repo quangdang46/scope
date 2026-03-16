@@ -13,9 +13,7 @@ use tower::ServiceExt;
 
 use crate::{
     execute_query, load_arch_config,
-    model::{
-        CochangeSort, CycleSeverity, ImpactChangeType, RiskSort, StabilitySort, SymbolKind,
-    },
+    model::{CochangeSort, CycleSeverity, ImpactChangeType, RiskSort, StabilitySort, SymbolKind},
     stub, DatabaseInfo, IndexHealthStats, QuerySession, RepoPath, RuntimePaths, ScopeError,
     ScopeResult, Store,
 };
@@ -39,131 +37,7 @@ pub struct ServeStatusData {
     pub stats: IndexHealthStats,
 }
 
-const WEB_UI_HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>scope serve</title>
-  <style>
-    :root { color-scheme: dark light; }
-    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 24px; background: #0f172a; color: #e2e8f0; }
-    h1 { margin-top: 0; }
-    a { color: #93c5fd; }
-    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 20px; }
-    .card { border: 1px solid #334155; border-radius: 8px; padding: 16px; background: #111827; }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
-    button { cursor: pointer; border: 1px solid #475569; background: #1e293b; color: inherit; border-radius: 6px; padding: 8px 12px; }
-    pre { white-space: pre-wrap; word-break: break-word; border: 1px solid #334155; border-radius: 8px; padding: 16px; background: #020617; min-height: 280px; }
-    .muted { color: #94a3b8; }
-  </style>
-</head>
-<body>
-  <h1>scope serve</h1>
-  <p class="muted">Minimal local API explorer for the indexed repository.</p>
-
-  <div class="grid">
-    <div class="card">
-      <strong>Status</strong>
-      <p>Check index/database health.</p>
-      <a href="/api/status">/api/status</a>
-    </div>
-    <div class="card">
-      <strong>Entry points</strong>
-      <p>List detected entry points.</p>
-      <a href="/api/entry/list">/api/entry/list</a>
-    </div>
-    <div class="card">
-      <strong>Entry cone</strong>
-      <p>Show files reachable from a detected entry point.</p>
-      <a href="/api/entry/cone?target=src/workers/job.ts">/api/entry/cone?target=src/workers/job.ts</a>
-    </div>
-    <div class="card">
-      <strong>Snapshots</strong>
-      <p>List saved snapshots.</p>
-      <a href="/api/snapshot/list">/api/snapshot/list</a>
-    </div>
-    <div class="card">
-      <strong>Audit</strong>
-      <p>Trace configured capability reachability.</p>
-      <a href="/api/audit?capability=network">/api/audit?capability=network</a>
-    </div>
-    <div class="card">
-      <strong>Surface diff</strong>
-      <p>Compare exported API shape between indexed files.</p>
-      <a href="/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts">/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts</a>
-    </div>
-    <div class="card">
-      <strong>Tree</strong>
-      <p>Inspect recursive file dependencies.</p>
-      <a href="/api/tree?target=src/lib.rs">/api/tree?target=src/lib.rs</a>
-    </div>
-    <div class="card">
-      <strong>Report</strong>
-      <p>Summarize repository health metrics and findings.</p>
-      <a href="/api/report">/api/report</a>
-    </div>
-    <div class="card">
-      <strong>Gate</strong>
-      <p>Evaluate configured quality gates against current health.</p>
-      <a href="/api/gate?strict=true">/api/gate?strict=true</a>
-    </div>
-    <div class="card">
-      <strong>Query</strong>
-      <p>Run composable graph queries over indexed files and symbols.</p>
-      <a href="/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count">/api/query?expr=file "src/lib.rs" | .deps | count</a>
-    </div>
-    <div class="card">
-      <strong>Unused</strong>
-      <p>List exported symbols with no indexed inbound references.</p>
-      <a href="/api/unused">/api/unused</a>
-    </div>
-    <div class="card">
-      <strong>Simulate extract</strong>
-      <p>Preview graph changes from extracting symbols into a new file.</p>
-      <a href="/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs">/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs</a>
-    </div>
-  </div>
-
-  <div class="actions">
-    <button data-endpoint="/api/status">Load status</button>
-    <button data-endpoint="/api/report">Load report</button>
-    <button data-endpoint="/api/gate?strict=true">Load gate</button>
-    <button data-endpoint="/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count">Load query</button>
-    <button data-endpoint="/api/unused">Load unused</button>
-    <button data-endpoint="/api/entry/list">Load entry list</button>
-    <button data-endpoint="/api/entry/cone?target=src/workers/job.ts">Load entry cone</button>
-    <button data-endpoint="/api/audit?capability=network">Load audit</button>
-    <button data-endpoint="/api/surface?target=src/auth/jwt.ts">Load surface</button>
-    <button data-endpoint="/api/surface/diff?before=src/auth/jwt.ts&after=src/auth/aliases.ts">Load surface diff</button>
-    <button data-endpoint="/api/cycles">Load cycles</button>
-    <button data-endpoint="/api/tree?target=src/lib.rs">Load tree</button>
-    <button data-endpoint="/api/simulate/extract?symbols=lib::parser&into=src/parser_extracted.rs">Load simulate extract</button>
-    <button data-endpoint="/api/entry/reaches?target=src/parser.rs">Load entry reaches</button>
-    <button data-endpoint="/api/snapshot/list">Load snapshots</button>
-  </div>
-
-  <pre id="output">Click a button to fetch JSON.</pre>
-
-  <script>
-    const output = document.getElementById('output');
-    async function load(endpoint) {
-      output.textContent = `Loading ${endpoint} ...`;
-      try {
-        const response = await fetch(endpoint);
-        const data = await response.json();
-        output.textContent = JSON.stringify(data, null, 2);
-      } catch (error) {
-        output.textContent = String(error);
-      }
-    }
-    for (const button of document.querySelectorAll('button[data-endpoint]')) {
-      button.addEventListener('click', () => load(button.dataset.endpoint));
-    }
-  </script>
-</body>
-</html>
-"#;
+const WEB_UI_HTML: &str = include_str!("../web_ui/dist/index.html");
 
 pub fn build_router(state: Arc<ServeState>, no_ui: bool) -> Router {
     let mut app = Router::new()
@@ -497,7 +371,9 @@ async fn api_deps(
     match (|| {
         let store = open_store(&state)?;
         let target = RepoPath::from(params.file.clone());
-        let dependencies = if params.reverse {
+        let dependencies = if params.transitive {
+            store.query_deps_transitive(&target, params.reverse, params.depth)?
+        } else if params.reverse {
             store.query_reverse_deps(&target)?
         } else {
             store.query_deps(&target)?
@@ -593,7 +469,12 @@ async fn api_explain(
     match (|| {
         let store = open_store(&state)?;
         let traversals = store.query_explain(&params.target, params.to.as_deref(), params.depth)?;
-        Ok(stub::explain(params.target, params.to, params.depth, traversals))
+        Ok(stub::explain(
+            params.target,
+            params.to,
+            params.depth,
+            traversals,
+        ))
     })() {
         Ok(envelope) => json_success(envelope),
         Err(error) => query_error("explain", error),
@@ -871,7 +752,8 @@ async fn api_simulate_extract(
                 "simulate extract requires at least one symbol".to_string(),
             ));
         }
-        let result = store.simulate_extract(&symbols, &RepoPath::from(params.into_file), &config)?;
+        let result =
+            store.simulate_extract(&symbols, &RepoPath::from(params.into_file), &config)?;
         Ok(stub::simulate_extract(result))
     })() {
         Ok(envelope) => json_success(envelope),
@@ -1022,16 +904,20 @@ mod tests {
     use serde_json::Value;
     use std::fs;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::{adapter_for_language, scan_repo, ScanConfig, Store};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("scope-serve-{prefix}-{nanos}"))
+        let salt = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("scope-serve-{prefix}-{nanos}-{salt}"))
     }
 
     fn workspace_root() -> std::path::PathBuf {
@@ -1152,6 +1038,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deps_endpoint_supports_transitive_closure_with_depth_limit() {
+        let (state, repo) = build_test_state("ts_small");
+        let app = build_router(state, false);
+        let response = call(app, "/api/deps?file=src/index.ts&transitive=true&depth=2").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "deps");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "src/index.ts");
+        assert_eq!(value["data"]["transitive"], true);
+        assert_eq!(value["data"]["depth"], 2);
+        assert_eq!(
+            value["data"]["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "src/auth/index.ts",
+                "src/utils/formatter.ts",
+                "src/auth/aliases.ts",
+                "src/auth/middleware.ts",
+                "src/utils/logger.ts"
+            ]
+        );
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
     async fn audit_endpoint_returns_expected_envelope() {
         let (state, repo) = build_test_state("capability_audit");
         let app = build_router(state, false);
@@ -1216,7 +1135,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["command"], "report");
         assert_eq!(value["status"], "ok");
-        assert!(value["data"]["result"]["metrics"]["total_files"].as_u64().is_some());
+        assert!(value["data"]["result"]["metrics"]["total_files"]
+            .as_u64()
+            .is_some());
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1232,7 +1153,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["command"], "gate");
         assert_eq!(value["status"], "ok");
-        assert!(value["data"]["result"]["summary"]["total"].as_u64().is_some());
+        assert!(value["data"]["result"]["summary"]["total"]
+            .as_u64()
+            .is_some());
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1294,7 +1217,11 @@ mod tests {
     async fn query_endpoint_returns_expected_envelope() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);
-        let response = call(app, "/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count").await;
+        let response = call(
+            app,
+            "/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count",
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1302,7 +1229,10 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["command"], "query");
         assert_eq!(value["status"], "ok");
-        assert_eq!(value["data"]["input"], "file \"src/lib.rs\" | .deps | count");
+        assert_eq!(
+            value["data"]["input"],
+            "file \"src/lib.rs\" | .deps | count"
+        );
         assert!(value["data"]["result"].is_object());
         fs::remove_dir_all(repo).unwrap();
     }
@@ -1331,7 +1261,11 @@ mod tests {
     async fn query_endpoint_invalid_step_returns_json_error() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);
-        let response = call(app, "/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.impact").await;
+        let response = call(
+            app,
+            "/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.impact",
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1343,7 +1277,7 @@ mod tests {
         assert!(value["data"]["message"]
             .as_str()
             .expect("error message should be a string")
-            .contains("unsupported query step `.impact`; supported steps are .deps, .reverse, .symbols, .callers, .callees, unique, and count"));
+            .contains("unsupported query step `.impact`; supported steps are .deps, .reverse, .symbols, .callers, .callees, unique, and count; plus .callers_transitive and .callees_transitive"));
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1397,8 +1331,7 @@ mod tests {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state.clone(), false);
 
-        let all_files_response =
-            call(app.clone(), "/api/query?expr=all-files%20%7C%20count").await;
+        let all_files_response = call(app.clone(), "/api/query?expr=all-files%20%7C%20count").await;
         assert_eq!(all_files_response.status(), StatusCode::OK);
         let all_files_body = axum::body::to_bytes(all_files_response.into_body(), usize::MAX)
             .await
@@ -1417,10 +1350,12 @@ mod tests {
         let all_symbols_value: Value = serde_json::from_slice(&all_symbols_body).unwrap();
         assert_eq!(all_symbols_value["command"], "query");
         assert_eq!(all_symbols_value["status"], "ok");
-        assert!(all_symbols_value["data"]["result"]["number"]
-            .as_u64()
-            .expect("symbol count should be numeric")
-            >= 4);
+        assert!(
+            all_symbols_value["data"]["result"]["number"]
+                .as_u64()
+                .expect("symbol count should be numeric")
+                >= 4
+        );
 
         let reverse_response = call(
             app,
@@ -1435,6 +1370,42 @@ mod tests {
         assert_eq!(reverse_value["command"], "query");
         assert_eq!(reverse_value["status"], "ok");
         assert_eq!(reverse_value["data"]["result"]["number"], 2);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_supports_transitive_call_steps() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(state.clone(), false);
+
+        let callers_response = call(
+            app.clone(),
+            "/api/query?expr=symbol%20%22parser%3A%3Aparse%22%20%7C%20.callers_transitive%20%7C%20count",
+        )
+        .await;
+        assert_eq!(callers_response.status(), StatusCode::OK);
+        let callers_body = axum::body::to_bytes(callers_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let callers_value: Value = serde_json::from_slice(&callers_body).unwrap();
+        assert_eq!(callers_value["command"], "query");
+        assert_eq!(callers_value["status"], "ok");
+        assert_eq!(callers_value["data"]["result"]["number"], 2);
+
+        let callees_response = call(
+            app,
+            "/api/query?expr=symbol%20%22parser%3A%3Aparse%22%20%7C%20.callees_transitive%20%7C%20count",
+        )
+        .await;
+        assert_eq!(callees_response.status(), StatusCode::OK);
+        let callees_body = axum::body::to_bytes(callees_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let callees_value: Value = serde_json::from_slice(&callees_body).unwrap();
+        assert_eq!(callees_value["command"], "query");
+        assert_eq!(callees_value["status"], "ok");
+        assert_eq!(callees_value["data"]["result"]["number"], 1);
 
         fs::remove_dir_all(repo).unwrap();
     }
@@ -1471,7 +1442,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["command"], "unused");
         assert_eq!(value["status"], "ok");
-        assert!(value["data"]["result"]["summary"]["exported_symbols"].as_u64().is_some());
+        assert!(value["data"]["result"]["summary"]["exported_symbols"]
+            .as_u64()
+            .is_some());
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1488,7 +1461,9 @@ mod tests {
         assert_eq!(value["command"], "explain");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["target"], "parser::parse");
-        assert!(value["data"]["traversals"].as_array().is_some_and(|items| !items.is_empty()));
+        assert!(value["data"]["traversals"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1557,8 +1532,14 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["command"], "simulate-extract");
         assert_eq!(value["status"], "ok");
-        assert_eq!(value["data"]["result"]["extraction"]["from_file"], "src/lib.rs");
-        assert_eq!(value["data"]["result"]["extraction"]["into_file"], "src/parser_extracted.rs");
+        assert_eq!(
+            value["data"]["result"]["extraction"]["from_file"],
+            "src/lib.rs"
+        );
+        assert_eq!(
+            value["data"]["result"]["extraction"]["into_file"],
+            "src/parser_extracted.rs"
+        );
         let _ = fs::remove_dir_all(repo);
     }
 
@@ -1566,7 +1547,11 @@ mod tests {
     async fn simulate_extract_endpoint_rejects_empty_symbol_list() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);
-        let response = call(app, "/api/simulate/extract?symbols=,%20%20,&into=src/parser_extracted.rs").await;
+        let response = call(
+            app,
+            "/api/simulate/extract?symbols=,%20%20,&into=src/parser_extracted.rs",
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1609,7 +1594,10 @@ mod tests {
         assert_eq!(value["data"]["result"]["target"], "src/parser.rs");
         assert_eq!(value["data"]["result"]["summary"]["target_commits"], 4);
         assert_eq!(value["data"]["result"]["files"][0]["path"], "src/utils.rs");
-        assert_eq!(value["data"]["result"]["files"][1]["path"], "src/resolver.rs");
+        assert_eq!(
+            value["data"]["result"]["files"][1]["path"],
+            "src/resolver.rs"
+        );
         let _ = fs::remove_dir_all(repo);
     }
 
@@ -1706,7 +1694,9 @@ mod tests {
         assert_eq!(value["command"], "symbols");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["target"], "src/lib.rs");
-        assert!(value["data"]["symbols"].as_array().is_some_and(|items| !items.is_empty()));
+        assert!(value["data"]["symbols"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1740,7 +1730,9 @@ mod tests {
         assert_eq!(value["command"], "callers");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["symbol"], "parser::parse");
-        assert!(value["data"]["traversals"].as_array().is_some_and(|items| !items.is_empty()));
+        assert!(value["data"]["traversals"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1784,7 +1776,11 @@ mod tests {
     async fn context_endpoint_returns_expected_envelope() {
         let (state, repo) = build_test_state("rust_small");
         let app = build_router(state, false);
-        let response = call(app, "/api/context?target=parser::parse&change_type=body&budget=400").await;
+        let response = call(
+            app,
+            "/api/context?target=parser::parse&change_type=body&budget=400",
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1794,7 +1790,9 @@ mod tests {
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["change_type"], "body");
         assert_eq!(value["data"]["result"]["budget"], 400);
-        assert!(value["data"]["result"]["summary"]["targets_count"].as_u64().is_some());
+        assert!(value["data"]["result"]["summary"]["targets_count"]
+            .as_u64()
+            .is_some());
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1811,7 +1809,9 @@ mod tests {
         assert_eq!(value["command"], "risk");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["top"], 3);
-        assert!(value["data"]["result"]["summary"]["scored_files"].as_u64().is_some());
+        assert!(value["data"]["result"]["summary"]["scored_files"]
+            .as_u64()
+            .is_some());
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1827,7 +1827,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["command"], "stability");
         assert_eq!(value["status"], "ok");
-        assert!(value["data"]["result"]["summary"]["flagged_count"].as_u64().is_some());
+        assert!(value["data"]["result"]["summary"]["flagged_count"]
+            .as_u64()
+            .is_some());
         assert!(value["data"]["result"]["files"].is_array());
         fs::remove_dir_all(repo).unwrap();
     }
@@ -1861,7 +1863,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["command"], "entry-list");
         assert_eq!(value["status"], "ok");
-        assert!(value["data"]["result"]["summary"]["entry_points"].as_u64().is_some());
+        assert!(value["data"]["result"]["summary"]["entry_points"]
+            .as_u64()
+            .is_some());
         assert!(value["data"]["result"]["entry_points"].is_array());
         fs::remove_dir_all(repo).unwrap();
     }
@@ -1878,7 +1882,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["command"], "entry-unreachable");
         assert_eq!(value["status"], "ok");
-        assert!(value["data"]["result"]["unreachable_files"].as_u64().is_some());
+        assert!(value["data"]["result"]["unreachable_files"]
+            .as_u64()
+            .is_some());
         assert!(value["data"]["result"]["unreachable"].is_array());
         fs::remove_dir_all(repo).unwrap();
     }
@@ -1917,10 +1923,15 @@ mod tests {
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("scope serve"));
+        assert!(html.contains("Bundled local API explorer for the indexed repository."));
         assert!(html.contains("/api/audit?capability=network"));
-        assert!(html.contains("/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts"));
+        assert!(
+            html.contains("/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts")
+        );
         assert!(html.contains("/api/tree?target=src/lib.rs"));
-        assert!(html.contains("/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs"));
+        assert!(html.contains(
+            "/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs"
+        ));
         fs::remove_dir_all(repo).unwrap();
     }
 

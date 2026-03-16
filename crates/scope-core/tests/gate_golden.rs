@@ -5,7 +5,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use scope_core::{adapter_for_language, scan_repo, stub, ArchConfig, GateConfig, GateMetric, GateSeverity, ScanConfig, Store};
+use scope_core::{
+    adapter_for_language, scan_repo, stub, ArchConfig, GateConfig, GateMetric, GateSeverity,
+    ScanConfig, Store,
+};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -178,7 +181,9 @@ fn gate_query_skipped_matches_golden_json() {
 fn gate_query_compare_warning_matches_golden_json() {
     let repo = prepare_fixture_copy("rust_small");
     let store = index_fixture(&repo);
-    store.save_snapshot("baseline", Some("HEAD".to_string())).unwrap();
+    store
+        .save_snapshot("baseline", Some("HEAD".to_string()))
+        .unwrap();
 
     let parser_path = repo.join("src/parser.rs");
     let updated = fs::read_to_string(&parser_path)

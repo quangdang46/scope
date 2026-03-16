@@ -121,7 +121,10 @@ fn simulate_extract_reports_expected_graph_delta_for_rust_fixture() {
     assert_eq!(result.graph_delta.new_layer_violations, 0);
     assert_eq!(result.graph_delta.new_edges.len(), 1);
     assert_eq!(result.graph_delta.new_edges[0].from, "src/lib.rs");
-    assert_eq!(result.graph_delta.new_edges[0].to, "src/parser_extracted.rs");
+    assert_eq!(
+        result.graph_delta.new_edges[0].to,
+        "src/parser_extracted.rs"
+    );
     assert_eq!(result.recommendation_reasons.len(), 1);
     assert!(result.warnings.is_empty());
 

@@ -17,20 +17,19 @@ use crate::{
     DependencyRecord, EdgeKind, EntryConeResult, EntryConeSummary, EntryListResult,
     EntryListSummary, EntryPointDetection, EntryPointRecord, EntryReachableRecord,
     EntryReachesResult, EntryReachesSummary, EntryUnreachableRecord, EntryUnreachableResult,
-    ExtractResult, FileRecord, ImportPath, MirrorMatch, MirrorResult, MirrorSignature,
-    MirrorSummary, NodeKind, PublicSurface, PublicSurfaceChange, PublicSurfaceChangeKind,
-    PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind,
-    RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, RiskSort,
-    RiskSummary, ScopeError, ScopeResult, SimulateExtractResult, SimulateExtraction,
-    SimulateFileStabilityDelta, SimulateGraphDelta, SimulateRecommendation,
-    SnapshotCentralityDelta, SnapshotCycleDelta, SnapshotDeleteResult, SnapshotDiffResult,
-    SnapshotEdgeDelta, SnapshotEdgeRecord, SnapshotFileRecord, SnapshotGraph, SnapshotListResult,
-    SnapshotListSummary, SnapshotMetadata, SnapshotSaveResult, SnapshotStabilityDelta,
-    SnapshotStoredRecord, SnapshotSymbolRecord, SplitCluster, SplitClusterMember, SplitResult,
-    SplitSummary, StabilityCategory, StabilityRecord, StabilityResult, StabilitySort,
-    StabilitySummary, SymbolKind, SymbolRecord, TestConfig, GateConfig, GateEvaluation,
-    GateMetric, GateResult, GateSeverity, GateStatus, GateSummary, HealthReportComparison,
-    HealthReportMetrics, HealthReportResult,
+    ExtractResult, FileRecord, GateConfig, GateEvaluation, GateMetric, GateResult, GateSeverity,
+    GateStatus, GateSummary, HealthReportComparison, HealthReportMetrics, HealthReportResult,
+    ImportPath, MirrorMatch, MirrorResult, MirrorSignature, MirrorSummary, NodeKind, PublicSurface,
+    PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceDiff, PublicSurfaceDiffSummary,
+    PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary,
+    RepoPath, RiskRecord, RiskResult, RiskSort, RiskSummary, ScopeError, ScopeResult,
+    SimulateExtractResult, SimulateExtraction, SimulateFileStabilityDelta, SimulateGraphDelta,
+    SimulateRecommendation, SnapshotCentralityDelta, SnapshotCycleDelta, SnapshotDeleteResult,
+    SnapshotDiffResult, SnapshotEdgeDelta, SnapshotEdgeRecord, SnapshotFileRecord, SnapshotGraph,
+    SnapshotListResult, SnapshotListSummary, SnapshotMetadata, SnapshotSaveResult,
+    SnapshotStabilityDelta, SnapshotStoredRecord, SnapshotSymbolRecord, SplitCluster,
+    SplitClusterMember, SplitResult, SplitSummary, StabilityCategory, StabilityRecord,
+    StabilityResult, StabilitySort, StabilitySummary, SymbolKind, SymbolRecord, TestConfig,
     TestMapBuildResult, TestMapBuildSummary, TestMapCoveredByResult, TestMapCoveredBySummary,
     TestMapCoversResult, TestMapCoversSummary, TestMapRecord, TestMapUncoveredResult,
     TestMapUncoveredSummary, TraversalRecord, TreeNode, TreeResult, TreeSummary, UnusedRecord,
@@ -440,6 +439,46 @@ impl Store {
         })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn query_deps_transitive(
+        &self,
+        path: &RepoPath,
+        reverse: bool,
+        depth: Option<usize>,
+    ) -> ScopeResult<Vec<DependencyRecord>> {
+        if depth == Some(0) {
+            return Ok(Vec::new());
+        }
+        if self.file_id(path)?.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::from([path.clone()]);
+        let mut queue = VecDeque::from([(path.clone(), 0_usize)]);
+        let mut results = Vec::new();
+
+        while let Some((current, distance)) = queue.pop_front() {
+            if depth.is_some_and(|limit| distance >= limit) {
+                continue;
+            }
+
+            let dependencies = if reverse {
+                self.query_reverse_deps(&current)?
+            } else {
+                self.query_deps(&current)?
+            };
+
+            for dependency in dependencies {
+                let next = dependency.path.clone();
+                if visited.insert(next.clone()) {
+                    queue.push_back((next, distance + 1));
+                    results.push(dependency);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     pub fn query_file_edges(&self) -> ScopeResult<Vec<ArchFileEdge>> {
@@ -1062,12 +1101,10 @@ impl Store {
         let total_files = self.list_indexed_files()?.len();
         let total_symbols = self.count_rows("symbols")?;
         let total_imports = self.count_rows("imports")?;
-        let unresolved_imports = self.count_query(
-            "SELECT COUNT(*) FROM imports WHERE resolved_file_id IS NULL",
-        )?;
-        let parse_errors = self.count_query(
-            "SELECT COUNT(*) FROM files WHERE parse_status = 'error'",
-        )?;
+        let unresolved_imports =
+            self.count_query("SELECT COUNT(*) FROM imports WHERE resolved_file_id IS NULL")?;
+        let parse_errors =
+            self.count_query("SELECT COUNT(*) FROM files WHERE parse_status = 'error'")?;
 
         let arch = arch_check(self, config)?;
         let cycles = self.query_cycles(None)?;
@@ -2210,6 +2247,8 @@ impl Store {
             RenameTarget::File { path } => file_stem_name(path)?,
         };
 
+        validate_rename_destination(&resolved, new_name)?;
+
         if old_name == new_name {
             return Err(ScopeError::InvalidInput(
                 "rename-plan target already uses the requested name".to_string(),
@@ -2544,7 +2583,10 @@ impl Store {
         transitive: bool,
     ) -> ScopeResult<Vec<TraversalRecord>> {
         if transitive {
-            return Ok(Vec::new());
+            let Some(symbol_id) = self.symbol_id(symbol_qualname)? else {
+                return Ok(Vec::new());
+            };
+            return self.traverse_forward_callees(symbol_id, symbol_qualname, 100);
         }
 
         self.query_symbol_edges(symbol_qualname, false)
@@ -2556,7 +2598,10 @@ impl Store {
         transitive: bool,
     ) -> ScopeResult<Vec<TraversalRecord>> {
         if transitive {
-            return Ok(Vec::new());
+            let Some(symbol_id) = self.symbol_id(symbol_qualname)? else {
+                return Ok(Vec::new());
+            };
+            return self.traverse_reverse_callers(symbol_id, symbol_qualname, 100);
         }
 
         self.query_symbol_edges(symbol_qualname, true)
@@ -3808,7 +3853,9 @@ impl Store {
         let from_file = resolved
             .first()
             .map(|record| record.file.clone())
-            .ok_or_else(|| ScopeError::InvalidInput("simulate extract requires symbols".to_string()))?;
+            .ok_or_else(|| {
+                ScopeError::InvalidInput("simulate extract requires symbols".to_string())
+            })?;
         if resolved.iter().any(|record| record.file != from_file) {
             return Err(ScopeError::InvalidInput(
                 "simulate extract requires all symbols to come from the same indexed file"
@@ -3873,7 +3920,9 @@ impl Store {
                 language: source_language,
                 content_hash: None,
             });
-            after.files.sort_by(|left, right| left.path.cmp(&right.path));
+            after
+                .files
+                .sort_by(|left, right| left.path.cmp(&right.path));
         }
 
         for symbol in &mut after.symbols {
@@ -3901,12 +3950,27 @@ impl Store {
             if importer == *from_file {
                 remove_snapshot_import_edge(&mut edges, &importer, from_file, &moved_names);
             }
-            push_snapshot_import_edge(&mut edges, importer.clone(), into_file.clone(), Certainty::Heuristic);
+            push_snapshot_import_edge(
+                &mut edges,
+                importer.clone(),
+                into_file.clone(),
+                Certainty::Heuristic,
+            );
             if importer == *from_file {
-                push_snapshot_import_edge(&mut edges, from_file.clone(), into_file.clone(), Certainty::Exact);
+                push_snapshot_import_edge(
+                    &mut edges,
+                    from_file.clone(),
+                    into_file.clone(),
+                    Certainty::Exact,
+                );
             }
         }
-        push_snapshot_import_edge(&mut edges, from_file.clone(), into_file.clone(), Certainty::Exact);
+        push_snapshot_import_edge(
+            &mut edges,
+            from_file.clone(),
+            into_file.clone(),
+            Certainty::Exact,
+        );
         edges.sort_by(|left, right| {
             left.from
                 .cmp(&right.from)
@@ -3951,7 +4015,8 @@ impl Store {
                  WHERE symbol_edges.to_symbol_id = ?1 AND symbol_edges.kind = 'call'",
             )?;
             if let Some(symbol_id) = self.symbol_id(qualname)? {
-                let rows = statement.query_map([symbol_id], |row| Ok(RepoPath(row.get::<_, String>(0)?)))?;
+                let rows = statement
+                    .query_map([symbol_id], |row| Ok(RepoPath(row.get::<_, String>(0)?)))?;
                 for row in rows {
                     files.insert(row?);
                 }
@@ -4681,6 +4746,45 @@ fn file_stem_name(path: &RepoPath) -> ScopeResult<String> {
                 path.0
             ))
         })
+}
+
+fn validate_rename_destination(resolved: &RenameTarget, new_name: &str) -> ScopeResult<()> {
+    if new_name.is_empty() {
+        return Err(ScopeError::InvalidInput(
+            "rename-plan requires a non-empty --to value".to_string(),
+        ));
+    }
+
+    match resolved {
+        RenameTarget::Symbol { .. } => {
+            if !new_name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+            {
+                return Err(ScopeError::InvalidInput(
+                    "rename-plan requires a simple identifier for --to".to_string(),
+                ));
+            }
+        }
+        RenameTarget::File { .. } => {
+            if new_name.contains('/') || new_name.contains('\\') || new_name.contains('.') {
+                return Err(ScopeError::InvalidInput(
+                    "rename-plan file targets currently accept only a bare file stem for --to; file moves are not implemented"
+                        .to_string(),
+                ));
+            }
+            if !new_name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '-')
+            {
+                return Err(ScopeError::InvalidInput(
+                    "rename-plan file targets require a simple file stem for --to".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn definition_edit_from_symbol(
@@ -6035,7 +6139,9 @@ fn simulate_recommendation(
         reasons.push("improves instability for the extracted source file".to_string());
     }
     if low_confidence {
-        reasons.push("uses conservative heuristic edge rewrites for simulated imports/calls".to_string());
+        reasons.push(
+            "uses conservative heuristic edge rewrites for simulated imports/calls".to_string(),
+        );
     }
 
     let recommendation = if low_confidence && !source_improved && cycles_after >= cycles_before {
@@ -6063,9 +6169,12 @@ fn simulate_warnings(
         .symbols
         .iter()
         .filter(|symbol| {
-            symbol.file == extraction.into_file && extraction.symbols.iter().any(|name| {
-                symbol.qualname == *name || symbol.name == *name || symbol.qualname.ends_with(&format!("::{name}"))
-            })
+            symbol.file == extraction.into_file
+                && extraction.symbols.iter().any(|name| {
+                    symbol.qualname == *name
+                        || symbol.name == *name
+                        || symbol.qualname.ends_with(&format!("::{name}"))
+                })
         })
         .count();
     if moved_symbol_count < extraction.symbols.len() {
@@ -6075,7 +6184,9 @@ fn simulate_warnings(
         );
     }
     if before.file_edges == after.file_edges {
-        warnings.push("simulation produced no file-edge changes; static evidence may be too weak".to_string());
+        warnings.push(
+            "simulation produced no file-edge changes; static evidence may be too weak".to_string(),
+        );
     }
     warnings
 }
@@ -6258,7 +6369,10 @@ fn percent(numerator: usize, denominator: usize) -> f64 {
 
 fn max_file_fan_in(edges: Vec<ArchFileEdge>) -> usize {
     let mut fan_in = HashMap::new();
-    for edge in edges.into_iter().filter(|edge| edge.edge_kind == EdgeKind::Import) {
+    for edge in edges
+        .into_iter()
+        .filter(|edge| edge.edge_kind == EdgeKind::Import)
+    {
         *fan_in.entry(edge.to_file).or_insert(0usize) += 1;
     }
     fan_in.into_values().max().unwrap_or(0)
@@ -6324,14 +6438,14 @@ fn report_recommendations(
         if comparison.health_score_delta < 0.0 {
             recommendations.push(format!(
                 "health score regressed by {:.1} points versus {}",
-                -comparison.health_score_delta,
-                comparison.target
+                -comparison.health_score_delta, comparison.target
             ));
         }
     }
     if recommendations.is_empty() {
         recommendations.push(
-            "health metrics are within expected bounds for the current indexed snapshot".to_string(),
+            "health metrics are within expected bounds for the current indexed snapshot"
+                .to_string(),
         );
     }
 
@@ -6353,7 +6467,11 @@ fn baseline_imports_unresolved_pct(graph: &SnapshotGraph) -> f64 {
 }
 
 fn baseline_cycles(graph: &SnapshotGraph) -> usize {
-    let files = graph.files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    let files = graph
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
     cycle_records_from_file_edges(&files, &snapshot_file_edges(graph)).len()
 }
 
@@ -6364,14 +6482,20 @@ fn baseline_layer_violations(graph: &SnapshotGraph, config: &ArchConfig) -> Scop
 }
 
 fn baseline_unreachable_files(graph: &SnapshotGraph, config: &ArchConfig) -> ScopeResult<usize> {
-    let all_files = graph.files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    let all_files = graph
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
     let entry_points = if !config.entry_points.is_empty() {
         let patterns = config
             .entry_points
             .iter()
             .map(|entry| Pattern::new(&entry.pattern))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| ScopeError::InvalidInput(format!("invalid entry point pattern: {error}")))?;
+            .map_err(|error| {
+                ScopeError::InvalidInput(format!("invalid entry point pattern: {error}"))
+            })?;
         all_files
             .iter()
             .filter(|file| patterns.iter().any(|pattern| pattern.matches(&file.0)))
@@ -6381,7 +6505,12 @@ fn baseline_unreachable_files(graph: &SnapshotGraph, config: &ArchConfig) -> Sco
         let reverse = reverse_adjacency(&snapshot_import_adjacency(graph));
         all_files
             .iter()
-            .filter(|file| reverse.get(*file).map(|parents| parents.is_empty()).unwrap_or(true))
+            .filter(|file| {
+                reverse
+                    .get(*file)
+                    .map(|parents| parents.is_empty())
+                    .unwrap_or(true)
+            })
             .cloned()
             .collect::<Vec<_>>()
     };
@@ -6404,7 +6533,9 @@ fn baseline_unused_exports(graph: &SnapshotGraph) -> usize {
     graph
         .symbols
         .iter()
-        .filter(|symbol| symbol.exported && inbound.get(&symbol.qualname).copied().unwrap_or(0) == 0)
+        .filter(|symbol| {
+            symbol.exported && inbound.get(&symbol.qualname).copied().unwrap_or(0) == 0
+        })
         .count()
 }
 
@@ -6413,7 +6544,11 @@ fn snapshot_import_adjacency(graph: &SnapshotGraph) -> HashMap<RepoPath, Vec<Rep
     for file in &graph.files {
         adjacency.entry(file.path.clone()).or_default();
     }
-    for edge in graph.file_edges.iter().filter(|edge| edge.kind == EdgeKind::Import) {
+    for edge in graph
+        .file_edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Import)
+    {
         adjacency
             .entry(RepoPath::from(edge.from.clone()))
             .or_default()
@@ -6448,11 +6583,7 @@ fn reachable_files_from_roots(
     visited
 }
 
-fn evaluate_gate(
-    gate: &GateConfig,
-    report: &HealthReportResult,
-    strict: bool,
-) -> GateEvaluation {
+fn evaluate_gate(gate: &GateConfig, report: &HealthReportResult, strict: bool) -> GateEvaluation {
     let (current_value, baseline_value, delta) = gate_metric_values(gate.metric.clone(), report);
 
     if gate.skip {
@@ -6475,12 +6606,18 @@ fn evaluate_gate(
     let mut failed_reasons = Vec::new();
     if let Some(min) = gate.min {
         if current_value < min {
-            failed_reasons.push(format!("current value {:.2} is below min {:.2}", current_value, min));
+            failed_reasons.push(format!(
+                "current value {:.2} is below min {:.2}",
+                current_value, min
+            ));
         }
     }
     if let Some(max) = gate.max {
         if current_value > max {
-            failed_reasons.push(format!("current value {:.2} exceeds max {:.2}", current_value, max));
+            failed_reasons.push(format!(
+                "current value {:.2} exceeds max {:.2}",
+                current_value, max
+            ));
         }
     }
     if let Some(min_delta) = gate.min_delta {
@@ -6541,27 +6678,46 @@ fn gate_metric_values(
     match metric {
         GateMetric::LayerViolations => metric_value(
             report.metrics.layer_violations as f64,
-            report.compare.as_ref().map(|compare| compare.baseline_layer_violations as f64),
+            report
+                .compare
+                .as_ref()
+                .map(|compare| compare.baseline_layer_violations as f64),
         ),
         GateMetric::Cycles => metric_value(
             report.metrics.cycles as f64,
-            report.compare.as_ref().map(|compare| compare.baseline_cycles as f64),
+            report
+                .compare
+                .as_ref()
+                .map(|compare| compare.baseline_cycles as f64),
         ),
         GateMetric::MaxFileFanIn => metric_value(report.metrics.max_file_fan_in as f64, None),
         GateMetric::ParseErrors => metric_value(report.metrics.parse_errors as f64, None),
         GateMetric::UnreachableFiles => metric_value(
             report.metrics.unreachable_files as f64,
-            report.compare.as_ref().map(|compare| compare.baseline_unreachable_files as f64),
+            report
+                .compare
+                .as_ref()
+                .map(|compare| compare.baseline_unreachable_files as f64),
         ),
         GateMetric::UnusedExports => metric_value(report.metrics.unused_exports as f64, None),
         GateMetric::HealthScore => metric_value(
             report.metrics.health_score,
-            report.compare.as_ref().map(|compare| compare.baseline_health_score),
+            report
+                .compare
+                .as_ref()
+                .map(|compare| compare.baseline_health_score),
         ),
         GateMetric::HealthScoreDelta => (
-            report.compare.as_ref().map(|compare| compare.health_score_delta).unwrap_or(0.0),
+            report
+                .compare
+                .as_ref()
+                .map(|compare| compare.health_score_delta)
+                .unwrap_or(0.0),
             Some(0.0),
-            report.compare.as_ref().map(|compare| compare.health_score_delta),
+            report
+                .compare
+                .as_ref()
+                .map(|compare| compare.health_score_delta),
         ),
         GateMetric::ImportsUnresolvedPct => {
             metric_value(report.metrics.imports_unresolved_pct, None)
@@ -6600,7 +6756,11 @@ fn default_gate_config(strict: bool) -> Vec<GateConfig> {
             min: None,
             max_delta: None,
             min_delta: None,
-            severity: if strict { GateSeverity::Error } else { GateSeverity::Warning },
+            severity: if strict {
+                GateSeverity::Error
+            } else {
+                GateSeverity::Warning
+            },
             message: Some("layer violations should be eliminated".to_string()),
             skip: false,
         },
@@ -6610,7 +6770,11 @@ fn default_gate_config(strict: bool) -> Vec<GateConfig> {
             min: None,
             max_delta: None,
             min_delta: None,
-            severity: if strict { GateSeverity::Error } else { GateSeverity::Warning },
+            severity: if strict {
+                GateSeverity::Error
+            } else {
+                GateSeverity::Warning
+            },
             message: Some("dependency cycles should remain at zero".to_string()),
             skip: false,
         },
@@ -6620,7 +6784,11 @@ fn default_gate_config(strict: bool) -> Vec<GateConfig> {
             max: None,
             max_delta: None,
             min_delta: None,
-            severity: if strict { GateSeverity::Error } else { GateSeverity::Warning },
+            severity: if strict {
+                GateSeverity::Error
+            } else {
+                GateSeverity::Warning
+            },
             message: Some("overall health score should remain healthy".to_string()),
             skip: false,
         },
@@ -7082,6 +7250,113 @@ mod tests {
         assert_eq!(
             reverse[0].import_text.as_deref(),
             Some("use crate::parser;")
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn supports_transitive_forward_dependency_queries_with_depth_limit() {
+        let dir = unique_temp_dir("db-forward-deps-transitive");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let main = sample_file("src/main.rs");
+        let lib = sample_file("src/lib.rs");
+        let parser = sample_file("src/parser.rs");
+        let utils = sample_file("src/utils.rs");
+        for file in [&main, &lib, &parser, &utils] {
+            store.upsert_file(file).unwrap();
+        }
+
+        store
+            .persist_extract_result(&import_extract(&main, &lib))
+            .unwrap();
+        store
+            .persist_extract_result(&import_extract(&lib, &parser))
+            .unwrap();
+        store
+            .persist_extract_result(&import_extract(&parser, &utils))
+            .unwrap();
+
+        let depth_one = store
+            .query_deps_transitive(&main.path, false, Some(1))
+            .unwrap();
+        assert_eq!(
+            depth_one
+                .iter()
+                .map(|record| record.path.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/lib.rs"]
+        );
+
+        let depth_two = store
+            .query_deps_transitive(&main.path, false, Some(2))
+            .unwrap();
+        assert_eq!(
+            depth_two
+                .iter()
+                .map(|record| record.path.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/lib.rs", "src/parser.rs"]
+        );
+
+        let full = store
+            .query_deps_transitive(&main.path, false, None)
+            .unwrap();
+        assert_eq!(
+            full.iter()
+                .map(|record| record.path.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/lib.rs", "src/parser.rs", "src/utils.rs"]
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn supports_transitive_reverse_dependency_queries_with_depth_limit() {
+        let dir = unique_temp_dir("db-reverse-deps-transitive");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let main = sample_file("src/main.rs");
+        let lib = sample_file("src/lib.rs");
+        let parser = sample_file("src/parser.rs");
+        let utils = sample_file("src/utils.rs");
+        for file in [&main, &lib, &parser, &utils] {
+            store.upsert_file(file).unwrap();
+        }
+
+        store
+            .persist_extract_result(&import_extract(&main, &lib))
+            .unwrap();
+        store
+            .persist_extract_result(&import_extract(&lib, &parser))
+            .unwrap();
+        store
+            .persist_extract_result(&import_extract(&parser, &utils))
+            .unwrap();
+
+        let depth_two = store
+            .query_deps_transitive(&utils.path, true, Some(2))
+            .unwrap();
+        assert_eq!(
+            depth_two
+                .iter()
+                .map(|record| record.path.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/parser.rs", "src/lib.rs"]
+        );
+
+        let full = store
+            .query_deps_transitive(&utils.path, true, None)
+            .unwrap();
+        assert_eq!(
+            full.iter()
+                .map(|record| record.path.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/parser.rs", "src/lib.rs", "src/main.rs"]
         );
 
         std::fs::remove_dir_all(dir).unwrap();
@@ -7612,12 +7887,7 @@ mod tests {
         };
 
         store
-            .persist_extract_results(&[
-                app_extract,
-                parser_extract,
-                utils_extract,
-                leaf_extract,
-            ])
+            .persist_extract_results(&[app_extract, parser_extract, utils_extract, leaf_extract])
             .unwrap();
 
         let unused = store.query_unused().unwrap();
@@ -8099,8 +8369,18 @@ mod tests {
                 modules: Vec::new(),
                 exports: Vec::new(),
                 symbols: vec![
-                    sample_symbol("src/lib.rs", "parser", SymbolKind::Function, Visibility::Public),
-                    sample_symbol("src/lib.rs", "farewell", SymbolKind::Function, Visibility::Public),
+                    sample_symbol(
+                        "src/lib.rs",
+                        "parser",
+                        SymbolKind::Function,
+                        Visibility::Public,
+                    ),
+                    sample_symbol(
+                        "src/lib.rs",
+                        "farewell",
+                        SymbolKind::Function,
+                        Visibility::Public,
+                    ),
                 ],
                 call_sites: Vec::new(),
                 parse_diagnostics: Vec::new(),
@@ -8123,7 +8403,14 @@ mod tests {
                     Visibility::Local,
                 )],
                 call_sites: vec![
-                    sample_call("src/main.rs", "main::run", "parser", Some("lib::parser"), false, 2),
+                    sample_call(
+                        "src/main.rs",
+                        "main::run",
+                        "parser",
+                        Some("lib::parser"),
+                        false,
+                        2,
+                    ),
                     sample_call(
                         "src/main.rs",
                         "main::run",
@@ -8148,7 +8435,9 @@ mod tests {
             .unwrap();
 
         assert!(result.graph_delta.new_edges.iter().any(|edge| {
-            edge.from == "src/main.rs" && edge.to == "src/parser_extracted.rs" && edge.kind == EdgeKind::Import
+            edge.from == "src/main.rs"
+                && edge.to == "src/parser_extracted.rs"
+                && edge.kind == EdgeKind::Import
         }));
         assert!(!result.graph_delta.removed_edges.iter().any(|edge| {
             edge.from == "src/main.rs" && edge.to == "src/lib.rs" && edge.kind == EdgeKind::Import
@@ -8301,6 +8590,244 @@ mod tests {
             .as_ref()
             .is_some_and(|path| path.0 == "src/resolver.rs")
             && record.edge_kind == EdgeKind::Import));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn query_callees_transitive_returns_full_traversal() {
+        let dir = unique_temp_dir("db-callees-transitive");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let parser = sample_file("src/parser.rs");
+        let resolver = sample_file("src/resolver.rs");
+        let analyzer = sample_file("src/analyzer.rs");
+        let main = sample_file("src/main.rs");
+
+        let extracts = vec![
+            ExtractResult {
+                file: parser.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
+                call_sites: vec![sample_call(
+                    "src/parser.rs",
+                    "parser::parse",
+                    "resolve",
+                    Some("resolver::resolve"),
+                    false,
+                    2,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: resolver.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/resolver.rs",
+                    "resolve",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
+                call_sites: vec![sample_call(
+                    "src/resolver.rs",
+                    "resolver::resolve",
+                    "analyze",
+                    Some("analyzer::analyze"),
+                    false,
+                    3,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: analyzer.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/analyzer.rs",
+                    "analyze",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: main.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/main.rs",
+                    "run",
+                    SymbolKind::Function,
+                    Visibility::Local,
+                )],
+                call_sites: vec![sample_call(
+                    "src/main.rs",
+                    "main::run",
+                    "parse",
+                    Some("parser::parse"),
+                    false,
+                    1,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
+
+        // Non-transitive should return only direct callees
+        let direct_callees = store.query_callees("parser::parse", false).unwrap();
+        assert_eq!(direct_callees.len(), 1);
+        assert_eq!(
+            direct_callees[0].qualname,
+            Some("resolver::resolve".to_string())
+        );
+        assert_eq!(direct_callees[0].distance, 1);
+
+        // Transitive should return full traversal
+        let transitive_callees = store.query_callees("parser::parse", true).unwrap();
+        assert_eq!(transitive_callees.len(), 2);
+        assert!(transitive_callees
+            .iter()
+            .any(|r| r.qualname.as_deref() == Some("resolver::resolve")));
+        assert!(transitive_callees
+            .iter()
+            .any(|r| r.qualname.as_deref() == Some("analyzer::analyze")));
+        assert!(transitive_callees.iter().any(|r| r.distance == 1));
+        assert!(transitive_callees.iter().any(|r| r.distance == 2));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn query_callers_transitive_returns_full_traversal() {
+        let dir = unique_temp_dir("db-callers-transitive");
+        let db_path = dir.join("index.db");
+        let store = Store::open(&db_path).unwrap();
+
+        let parser = sample_file("src/parser.rs");
+        let resolver = sample_file("src/resolver.rs");
+        let analyzer = sample_file("src/analyzer.rs");
+        let main = sample_file("src/main.rs");
+
+        let extracts = vec![
+            ExtractResult {
+                file: parser.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/parser.rs",
+                    "parse",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
+                call_sites: vec![sample_call(
+                    "src/parser.rs",
+                    "parser::parse",
+                    "resolve",
+                    Some("resolver::resolve"),
+                    false,
+                    2,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: resolver.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/resolver.rs",
+                    "resolve",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
+                call_sites: vec![sample_call(
+                    "src/resolver.rs",
+                    "resolver::resolve",
+                    "analyze",
+                    Some("analyzer::analyze"),
+                    false,
+                    3,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: analyzer.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/analyzer.rs",
+                    "analyze",
+                    SymbolKind::Function,
+                    Visibility::Public,
+                )],
+                call_sites: Vec::new(),
+                parse_diagnostics: Vec::new(),
+            },
+            ExtractResult {
+                file: main.clone(),
+                imports: Vec::new(),
+                modules: Vec::new(),
+                exports: Vec::new(),
+                symbols: vec![sample_symbol(
+                    "src/main.rs",
+                    "run",
+                    SymbolKind::Function,
+                    Visibility::Local,
+                )],
+                call_sites: vec![sample_call(
+                    "src/main.rs",
+                    "main::run",
+                    "parse",
+                    Some("parser::parse"),
+                    false,
+                    1,
+                )],
+                parse_diagnostics: Vec::new(),
+            },
+        ];
+
+        store.persist_extract_results(&extracts).unwrap();
+
+        // Non-transitive should return only direct callers
+        let direct_callers = store.query_callers("analyzer::analyze", false).unwrap();
+        assert_eq!(direct_callers.len(), 1);
+        assert_eq!(
+            direct_callers[0].qualname,
+            Some("resolver::resolve".to_string())
+        );
+        assert_eq!(direct_callers[0].distance, 1);
+
+        // Transitive should return full traversal
+        let transitive_callers = store.query_callers("analyzer::analyze", true).unwrap();
+        assert_eq!(transitive_callers.len(), 3);
+        assert!(transitive_callers
+            .iter()
+            .any(|r| r.qualname.as_deref() == Some("resolver::resolve")));
+        assert!(transitive_callers
+            .iter()
+            .any(|r| r.qualname.as_deref() == Some("parser::parse")));
+        assert!(transitive_callers
+            .iter()
+            .any(|r| r.qualname.as_deref() == Some("main::run")));
+        assert!(transitive_callers.iter().any(|r| r.distance == 1));
+        assert!(transitive_callers.iter().any(|r| r.distance == 2));
+        assert!(transitive_callers.iter().any(|r| r.distance == 3));
 
         std::fs::remove_dir_all(dir).unwrap();
     }

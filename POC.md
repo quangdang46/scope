@@ -28,8 +28,14 @@ Current limitations observed during validation:
 - no `.gitignore` integration yet; ignore handling is only a fixed directory skip list
 - export extraction is intentionally shallow and limited to common direct export / re-export patterns
 - call edges store raw callee text only and do not resolve imported symbols back to definitions
+- command coverage stayed narrower than the original phase-0 sketch: the script exposes `index`, `file`, `fn`, and `impact`, but not standalone `deps`, `callers`, or `why`
 - no certainty labels, no `why` query, and no Dijkstra/path explanation yet
 - not yet validated on a real external open-source project such as Express or Fastify
+
+Latest validation snapshot against `fixtures/ts_small`:
+- `node index.js index ../fixtures/ts_small` currently reports **7 files**, **7 imports**, **12 exports**, **5 functions**, and **5 calls**
+- `node index.js file ../fixtures/ts_small/src/auth/jwt.ts` shows reverse edges from both `auth/middleware.ts` and the alias re-export in `auth/aliases.ts`
+- `node index.js impact ../fixtures/ts_small/src/auth/jwt.ts` reports **4 affected files** total, proving the traversal carries through both the alias re-export and the `auth/index.ts` barrel to `src/index.ts`
 
 If this POC is extended later, it should remain an explicit, time-boxed validation track rather than an implicit parallel roadmap.
 
@@ -152,6 +158,24 @@ export { format } from "./utils/formatter";
 
 ```bash
 $ cd poc
+$ node index.js index ../fixtures/ts_small
+
+{
+  "command": "index",
+  "status": "ok",
+  "data": {
+    "target": "fixtures/ts_small",
+    "database": ".scope/poc.db",
+    "stats": {
+      "files": 7,
+      "imports": 7,
+      "exports": 12,
+      "functions": 5,
+      "calls": 5
+    }
+  }
+}
+
 $ node index.js impact ../fixtures/ts_small/src/auth/jwt.ts
 
 {
@@ -160,13 +184,14 @@ $ node index.js impact ../fixtures/ts_small/src/auth/jwt.ts
   "data": {
     "file": "fixtures/ts_small/src/auth/jwt.ts",
     "direct_dependents": [
+      "fixtures/ts_small/src/auth/aliases.ts",
       "fixtures/ts_small/src/auth/middleware.ts"
     ],
     "transitive_dependents": [
       "fixtures/ts_small/src/auth/index.ts",
       "fixtures/ts_small/src/index.ts"
     ],
-    "total_affected": 3,
+    "total_affected": 4,
     "risk": "MEDIUM"
   }
 }
@@ -218,10 +243,29 @@ With `scope`:
 ## Findings That Should Inform The Rust Path
 
 1. Modeling re-export statements as dependency edges matters immediately; without that, impact traversal misses barrel chains.
-2. A tiny SQLite-backed prototype is enough to validate useful query semantics before designing a richer graph layer.
-3. Call-site extraction is easy to sketch, but symbol resolution remains the real difficulty; storing raw callee text is not enough for trustworthy callers/callees results.
-4. Version compatibility across tree-sitter packages is a practical risk that should be pinned carefully in any future JS/TS validation work.
-5. Fixed-directory ignore rules are not enough for a serious prototype; `.gitignore`-aware walking should be part of any next expansion.
+2. Alias re-exports matter too: in the current fixture, `auth/aliases.ts` is a direct dependent of `auth/jwt.ts`, so blast-radius traversal must treat `export { verify as verifyJwt, sign as signJwt } from "./jwt"` as a first-class edge.
+3. A tiny SQLite-backed prototype is enough to validate useful query semantics before designing a richer graph layer.
+4. Call-site extraction is easy to sketch, but symbol resolution remains the real difficulty; storing raw callee text is not enough for trustworthy callers/callees results.
+5. Version compatibility across tree-sitter packages is a practical risk that should be pinned carefully in any future JS/TS validation work.
+6. Fixed-directory ignore rules are not enough for a serious prototype; `.gitignore`-aware walking should be part of any next expansion.
+
+## Gap Against The Original Phase-0 Sketch
+
+Compared with the original Phase 0 checklist in `PLAN.md`, the current POC proved the most important loop — tree-sitter extraction into SQLite with useful `impact` answers on a controlled fixture — but it intentionally stopped short of full temporary feature parity.
+
+What the artifact validates well:
+- parser setup and language split for JS vs TS
+- relative-import plus `index.*` barrel resolution
+- dependency traversal over direct imports and re-exports
+- JSON output that an agent can consume immediately
+
+What remains intentionally unproven in this Node track:
+- `.gitignore`-aware walking
+- certainty labels and reason trails
+- standalone `deps`, `callers`, and `why` query surfaces
+- validation on a real external OSS repository
+
+That gap is useful signal, not failure: it shows the riskiest value was confirming dependency-edge extraction and traversal behavior, while richer query semantics and production hardening still belonged on the Rust path.
 
 ## Next Steps (Production Rust)
 

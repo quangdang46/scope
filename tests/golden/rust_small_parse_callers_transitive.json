@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "command": "callers",
+  "status": "ok",
+  "data": {
+    "symbol": "parser::parse",
+    "transitive": true,
+    "traversals": [
+      {
+        "kind": "symbol",
+        "path": "src/lib.rs",
+        "qualname": "lib::greet",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      },
+      {
+        "kind": "symbol",
+        "path": "src/resolver.rs",
+        "qualname": "resolver::resolve",
+        "edge_kind": "call",
+        "certainty": "resolved",
+        "reason": "calls parser::parse directly",
+        "distance": 1
+      }
+    ]
+  },
+  "warnings": []
+}

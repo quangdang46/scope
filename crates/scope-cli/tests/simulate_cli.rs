@@ -87,7 +87,10 @@ fn simulate_extract_command_returns_json_envelope_for_fixture_repo() {
         serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
     assert_eq!(value["command"], "simulate-extract");
     assert_eq!(value["status"], "ok");
-    assert_eq!(value["data"]["result"]["extraction"]["symbols"][0], "lib::parser");
+    assert_eq!(
+        value["data"]["result"]["extraction"]["symbols"][0],
+        "lib::parser"
+    );
     assert_eq!(
         value["data"]["result"]["extraction"]["from_file"],
         "src/lib.rs"
@@ -110,7 +113,13 @@ fn simulate_extract_command_returns_json_envelope_for_fixture_repo() {
 #[test]
 fn simulate_extract_command_empty_symbol_list_emits_json_error_on_stderr() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
-        .args(["simulate", "extract", "", "--into", "src/parser_extracted.rs"])
+        .args([
+            "simulate",
+            "extract",
+            "",
+            "--into",
+            "src/parser_extracted.rs",
+        ])
         .output()
         .expect("scope binary should run");
 

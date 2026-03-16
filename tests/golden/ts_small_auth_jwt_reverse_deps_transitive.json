@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "command": "deps",
+  "status": "ok",
+  "data": {
+    "target": "src/auth/jwt.ts",
+    "reverse": true,
+    "transitive": true,
+    "depth": null,
+    "dependencies": [
+      {
+        "kind": "file",
+        "path": "src/auth/aliases.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "export { verify as verifyJwt, sign as signJwt } from \"./jwt\";",
+        "line": 1
+      },
+      {
+        "kind": "file",
+        "path": "src/auth/middleware.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "import { verify } from \"./jwt\";",
+        "line": 1
+      },
+      {
+        "kind": "file",
+        "path": "src/auth/index.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "export { verifyJwt, signJwt } from \"./aliases\";",
+        "line": 2
+      },
+      {
+        "kind": "file",
+        "path": "src/index.ts",
+        "edge_kind": "import",
+        "certainty": "exact",
+        "import_text": "export { verifyToken } from \"./auth/index\";",
+        "line": 1
+      }
+    ]
+  },
+  "warnings": []
+}

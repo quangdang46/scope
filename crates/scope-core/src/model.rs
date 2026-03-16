@@ -1,8 +1,39 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct RepoPath(pub String);
+
+/// Parsed TypeScript compiler configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TsConfig {
+    /// Base directory for non-relative module resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    /// Path aliases for module resolution (e.g., `"@/*": ["src/*"]`).
+    #[serde(default)]
+    pub paths: HashMap<String, Vec<String>>,
+}
+
+impl Default for TsConfig {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            paths: HashMap::new(),
+        }
+    }
+}
+
+/// Resolved tsconfig path mapping result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TsPathResolution {
+    /// Import was resolved using tsconfig paths mapping.
+    Resolved(String),
+    /// Import should be resolved through standard TypeScript/Node.js resolution.
+    UseStandardResolution,
+}
 
 impl From<&str> for RepoPath {
     fn from(value: &str) -> Self {
@@ -639,6 +670,31 @@ pub struct ArchInitResult {
     pub layers: Vec<ArchLayer>,
     pub rules: Vec<ArchRule>,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchExplainResult {
+    pub target: RepoPath,
+    pub layer: Option<ArchLayer>,
+    pub rules: Vec<ArchExplainRule>,
+    pub imports: Vec<ArchExplainImport>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchExplainRule {
+    pub rule: ArchRule,
+    pub applies: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchExplainImport {
+    pub to_file: RepoPath,
+    pub to_layer: Option<String>,
+    pub rule: Option<ArchRule>,
+    pub violation: bool,
+    pub rule_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

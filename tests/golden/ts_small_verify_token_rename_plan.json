@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "command": "rename-plan",
+  "status": "ok",
+  "data": {
+    "result": {
+      "target": "auth::middleware::verifyToken",
+      "target_file": "src/auth/middleware.ts",
+      "old_name": "verifyToken",
+      "new_name": "verifySession",
+      "apply_requested": false,
+      "force_requested": false,
+      "applied": false,
+      "steps": [
+        {
+          "path": "src/auth/index.ts",
+          "distance": 1,
+          "certainty": "exact",
+          "roles": [
+            "importer"
+          ],
+          "reasons": [
+            "import statement references defining file src/auth/middleware.ts",
+            "re-export mentions symbol auth::middleware::verifyToken"
+          ],
+          "edits": [
+            {
+              "start_byte": 9,
+              "end_byte": 20,
+              "line": 1,
+              "before_text": "verifyToken",
+              "after_text": "verifySession",
+              "kind": "import_specifier",
+              "verified": true,
+              "deferred_reason": null
+            }
+          ],
+          "apply_safe": true
+        },
+        {
+          "path": "src/auth/middleware.ts",
+          "distance": 0,
+          "certainty": "exact",
+          "roles": [
+            "target",
+            "defines_target_symbol"
+          ],
+          "reasons": [
+            "defines symbol auth::middleware::verifyToken"
+          ],
+          "edits": [
+            {
+              "start_byte": 49,
+              "end_byte": 60,
+              "line": 3,
+              "before_text": "verifyToken",
+              "after_text": "verifySession",
+              "kind": "definition",
+              "verified": true,
+              "deferred_reason": null
+            }
+          ],
+          "apply_safe": true
+        }
+      ],
+      "skipped": [],
+      "warnings": [],
+      "summary": {
+        "files_considered": 2,
+        "files_planned": 2,
+        "files_skipped": 0,
+        "edits_planned": 2,
+        "safe_edits_planned": 2,
+        "deferred_edits_planned": 0,
+        "applied_files": 0,
+        "applied_edits": 0,
+        "blocked": false
+      }
+    }
+  },
+  "warnings": []
+}

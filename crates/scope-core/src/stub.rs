@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde::Serialize;
 
 use crate::{
@@ -8,11 +10,11 @@ use crate::{
         EntryReachesResult, EntryUnreachableResult, GateEvaluation, GateMetric, GateResult,
         GateSeverity, GateStatus, GateSummary, HealthReportComparison, HealthReportMetrics,
         HealthReportResult, ImpactChangeType, ImpactTraversalRule, MirrorResult, NodeKind,
-        PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult,
-        SimulateExtractResult, SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult,
-        SnapshotSaveResult, Span, SplitResult, StabilityResult, SymbolKind, SymbolRecord,
-        TestMapBuildResult, TestMapCoveredByResult, TestMapCoversResult,
-        TestMapUncoveredResult, TraversalRecord, TreeResult, UnusedResult, Visibility,
+        PublicSurface, PublicSurfaceDiff, RenamePlan, RepoPath, RiskResult, SimulateExtractResult,
+        SnapshotDeleteResult, SnapshotDiffResult, SnapshotListResult, SnapshotSaveResult, Span,
+        SplitResult, StabilityResult, SymbolKind, SymbolRecord, TestMapBuildResult,
+        TestMapCoveredByResult, TestMapCoversResult, TestMapUncoveredResult, TraversalRecord,
+        TreeResult, UnusedResult, Visibility,
     },
     DatabaseInfo, IndexHealthStats, QueryValue,
 };
@@ -376,17 +378,14 @@ pub fn calls(
     transitive: bool,
     traversals: Vec<TraversalRecord>,
 ) -> JsonEnvelope<CallsData> {
-    let envelope = CallsData {
-        symbol,
-        transitive,
-        traversals,
-    };
-
-    if transitive {
-        JsonEnvelope::stub("calls", envelope)
-    } else {
-        JsonEnvelope::success("calls", envelope)
-    }
+    JsonEnvelope::success(
+        "calls",
+        CallsData {
+            symbol,
+            transitive,
+            traversals,
+        },
+    )
 }
 
 pub fn callers(
@@ -394,17 +393,14 @@ pub fn callers(
     transitive: bool,
     traversals: Vec<TraversalRecord>,
 ) -> JsonEnvelope<CallsData> {
-    let envelope = CallsData {
-        symbol,
-        transitive,
-        traversals,
-    };
-
-    if transitive {
-        JsonEnvelope::stub("callers", envelope)
-    } else {
-        JsonEnvelope::success("callers", envelope)
-    }
+    JsonEnvelope::success(
+        "callers",
+        CallsData {
+            symbol,
+            transitive,
+            traversals,
+        },
+    )
 }
 
 pub fn impact(
@@ -708,6 +704,15 @@ pub fn arch_init(result: crate::ArchInitResult) -> JsonEnvelope<ArchInitData> {
     JsonEnvelope::success("arch-init", ArchInitData { result })
 }
 
+pub fn arch_explain(result: crate::ArchExplainResult) -> JsonEnvelope<ArchExplainData> {
+    JsonEnvelope::success("arch-explain", ArchExplainData { result })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArchExplainData {
+    pub result: crate::ArchExplainResult,
+}
+
 pub fn audit(result: AuditResult) -> JsonEnvelope<AuditData> {
     JsonEnvelope::success("audit", AuditData { result })
 }
@@ -730,6 +735,266 @@ pub fn simulate_extract(result: SimulateExtractResult) -> JsonEnvelope<SimulateE
 
 pub fn report(result: HealthReportResult) -> JsonEnvelope<ReportData> {
     JsonEnvelope::success("report", ReportData { result })
+}
+
+pub fn render_markdown_report(result: &HealthReportResult) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "# scope Health Report");
+    let _ = writeln!(output, "**Generated at (unix):** {}  ", result.generated_at);
+    let _ = write!(output, "**Score:** {:.1}/100", result.metrics.health_score);
+    if let Some(compare) = &result.compare {
+        let arrow = if compare.health_score_delta > 0.0 {
+            "↑"
+        } else if compare.health_score_delta < 0.0 {
+            "↓"
+        } else {
+            "→"
+        };
+        let _ = write!(
+            output,
+            " {}{:.1} vs {}",
+            arrow,
+            compare.health_score_delta.abs(),
+            compare.target
+        );
+    }
+    let _ = writeln!(output, "  ");
+    let _ = writeln!(output);
+
+    let _ = writeln!(output, "## Summary");
+    let _ = writeln!(output, "| Metric | Value | Delta |");
+    let _ = writeln!(output, "|--------|-------|-------|");
+    markdown_metric_row(
+        &mut output,
+        "Indexed files",
+        result.metrics.total_files.to_string(),
+        None,
+    );
+    markdown_metric_row(
+        &mut output,
+        "Total symbols",
+        result.metrics.total_symbols.to_string(),
+        None,
+    );
+    markdown_metric_row(
+        &mut output,
+        "Total imports",
+        result.metrics.total_imports.to_string(),
+        None,
+    );
+    markdown_metric_row(
+        &mut output,
+        "Import resolution",
+        format!(
+            "{:.1}% resolved ({:.1}% unresolved)",
+            result.metrics.imports_resolved_pct, result.metrics.imports_unresolved_pct
+        ),
+        None,
+    );
+    markdown_metric_row(
+        &mut output,
+        "Parse errors",
+        result.metrics.parse_errors.to_string(),
+        None,
+    );
+    markdown_metric_row(
+        &mut output,
+        "Layer violations",
+        result.metrics.layer_violations.to_string(),
+        result
+            .compare
+            .as_ref()
+            .map(|compare| compare.layer_violations_delta),
+    );
+    markdown_metric_row(
+        &mut output,
+        "Dependency cycles",
+        result.metrics.cycles.to_string(),
+        result.compare.as_ref().map(|compare| compare.cycles_delta),
+    );
+    markdown_metric_row(
+        &mut output,
+        "Unreachable files",
+        result.metrics.unreachable_files.to_string(),
+        result
+            .compare
+            .as_ref()
+            .map(|compare| compare.unreachable_files_delta),
+    );
+    markdown_metric_row(
+        &mut output,
+        "Unused exports",
+        result.metrics.unused_exports.to_string(),
+        None,
+    );
+    markdown_metric_row(
+        &mut output,
+        "Public surface removed",
+        result.metrics.public_surface_removed.to_string(),
+        result
+            .compare
+            .as_ref()
+            .map(|compare| compare.public_surface_removed_delta),
+    );
+    markdown_metric_row(
+        &mut output,
+        "Max file fan-in",
+        result.metrics.max_file_fan_in.to_string(),
+        None,
+    );
+    markdown_metric_row(
+        &mut output,
+        "Average instability",
+        format!("{:.2}", result.metrics.avg_instability),
+        None,
+    );
+
+    if let Some(compare) = &result.compare {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Comparison");
+        let _ = writeln!(output, "- Baseline: `{}`", compare.target);
+        let _ = writeln!(
+            output,
+            "- Baseline health score: {:.1}",
+            compare.baseline_health_score
+        );
+        let _ = writeln!(
+            output,
+            "- Health score delta: {}{:.1}",
+            if compare.health_score_delta > 0.0 {
+                "+"
+            } else {
+                ""
+            },
+            compare.health_score_delta
+        );
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Risk Hotspots");
+    if result.risk_hotspots.is_empty() {
+        let _ = writeln!(output, "- None");
+    } else {
+        for (index, hotspot) in result.risk_hotspots.iter().enumerate() {
+            let _ = writeln!(
+                output,
+                "{}. `{}` — score {} (direct: {}, transitive: {}, churn: {}) — {}",
+                index + 1,
+                hotspot.path.0,
+                hotspot.normalized_score,
+                hotspot.direct_dependents,
+                hotspot.transitive_dependents,
+                hotspot.churn_commits,
+                hotspot.reason
+            );
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Architectural Health");
+    if result.arch_violations.is_empty() {
+        let _ = writeln!(output, "- No layer violations detected.");
+    } else {
+        for violation in &result.arch_violations {
+            let _ = writeln!(
+                output,
+                "- `{}` → `{}` (`{}` → `{}`): {}",
+                violation.from_file.0,
+                violation.to_file.0,
+                violation.from_layer,
+                violation.to_layer,
+                violation.message
+            );
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Dependency Cycles");
+    if result.cycles_detail.is_empty() {
+        let _ = writeln!(output, "- No dependency cycles detected.");
+    } else {
+        for cycle in &result.cycles_detail {
+            let members = cycle
+                .files
+                .iter()
+                .map(|file| format!("`{}`", file.0))
+                .collect::<Vec<_>>()
+                .join(" → ");
+            let _ = writeln!(
+                output,
+                "- {:?} cycle ({} edges, {} external dependents): {} — {}",
+                cycle.severity, cycle.edge_count, cycle.external_dependents, members, cycle.reason
+            );
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Dead Code");
+    if result.unreachable_detail.is_empty() {
+        let _ = writeln!(output, "- No unreachable files detected.");
+    } else {
+        for record in &result.unreachable_detail {
+            let age = record
+                .last_modified_days_ago
+                .map(|days| format!(", last modified {} days ago", days))
+                .unwrap_or_default();
+            let certainty_note = record
+                .certainty_note
+                .as_ref()
+                .map(|note| format!(" ({note})"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                output,
+                "- `{}` — exported symbols: {}, certainty: {:?}{}{}",
+                record.file.0, record.exported_symbols, record.certainty, certainty_note, age
+            );
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Unused Exports");
+    if result.unused_export_detail.is_empty() {
+        let _ = writeln!(output, "- No unused exports detected.");
+    } else {
+        for record in &result.unused_export_detail {
+            let _ = writeln!(
+                output,
+                "- `{}` / `{}` (line {}, inbound refs: {}) — {}",
+                record.file.0,
+                record.qualname,
+                record.line,
+                record.inbound_references,
+                record.reason
+            );
+        }
+    }
+
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Recommendations");
+    if result.recommendations.is_empty() {
+        let _ = writeln!(output, "- None");
+    } else {
+        for recommendation in &result.recommendations {
+            let _ = writeln!(output, "- {}", recommendation);
+        }
+    }
+
+    output
+}
+
+fn markdown_metric_row(output: &mut String, metric: &str, value: String, delta: Option<isize>) {
+    let delta = delta
+        .map(format_signed_delta)
+        .unwrap_or_else(|| "—".to_string());
+    let _ = writeln!(output, "| {metric} | {value} | {delta} |");
+}
+
+fn format_signed_delta(delta: isize) -> String {
+    if delta > 0 {
+        format!("+{delta}")
+    } else {
+        delta.to_string()
+    }
 }
 
 pub fn scaffolded_report(compare: Option<String>) -> JsonEnvelope<ReportData> {
@@ -786,7 +1051,11 @@ pub fn scaffolded_gate(compare: Option<String>, strict: bool) -> JsonEnvelope<Ga
     let report = scaffolded_report(compare.clone()).data.result;
     let evaluations = vec![GateEvaluation {
         metric: GateMetric::HealthScore,
-        status: if strict { GateStatus::Fail } else { GateStatus::Skipped },
+        status: if strict {
+            GateStatus::Fail
+        } else {
+            GateStatus::Skipped
+        },
         severity: GateSeverity::Warning,
         current_value: 0.0,
         baseline_value: Some(0.0),
@@ -800,7 +1069,8 @@ pub fn scaffolded_gate(compare: Option<String>, strict: bool) -> JsonEnvelope<Ga
                 .to_string(),
         ),
         detail: if strict {
-            "strict mode marks the scaffolded gate as failed until real evaluation lands".to_string()
+            "strict mode marks the scaffolded gate as failed until real evaluation lands"
+                .to_string()
         } else {
             "gate evaluation is scaffolded and currently reports a skipped placeholder".to_string()
         },
@@ -960,7 +1230,10 @@ mod tests {
         let report = scaffolded_report(Some("baseline".to_string()));
         assert!(matches!(report.status, crate::json::JsonStatus::Stub));
         assert_eq!(report.command, "report");
-        assert_eq!(report.data.result.compare.as_ref().unwrap().target, "baseline");
+        assert_eq!(
+            report.data.result.compare.as_ref().unwrap().target,
+            "baseline"
+        );
         assert_eq!(report.data.result.metrics.health_score, 0.0);
         assert_eq!(
             report.data.result.recommendations,
@@ -1006,7 +1279,10 @@ mod tests {
             recommendations: vec!["healthy".to_string()],
         };
         let report_envelope = report(live_report.clone());
-        assert!(matches!(report_envelope.status, crate::json::JsonStatus::Ok));
+        assert!(matches!(
+            report_envelope.status,
+            crate::json::JsonStatus::Ok
+        ));
         assert_eq!(report_envelope.command, "report");
         assert_eq!(report_envelope.data.result, live_report);
 
@@ -1039,6 +1315,101 @@ mod tests {
         assert!(matches!(gate_envelope.status, crate::json::JsonStatus::Ok));
         assert_eq!(gate_envelope.command, "gate");
         assert_eq!(gate_envelope.data.result, live_gate);
+    }
+
+    #[test]
+    fn render_markdown_report_includes_sections_and_comparison_delta() {
+        let report = HealthReportResult {
+            generated_at: 1,
+            compare: Some(HealthReportComparison {
+                target: "baseline".to_string(),
+                baseline_health_score: 82.0,
+                health_score_delta: 6.0,
+                baseline_layer_violations: 2,
+                layer_violations_delta: -1,
+                baseline_cycles: 1,
+                cycles_delta: -1,
+                baseline_unreachable_files: 3,
+                unreachable_files_delta: -2,
+                baseline_public_surface_removed: 1,
+                public_surface_removed_delta: -1,
+            }),
+            metrics: HealthReportMetrics {
+                total_files: 5,
+                total_symbols: 9,
+                total_imports: 12,
+                unresolved_imports: 1,
+                imports_unresolved_pct: 8.3,
+                imports_resolved_pct: 91.7,
+                parse_errors: 0,
+                layer_violations: 1,
+                cycles: 0,
+                max_file_fan_in: 4,
+                avg_instability: 0.42,
+                unreachable_files: 1,
+                unused_exports: 2,
+                public_surface_removed: 0,
+                health_score: 88.0,
+            },
+            risk_hotspots: vec![crate::RiskRecord {
+                path: RepoPath::from("src/parser.rs"),
+                direct_dependents: 2,
+                transitive_dependents: 4,
+                churn_commits: 3,
+                score: 0.88,
+                normalized_score: 88,
+                reason: "high fan-in".to_string(),
+            }],
+            arch_violations: vec![crate::ArchViolation {
+                from_file: RepoPath::from("src/ui.rs"),
+                to_file: RepoPath::from("src/data.rs"),
+                from_layer: "ui".to_string(),
+                to_layer: "data".to_string(),
+                message: "ui may not import data".to_string(),
+            }],
+            cycles_detail: vec![crate::CycleRecord {
+                files: vec![RepoPath::from("src/a.rs"), RepoPath::from("src/b.rs")],
+                edge_count: 2,
+                external_dependents: 1,
+                severity: crate::CycleSeverity::High,
+                reason: "cycle detected".to_string(),
+            }],
+            unreachable_detail: vec![crate::EntryUnreachableRecord {
+                file: RepoPath::from("src/unused.rs"),
+                last_modified_days_ago: Some(7),
+                exported_symbols: 1,
+                certainty: Certainty::Heuristic,
+                certainty_note: Some("no inbound entry path".to_string()),
+            }],
+            unused_export_detail: vec![crate::UnusedRecord {
+                file: RepoPath::from("src/lib.rs"),
+                name: "helper".to_string(),
+                qualname: "lib::helper".to_string(),
+                kind: SymbolKind::Function,
+                visibility: Visibility::Public,
+                line: 12,
+                inbound_references: 0,
+                reason: "no indexed callers".to_string(),
+            }],
+            recommendations: vec!["trim unreachable code".to_string()],
+        };
+
+        let markdown = render_markdown_report(&report);
+        assert!(markdown.contains("# scope Health Report"));
+        assert!(markdown.contains("**Score:** 88.0/100 ↑6.0 vs baseline"));
+        assert!(markdown.contains("| Layer violations | 1 | -1 |"));
+        assert!(markdown.contains("## Risk Hotspots"));
+        assert!(markdown.contains("`src/parser.rs` — score 88"));
+        assert!(markdown.contains("## Architectural Health"));
+        assert!(markdown.contains("ui may not import data"));
+        assert!(markdown.contains("## Dependency Cycles"));
+        assert!(markdown.contains("High cycle"));
+        assert!(markdown.contains("## Dead Code"));
+        assert!(markdown.contains("no inbound entry path"));
+        assert!(markdown.contains("## Unused Exports"));
+        assert!(markdown.contains("`src/lib.rs` / `lib::helper`"));
+        assert!(markdown.contains("## Recommendations"));
+        assert!(markdown.contains("trim unreachable code"));
     }
 
     #[test]

@@ -7,9 +7,9 @@ use std::{
 };
 
 use scope_core::{
-    adapter_for_language, arch_check, execute_query, load_arch_config, scan_repo,
-    BootstrapOptions, CochangeSort, DatabaseInfo, QuerySession, RepoPath, RiskSort, ScanConfig,
-    Store, SymbolKind, Verbosity,
+    adapter_for_language, arch_check, execute_query, load_arch_config, scan_repo, BootstrapOptions,
+    CochangeSort, DatabaseInfo, QuerySession, RepoPath, RiskSort, ScanConfig, Store, SymbolKind,
+    Verbosity,
 };
 use serde_json::{json, Value};
 
@@ -886,7 +886,13 @@ fn dispatch_deps(arguments: &Value) -> String {
             let reverse = optional_bool(arguments, "reverse").unwrap_or(false);
             let transitive = optional_bool(arguments, "transitive").unwrap_or(false);
             let depth = optional_usize(arguments, "depth")?;
-            let dependencies = if reverse {
+            let dependencies = if transitive {
+                context.store.query_deps_transitive(
+                    &RepoPath::from(file.clone()),
+                    reverse,
+                    depth,
+                )?
+            } else if reverse {
                 context
                     .store
                     .query_reverse_deps(&RepoPath::from(file.clone()))?
@@ -1139,7 +1145,9 @@ fn dispatch_gate(arguments: &Value) -> String {
         let compare = optional_string_arg(arguments, "compare")?;
         let strict = optional_bool_arg(arguments, "strict")?.unwrap_or(false);
         let config = load_arch_config(&context.paths.repo_root)?;
-        let result = context.store.query_gate(&config, compare.as_deref(), strict)?;
+        let result = context
+            .store
+            .query_gate(&config, compare.as_deref(), strict)?;
         serialize_json(&scope_core::stub::gate(result))
     }) {
         Ok(output) => output,
@@ -1173,9 +1181,10 @@ fn dispatch_simulate_extract(arguments: &Value) -> String {
         let symbols = required_string_array(arguments, "symbols")?;
         let into_file = required_string(arguments, "into_file")?;
         let config = load_arch_config(&context.paths.repo_root)?;
-        let result = context
-            .store
-            .simulate_extract(&symbols, &RepoPath::from(into_file), &config)?;
+        let result =
+            context
+                .store
+                .simulate_extract(&symbols, &RepoPath::from(into_file), &config)?;
         serialize_json(&scope_core::stub::simulate_extract(result))
     }) {
         Ok(output) => output,
@@ -1278,7 +1287,6 @@ fn dispatch_rename_plan(arguments: &Value) -> String {
     match target.and_then(|target| {
         new_name.and_then(|new_name| {
             bootstrap_from_arguments(arguments).and_then(|context| {
-                validate_new_name(&new_name)?;
                 let apply = optional_bool(arguments, "apply").unwrap_or(false);
                 let force = optional_bool(arguments, "force").unwrap_or(false);
                 let plan = context.store.build_rename_plan(
@@ -1352,7 +1360,9 @@ fn dispatch_split(arguments: &Value) -> String {
     match required_string(arguments, "target").and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
             let clusters = optional_usize(arguments, "clusters")?;
-            let result = context.store.query_split(&RepoPath::from(target), clusters)?;
+            let result = context
+                .store
+                .query_split(&RepoPath::from(target), clusters)?;
             serialize_json(&scope_core::stub::split(result))
         })
     }) {
@@ -1367,9 +1377,12 @@ fn dispatch_mirror(arguments: &Value) -> String {
             let other = optional_string(arguments, "other").map(RepoPath::from);
             let threshold = optional_u32(arguments, "threshold")?;
             let top = optional_usize(arguments, "top")?;
-            let result = context
-                .store
-                .query_mirror(&RepoPath::from(target), other.as_ref(), threshold, top)?;
+            let result = context.store.query_mirror(
+                &RepoPath::from(target),
+                other.as_ref(),
+                threshold,
+                top,
+            )?;
             serialize_json(&scope_core::stub::mirror(result))
         })
     }) {
@@ -1616,10 +1629,7 @@ fn optional_bool(arguments: &Value, key: &str) -> Option<bool> {
     arguments.get(key).and_then(Value::as_bool)
 }
 
-fn optional_bool_arg(
-    arguments: &Value,
-    key: &str,
-) -> Result<Option<bool>, scope_core::ScopeError> {
+fn optional_bool_arg(arguments: &Value, key: &str) -> Result<Option<bool>, scope_core::ScopeError> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(value)) => Ok(Some(*value)),
@@ -2018,19 +2028,6 @@ fn format_context_record_line(record: &scope_core::ContextFileRecord) -> String 
             .collect::<Vec<_>>()
             .join(", ")
     )
-}
-
-fn validate_new_name(new_name: &str) -> Result<(), scope_core::ScopeError> {
-    if new_name.is_empty()
-        || !new_name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-    {
-        return Err(scope_core::ScopeError::InvalidInput(
-            "rename-plan requires a simple identifier for --to".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn looks_like_symbol(target: &str) -> bool {
@@ -2534,31 +2531,64 @@ mod tests {
 
         let report = by_name.get("report").expect("report tool should exist");
         assert_eq!(report["inputSchema"]["type"], "object");
-        assert_eq!(report["inputSchema"]["properties"]["repo_root"]["type"], "string");
-        assert_eq!(report["inputSchema"]["properties"]["db_path"]["type"], "string");
-        assert_eq!(report["inputSchema"]["properties"]["compare"]["type"], "string");
+        assert_eq!(
+            report["inputSchema"]["properties"]["repo_root"]["type"],
+            "string"
+        );
+        assert_eq!(
+            report["inputSchema"]["properties"]["db_path"]["type"],
+            "string"
+        );
+        assert_eq!(
+            report["inputSchema"]["properties"]["compare"]["type"],
+            "string"
+        );
         assert_eq!(report["inputSchema"]["additionalProperties"], false);
 
         let gate = by_name.get("gate").expect("gate tool should exist");
         assert_eq!(gate["inputSchema"]["type"], "object");
-        assert_eq!(gate["inputSchema"]["properties"]["repo_root"]["type"], "string");
-        assert_eq!(gate["inputSchema"]["properties"]["db_path"]["type"], "string");
-        assert_eq!(gate["inputSchema"]["properties"]["compare"]["type"], "string");
-        assert_eq!(gate["inputSchema"]["properties"]["strict"]["type"], "boolean");
+        assert_eq!(
+            gate["inputSchema"]["properties"]["repo_root"]["type"],
+            "string"
+        );
+        assert_eq!(
+            gate["inputSchema"]["properties"]["db_path"]["type"],
+            "string"
+        );
+        assert_eq!(
+            gate["inputSchema"]["properties"]["compare"]["type"],
+            "string"
+        );
+        assert_eq!(
+            gate["inputSchema"]["properties"]["strict"]["type"],
+            "boolean"
+        );
         assert_eq!(gate["inputSchema"]["additionalProperties"], false);
 
         let query = by_name.get("query").expect("query tool should exist");
         assert_eq!(query["inputSchema"]["type"], "object");
-        assert_eq!(query["inputSchema"]["properties"]["repo_root"]["type"], "string");
-        assert_eq!(query["inputSchema"]["properties"]["db_path"]["type"], "string");
+        assert_eq!(
+            query["inputSchema"]["properties"]["repo_root"]["type"],
+            "string"
+        );
+        assert_eq!(
+            query["inputSchema"]["properties"]["db_path"]["type"],
+            "string"
+        );
         assert_eq!(query["inputSchema"]["properties"]["expr"]["type"], "string");
         assert_eq!(query["inputSchema"]["properties"]["exprs"]["type"], "array");
-        assert_eq!(query["inputSchema"]["properties"]["exprs"]["items"]["type"], "string");
+        assert_eq!(
+            query["inputSchema"]["properties"]["exprs"]["items"]["type"],
+            "string"
+        );
         assert_eq!(query["inputSchema"]["properties"]["exprs"]["minItems"], 1);
-        assert_eq!(query["inputSchema"]["anyOf"], json!([
-            { "required": ["expr"] },
-            { "required": ["exprs"] }
-        ]));
+        assert_eq!(
+            query["inputSchema"]["anyOf"],
+            json!([
+                { "required": ["expr"] },
+                { "required": ["exprs"] }
+            ])
+        );
         assert_eq!(query["inputSchema"]["additionalProperties"], false);
     }
 
@@ -2586,6 +2616,49 @@ mod tests {
         assert_eq!(value["command"], "deps");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["target"], "src/lib.rs");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_deps_supports_transitive_closure_with_depth_limit() {
+        let repo = prepare_fixture_copy("ts_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "deps",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "file": "src/index.ts",
+                "transitive": true,
+                "depth": 2
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "deps");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "src/index.ts");
+        assert_eq!(value["data"]["transitive"], true);
+        assert_eq!(value["data"]["depth"], 2);
+        assert_eq!(
+            value["data"]["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "src/auth/index.ts",
+                "src/utils/formatter.ts",
+                "src/auth/aliases.ts",
+                "src/auth/middleware.ts",
+                "src/utils/logger.ts"
+            ]
+        );
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -2619,7 +2692,10 @@ mod tests {
         let payload: Value = serde_json::from_str(text).expect("wrapped content should be JSON");
         assert_eq!(payload["command"], "query");
         assert_eq!(payload["status"], "ok");
-        assert_eq!(payload["data"]["input"], "file \"src/lib.rs\" | .deps | count");
+        assert_eq!(
+            payload["data"]["input"],
+            "file \"src/lib.rs\" | .deps | count"
+        );
         assert_eq!(payload["data"]["result"]["number"], 3);
 
         fs::remove_dir_all(repo).unwrap();
@@ -2675,7 +2751,8 @@ mod tests {
                 "arguments": {}
             }
         });
-        let response = handle_message(&request).expect("unknown tools should return an error response");
+        let response =
+            handle_message(&request).expect("unknown tools should return an error response");
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 9);
         assert_eq!(response["error"]["code"], -32602);
@@ -2777,7 +2854,10 @@ mod tests {
         let cone_value: Value = serde_json::from_str(&cone_output).unwrap();
         assert_eq!(cone_value["command"], "entry-cone");
         assert_eq!(cone_value["status"], "ok");
-        assert_eq!(cone_value["data"]["result"]["summary"]["reachable_files"], 3);
+        assert_eq!(
+            cone_value["data"]["result"]["summary"]["reachable_files"],
+            3
+        );
         assert_eq!(cone_value["data"]["result"]["summary"]["max_distance"], 2);
 
         let reaches_output = dispatch_tool(
@@ -2808,10 +2888,7 @@ mod tests {
         let unreachable_value: Value = serde_json::from_str(&unreachable_output).unwrap();
         assert_eq!(unreachable_value["command"], "entry-unreachable");
         assert_eq!(unreachable_value["status"], "ok");
-        assert_eq!(
-            unreachable_value["data"]["result"]["unreachable_files"],
-            0
-        );
+        assert_eq!(unreachable_value["data"]["result"]["unreachable_files"], 0);
         assert_eq!(unreachable_value["data"]["result"]["reachable_files"], 4);
 
         fs::remove_dir_all(repo).unwrap();
@@ -2920,7 +2997,10 @@ mod tests {
         let report_value: Value = serde_json::from_str(&report_output).unwrap();
         assert_eq!(report_value["command"], "report");
         assert_eq!(report_value["status"], "ok");
-        assert_eq!(report_value["data"]["result"]["compare"]["target"], "baseline");
+        assert_eq!(
+            report_value["data"]["result"]["compare"]["target"],
+            "baseline"
+        );
         assert_eq!(
             report_value["data"]["result"]["compare"]["baseline_health_score"],
             94.0
@@ -2937,7 +3017,12 @@ mod tests {
             report_value["data"]["result"]["compare"]["public_surface_removed_delta"],
             0
         );
-        assert!(report_value["data"]["result"]["metrics"]["total_files"].as_u64().unwrap() > 0);
+        assert!(
+            report_value["data"]["result"]["metrics"]["total_files"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         assert_eq!(
             report_value["data"]["result"]["recommendations"],
             json!([
@@ -2960,7 +3045,12 @@ mod tests {
         assert_eq!(gate_value["status"], "ok");
         assert_eq!(gate_value["data"]["result"]["compare"], "baseline");
         assert_eq!(gate_value["data"]["result"]["summary"]["failed"], 1);
-        assert!(gate_value["data"]["result"]["summary"]["passed"].as_u64().unwrap() > 0);
+        assert!(
+            gate_value["data"]["result"]["summary"]["passed"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
 
         let query_output = dispatch_tool(
             "query",
@@ -2973,7 +3063,10 @@ mod tests {
         let query_value: Value = serde_json::from_str(&query_output).unwrap();
         assert_eq!(query_value["command"], "query");
         assert_eq!(query_value["status"], "ok");
-        assert_eq!(query_value["data"]["input"], "file \"src/lib.rs\" | .deps | count");
+        assert_eq!(
+            query_value["data"]["input"],
+            "file \"src/lib.rs\" | .deps | count"
+        );
         assert_eq!(query_value["data"]["result"]["number"], 3);
 
         let unused_output = dispatch_tool(
@@ -2984,8 +3077,14 @@ mod tests {
         let unused_value: Value = serde_json::from_str(&unused_output).unwrap();
         assert_eq!(unused_value["command"], "unused");
         assert_eq!(unused_value["status"], "ok");
-        assert_eq!(unused_value["data"]["result"]["summary"]["exported_symbols"], 8);
-        assert_eq!(unused_value["data"]["result"]["summary"]["unused_symbols"], 6);
+        assert_eq!(
+            unused_value["data"]["result"]["summary"]["exported_symbols"],
+            8
+        );
+        assert_eq!(
+            unused_value["data"]["result"]["summary"]["unused_symbols"],
+            6
+        );
 
         let cycles_output = dispatch_tool(
             "cycles",
@@ -3163,7 +3262,10 @@ mod tests {
             serde_json::from_str(&query_both_expr_and_exprs_output).unwrap();
         assert_eq!(query_both_expr_and_exprs_value["command"], "query");
         assert_eq!(query_both_expr_and_exprs_value["status"], "error");
-        assert_eq!(query_both_expr_and_exprs_value["data"]["kind"], "invalid_input");
+        assert_eq!(
+            query_both_expr_and_exprs_value["data"]["kind"],
+            "invalid_input"
+        );
         assert!(query_both_expr_and_exprs_value["data"]["message"]
             .as_str()
             .expect("error message should be a string")
@@ -3193,7 +3295,10 @@ mod tests {
         assert_eq!(report_value["command"], "report");
         assert_eq!(report_value["status"], "error");
         assert_eq!(report_value["data"]["kind"], "not_found");
-        assert_eq!(report_value["data"]["message"], "snapshot not found: missing");
+        assert_eq!(
+            report_value["data"]["message"],
+            "snapshot not found: missing"
+        );
 
         let gate_output = dispatch_tool(
             "gate",
@@ -3241,10 +3346,12 @@ skip = false
         let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
         assert_eq!(gate_value["command"], "gate");
         assert_eq!(gate_value["status"], "ok");
-        assert!(gate_value["data"]["result"]["summary"]["warnings"]
-            .as_u64()
-            .expect("warnings summary should be numeric")
-            >= 1);
+        assert!(
+            gate_value["data"]["result"]["summary"]["warnings"]
+                .as_u64()
+                .expect("warnings summary should be numeric")
+                >= 1
+        );
         let evaluations = gate_value["data"]["result"]["evaluations"]
             .as_array()
             .expect("evaluations should be an array");
@@ -3290,10 +3397,12 @@ skip = true
         let gate_value: Value = serde_json::from_str(&gate_output).unwrap();
         assert_eq!(gate_value["command"], "gate");
         assert_eq!(gate_value["status"], "ok");
-        assert!(gate_value["data"]["result"]["summary"]["skipped"]
-            .as_u64()
-            .expect("skipped summary should be numeric")
-            >= 1);
+        assert!(
+            gate_value["data"]["result"]["summary"]["skipped"]
+                .as_u64()
+                .expect("skipped summary should be numeric")
+                >= 1
+        );
         let evaluations = gate_value["data"]["result"]["evaluations"]
             .as_array()
             .expect("evaluations should be an array");
@@ -3303,7 +3412,10 @@ skip = true
             .expect("cycles evaluation should be present");
         assert_eq!(evaluation["status"], "skipped");
         assert_eq!(evaluation["severity"], "warning");
-        assert_eq!(evaluation["detail"], "gate explicitly skipped by configuration");
+        assert_eq!(
+            evaluation["detail"],
+            "gate explicitly skipped by configuration"
+        );
 
         fs::remove_dir_all(repo).unwrap();
     }
@@ -3372,7 +3484,10 @@ skip = false
         assert_eq!(evaluation["current_value"], -12.0);
         assert_eq!(evaluation["baseline_value"], 0.0);
         assert_eq!(evaluation["delta"], -12.0);
-        assert_eq!(evaluation["detail"], "delta -12.00 is below min_delta -1.00");
+        assert_eq!(
+            evaluation["detail"],
+            "delta -12.00 is below min_delta -1.00"
+        );
 
         fs::remove_dir_all(repo).unwrap();
     }
@@ -3439,10 +3554,12 @@ skip = false
         let all_symbols_value: Value = serde_json::from_str(&all_symbols_output).unwrap();
         assert_eq!(all_symbols_value["command"], "query");
         assert_eq!(all_symbols_value["status"], "ok");
-        assert!(all_symbols_value["data"]["result"]["number"]
-            .as_u64()
-            .expect("symbol count should be numeric")
-            >= 4);
+        assert!(
+            all_symbols_value["data"]["result"]["number"]
+                .as_u64()
+                .expect("symbol count should be numeric")
+                >= 4
+        );
 
         let reverse_output = dispatch_tool(
             "query",
@@ -3456,6 +3573,44 @@ skip = false
         assert_eq!(reverse_value["command"], "query");
         assert_eq!(reverse_value["status"], "ok");
         assert_eq!(reverse_value["data"]["result"]["number"], 2);
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_query_supports_transitive_call_steps() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let callers_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "symbol \"parser::parse\" | .callers_transitive | count"
+            }),
+        )
+        .unwrap();
+        let callers_value: Value = serde_json::from_str(&callers_output).unwrap();
+        assert_eq!(callers_value["command"], "query");
+        assert_eq!(callers_value["status"], "ok");
+        assert_eq!(callers_value["data"]["result"]["number"], 2);
+
+        let callees_output = dispatch_tool(
+            "query",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "expr": "symbol \"parser::parse\" | .callees_transitive | count"
+            }),
+        )
+        .unwrap();
+        let callees_value: Value = serde_json::from_str(&callees_output).unwrap();
+        assert_eq!(callees_value["command"], "query");
+        assert_eq!(callees_value["status"], "ok");
+        assert_eq!(callees_value["data"]["result"]["number"], 1);
 
         fs::remove_dir_all(repo).unwrap();
     }
@@ -3695,6 +3850,35 @@ skip = false
         assert_eq!(value["command"], "rename-plan");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["data"]["result"]["target"], "parser::parse");
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn dispatch_rename_plan_rejects_path_like_file_destination() {
+        let repo = prepare_fixture_copy("rust_small");
+        let _ = dispatch_tool(
+            "index",
+            &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
+        )
+        .unwrap();
+
+        let output = dispatch_tool(
+            "rename_plan",
+            &json!({
+                "repo_root": repo.display().to_string(),
+                "target": "src/parser.rs",
+                "to": "src/parser2.rs"
+            }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["command"], "rename-plan");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert_eq!(
+            value["data"]["message"],
+            "invalid command input: rename-plan file targets currently accept only a bare file stem for --to; file moves are not implemented"
+        );
         fs::remove_dir_all(repo).unwrap();
     }
 

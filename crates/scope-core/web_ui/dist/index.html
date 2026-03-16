@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>scope serve</title>
+  <style>
+    :root { color-scheme: dark light; }
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 24px; background: #0f172a; color: #e2e8f0; }
+    h1 { margin-top: 0; }
+    a { color: #93c5fd; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 20px; }
+    .card { border: 1px solid #334155; border-radius: 8px; padding: 16px; background: #111827; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+    button { cursor: pointer; border: 1px solid #475569; background: #1e293b; color: inherit; border-radius: 6px; padding: 8px 12px; }
+    pre { white-space: pre-wrap; word-break: break-word; border: 1px solid #334155; border-radius: 8px; padding: 16px; background: #020617; min-height: 280px; }
+    .muted { color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <h1>scope serve</h1>
+  <p class="muted">Bundled local API explorer for the indexed repository.</p>
+
+  <div class="grid">
+    <div class="card">
+      <strong>Status</strong>
+      <p>Check index/database health.</p>
+      <a href="/api/status">/api/status</a>
+    </div>
+    <div class="card">
+      <strong>Entry points</strong>
+      <p>List detected entry points.</p>
+      <a href="/api/entry/list">/api/entry/list</a>
+    </div>
+    <div class="card">
+      <strong>Entry cone</strong>
+      <p>Show files reachable from a detected entry point.</p>
+      <a href="/api/entry/cone?target=src/workers/job.ts">/api/entry/cone?target=src/workers/job.ts</a>
+    </div>
+    <div class="card">
+      <strong>Snapshots</strong>
+      <p>List saved snapshots.</p>
+      <a href="/api/snapshot/list">/api/snapshot/list</a>
+    </div>
+    <div class="card">
+      <strong>Audit</strong>
+      <p>Trace configured capability reachability.</p>
+      <a href="/api/audit?capability=network">/api/audit?capability=network</a>
+    </div>
+    <div class="card">
+      <strong>Surface diff</strong>
+      <p>Compare exported API shape between indexed files.</p>
+      <a href="/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts">/api/surface/diff?before=src/auth/jwt.ts&amp;after=src/auth/aliases.ts</a>
+    </div>
+    <div class="card">
+      <strong>Tree</strong>
+      <p>Inspect recursive file dependencies.</p>
+      <a href="/api/tree?target=src/lib.rs">/api/tree?target=src/lib.rs</a>
+    </div>
+    <div class="card">
+      <strong>Report</strong>
+      <p>Summarize repository health metrics and findings.</p>
+      <a href="/api/report">/api/report</a>
+    </div>
+    <div class="card">
+      <strong>Gate</strong>
+      <p>Evaluate configured quality gates against current health.</p>
+      <a href="/api/gate?strict=true">/api/gate?strict=true</a>
+    </div>
+    <div class="card">
+      <strong>Query</strong>
+      <p>Run composable graph queries over indexed files and symbols.</p>
+      <a href="/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count">/api/query?expr=file "src/lib.rs" | .deps | count</a>
+    </div>
+    <div class="card">
+      <strong>Unused</strong>
+      <p>List exported symbols with no indexed inbound references.</p>
+      <a href="/api/unused">/api/unused</a>
+    </div>
+    <div class="card">
+      <strong>Simulate extract</strong>
+      <p>Preview graph changes from extracting symbols into a new file.</p>
+      <a href="/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs">/api/simulate/extract?symbols=lib::parser&amp;into=src/parser_extracted.rs</a>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button data-endpoint="/api/status">Load status</button>
+    <button data-endpoint="/api/report">Load report</button>
+    <button data-endpoint="/api/gate?strict=true">Load gate</button>
+    <button data-endpoint="/api/query?expr=file%20%22src%2Flib.rs%22%20%7C%20.deps%20%7C%20count">Load query</button>
+    <button data-endpoint="/api/unused">Load unused</button>
+    <button data-endpoint="/api/entry/list">Load entry list</button>
+    <button data-endpoint="/api/entry/cone?target=src/workers/job.ts">Load entry cone</button>
+    <button data-endpoint="/api/audit?capability=network">Load audit</button>
+    <button data-endpoint="/api/surface?target=src/auth/jwt.ts">Load surface</button>
+    <button data-endpoint="/api/surface/diff?before=src/auth/jwt.ts&after=src/auth/aliases.ts">Load surface diff</button>
+    <button data-endpoint="/api/cycles">Load cycles</button>
+    <button data-endpoint="/api/tree?target=src/lib.rs">Load tree</button>
+    <button data-endpoint="/api/simulate/extract?symbols=lib::parser&into=src/parser_extracted.rs">Load simulate extract</button>
+    <button data-endpoint="/api/entry/reaches?target=src/parser.rs">Load entry reaches</button>
+    <button data-endpoint="/api/snapshot/list">Load snapshots</button>
+  </div>
+
+  <pre id="output">Click a button to fetch JSON.</pre>
+
+  <script>
+    const output = document.getElementById('output');
+    async function load(endpoint) {
+      output.textContent = `Loading ${endpoint} ...`;
+      try {
+        const response = await fetch(endpoint);
+        const data = await response.json();
+        output.textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        output.textContent = String(error);
+      }
+    }
+    for (const button of document.querySelectorAll('button[data-endpoint]')) {
+      button.addEventListener('click', () => load(button.dataset.endpoint));
+    }
+  </script>
+</body>
+</html>

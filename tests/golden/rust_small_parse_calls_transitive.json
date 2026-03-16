@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "command": "calls",
+  "status": "ok",
+  "data": {
+    "symbol": "parser::parse",
+    "transitive": true,
+    "traversals": [
+      {
+        "kind": "symbol",
+        "path": "src/parser.rs",
+        "qualname": "parser::tokenize",
+        "edge_kind": "call",
+        "certainty": "exact",
+        "reason": "is called by parser::parse",
+        "distance": 1
+      }
+    ]
+  },
+  "warnings": []
+}

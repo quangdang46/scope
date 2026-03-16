@@ -19,7 +19,9 @@ pub enum QueryStep {
     Reverse,
     Symbols,
     Callers,
+    CallersTransitive,
     Callees,
+    CalleesTransitive,
     Unique,
     Count,
 }
@@ -58,7 +60,11 @@ impl QuerySession {
     }
 }
 
-pub fn execute_query(input: &str, store: &Store, session: &mut QuerySession) -> ScopeResult<QueryValue> {
+pub fn execute_query(
+    input: &str,
+    store: &Store,
+    session: &mut QuerySession,
+) -> ScopeResult<QueryValue> {
     let statement = parse_query_statement(input)?;
     evaluate_statement(&statement, store, session)
 }
@@ -73,9 +79,7 @@ pub fn parse_query_statement(input: &str) -> ScopeResult<QueryStatement> {
 
     if let Some(rest) = trimmed.strip_prefix("let ") {
         let (name, expr) = rest.split_once('=').ok_or_else(|| {
-            ScopeError::InvalidInput(
-                "let bindings must use `let <name> = <expr>`".to_string(),
-            )
+            ScopeError::InvalidInput("let bindings must use `let <name> = <expr>`".to_string())
         })?;
         let name = name.trim();
         validate_binding_name(name)?;
@@ -189,11 +193,13 @@ fn parse_step(input: &str) -> ScopeResult<QueryStep> {
         ".reverse" => Ok(QueryStep::Reverse),
         ".symbols" => Ok(QueryStep::Symbols),
         ".callers" => Ok(QueryStep::Callers),
+        ".callers_transitive" => Ok(QueryStep::CallersTransitive),
         ".callees" => Ok(QueryStep::Callees),
+        ".callees_transitive" => Ok(QueryStep::CalleesTransitive),
         "unique" | ".unique" => Ok(QueryStep::Unique),
         "count" | ".count" => Ok(QueryStep::Count),
         _ => Err(ScopeError::InvalidInput(format!(
-            "unsupported query step `{input}`; supported steps are .deps, .reverse, .symbols, .callers, .callees, unique, and count"
+            "unsupported query step `{input}`; supported steps are .deps, .reverse, .symbols, .callers, .callees, unique, and count; plus .callers_transitive and .callees_transitive"
         ))),
     }
 }
@@ -272,7 +278,11 @@ fn evaluate_statement(
     }
 }
 
-fn evaluate_expr(expr: &QueryExpr, store: &Store, session: &QuerySession) -> ScopeResult<QueryValue> {
+fn evaluate_expr(
+    expr: &QueryExpr,
+    store: &Store,
+    session: &QuerySession,
+) -> ScopeResult<QueryValue> {
     let mut value = match &expr.source {
         QuerySource::File(path) => {
             let path = path.clone();
@@ -299,9 +309,11 @@ fn evaluate_expr(expr: &QueryExpr, store: &Store, session: &QuerySession) -> Sco
         }
         QuerySource::AllFiles => QueryValue::Files(store.list_indexed_files()?),
         QuerySource::AllSymbols => QueryValue::Symbols(store.list_indexed_symbols()?),
-        QuerySource::Var(name) => session.bindings.get(name).cloned().ok_or_else(|| {
-            ScopeError::InvalidInput(format!("unknown query binding `${name}`"))
-        })?,
+        QuerySource::Var(name) => {
+            session.bindings.get(name).cloned().ok_or_else(|| {
+                ScopeError::InvalidInput(format!("unknown query binding `${name}`"))
+            })?
+        }
     };
 
     for step in &expr.steps {
@@ -317,7 +329,12 @@ fn apply_step(value: QueryValue, step: &QueryStep, store: &Store) -> ScopeResult
             let files = file_paths(&value, ".deps")?;
             let mut next = Vec::new();
             for path in files {
-                next.extend(store.query_deps(&path)?.into_iter().map(|record| record.path));
+                next.extend(
+                    store
+                        .query_deps(&path)?
+                        .into_iter()
+                        .map(|record| record.path),
+                );
             }
             Ok(QueryValue::Files(next))
         }
@@ -350,11 +367,27 @@ fn apply_step(value: QueryValue, step: &QueryStep, store: &Store) -> ScopeResult
             }
             Ok(QueryValue::Traversals(next))
         }
+        QueryStep::CallersTransitive => {
+            let symbols = symbol_names(&value, ".callers_transitive")?;
+            let mut next = Vec::new();
+            for symbol in symbols {
+                next.extend(store.query_callers(&symbol, true)?);
+            }
+            Ok(QueryValue::Traversals(next))
+        }
         QueryStep::Callees => {
             let symbols = symbol_names(&value, ".callees")?;
             let mut next = Vec::new();
             for symbol in symbols {
                 next.extend(store.query_callees(&symbol, false)?);
+            }
+            Ok(QueryValue::Traversals(next))
+        }
+        QueryStep::CalleesTransitive => {
+            let symbols = symbol_names(&value, ".callees_transitive")?;
+            let mut next = Vec::new();
+            for symbol in symbols {
+                next.extend(store.query_callees(&symbol, true)?);
             }
             Ok(QueryValue::Traversals(next))
         }
@@ -381,7 +414,10 @@ fn file_paths(value: &QueryValue, step: &str) -> ScopeResult<Vec<RepoPath>> {
 
 fn symbol_names(value: &QueryValue, step: &str) -> ScopeResult<Vec<String>> {
     match value {
-        QueryValue::Symbols(symbols) => Ok(symbols.iter().map(|symbol| symbol.qualname.clone()).collect()),
+        QueryValue::Symbols(symbols) => Ok(symbols
+            .iter()
+            .map(|symbol| symbol.qualname.clone())
+            .collect()),
         QueryValue::Traversals(records) => Ok(records
             .iter()
             .filter_map(|record| record.qualname.clone())
@@ -463,7 +499,8 @@ mod tests {
 
     #[test]
     fn parse_let_binding() {
-        let statement = parse_query_statement("let auth = symbol \"auth::login\" | .callers").unwrap();
+        let statement =
+            parse_query_statement("let auth = symbol \"auth::login\" | .callers").unwrap();
         assert_eq!(
             statement,
             QueryStatement::Let {
@@ -502,15 +539,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_transitive_call_steps() {
+        assert_eq!(
+            parse_query_statement(
+                "symbol \"parser::parse\" | .callers_transitive | .callees_transitive"
+            )
+            .unwrap(),
+            QueryStatement::Expr(QueryExpr {
+                source: QuerySource::Symbol("parser::parse".to_string()),
+                steps: vec![QueryStep::CallersTransitive, QueryStep::CalleesTransitive],
+            })
+        );
+    }
+
+    #[test]
     fn binding_names_are_sorted() {
         let mut session = QuerySession::default();
-        session.bindings.insert("zeta".to_string(), QueryValue::Number(1));
-        session.bindings.insert("alpha".to_string(), QueryValue::Number(2));
-        session.bindings.insert("middle".to_string(), QueryValue::Number(3));
+        session
+            .bindings
+            .insert("zeta".to_string(), QueryValue::Number(1));
+        session
+            .bindings
+            .insert("alpha".to_string(), QueryValue::Number(2));
+        session
+            .bindings
+            .insert("middle".to_string(), QueryValue::Number(3));
 
         assert_eq!(
             session.binding_names(),
-            vec!["alpha".to_string(), "middle".to_string(), "zeta".to_string()]
+            vec![
+                "alpha".to_string(),
+                "middle".to_string(),
+                "zeta".to_string()
+            ]
         );
     }
 
@@ -525,18 +586,14 @@ mod tests {
     fn reject_trailing_pipe_segment() {
         let error = parse_query_statement("file \"src/lib.rs\" | .deps |").unwrap_err();
         assert_eq!(error.kind(), "invalid_input");
-        assert!(error
-            .to_string()
-            .contains("empty pipeline segment"));
+        assert!(error.to_string().contains("empty pipeline segment"));
     }
 
     #[test]
     fn reject_repeated_pipe_segment() {
         let error = parse_query_statement("file \"src/lib.rs\" || .deps").unwrap_err();
         assert_eq!(error.kind(), "invalid_input");
-        assert!(error
-            .to_string()
-            .contains("empty pipeline segment"));
+        assert!(error.to_string().contains("empty pipeline segment"));
     }
 
     #[test]
@@ -555,9 +612,7 @@ mod tests {
     fn reject_unterminated_quoted_selector() {
         let error = parse_query_statement("file \"src/lib.rs | .deps").unwrap_err();
         assert_eq!(error.kind(), "invalid_input");
-        assert!(error
-            .to_string()
-            .contains("unterminated quoted string"));
+        assert!(error.to_string().contains("unterminated quoted string"));
     }
 
     #[test]
@@ -568,18 +623,24 @@ mod tests {
 
         let invalid_let = parse_query_statement("let bad-name = all-files | count").unwrap_err();
         assert_eq!(invalid_let.kind(), "invalid_input");
-        assert!(invalid_let.to_string().contains("may only use ASCII letters"));
+        assert!(invalid_let
+            .to_string()
+            .contains("may only use ASCII letters"));
 
         let invalid_var = parse_query_statement("$bad-name | count").unwrap_err();
         assert_eq!(invalid_var.kind(), "invalid_input");
-        assert!(invalid_var.to_string().contains("may only use ASCII letters"));
+        assert!(invalid_var
+            .to_string()
+            .contains("may only use ASCII letters"));
     }
 
     #[test]
     fn reject_missing_source_and_unsupported_source() {
         let missing_source = parse_query_statement("| .deps").unwrap_err();
         assert_eq!(missing_source.kind(), "invalid_input");
-        assert!(missing_source.to_string().contains("empty pipeline segment"));
+        assert!(missing_source
+            .to_string()
+            .contains("empty pipeline segment"));
 
         let unsupported = parse_query_statement("module \"src/lib.rs\" | count").unwrap_err();
         assert_eq!(unsupported.kind(), "invalid_input");
@@ -614,9 +675,7 @@ mod tests {
     fn reject_unterminated_escape_in_quoted_selector() {
         let error = decode_quoted_selector("src/lib\\").unwrap_err();
         assert_eq!(error.kind(), "invalid_input");
-        assert!(error
-            .to_string()
-            .contains("unterminated escape sequence"));
+        assert!(error.to_string().contains("unterminated escape sequence"));
     }
 
     #[test]
@@ -633,7 +692,7 @@ mod tests {
                 end_byte: 32,
                 start_line: 1,
                 end_line: 3,
-            }
+            },
         }]);
         let deps_error = file_paths(&symbol_value, ".deps").unwrap_err();
         assert_eq!(deps_error.kind(), "invalid_input");
