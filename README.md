@@ -254,7 +254,11 @@ This model is intended to support machine-first static analysis without implying
 
 ## Installation
 
-This project is still under active development and is not yet ready to advertise as a finished package.
+This project is still under active development, but the `scope` CLI can be installed from GitHub:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/scope/main/install.sh?$(date +%s)" | bash
+```
 
 For local development:
 
