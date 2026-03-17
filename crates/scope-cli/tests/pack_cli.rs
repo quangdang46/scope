@@ -1694,3 +1694,48 @@ fn benchmark_command_returns_live_json_envelope_for_fixture_repo() {
             >= 0.0
     );
 }
+
+#[test]
+fn benchmark_command_writes_latest_and_snapshot_reports() {
+    let repo = prepare_fixture_copy("rust_small");
+    let report_dir = repo.join("bench-results");
+    let output = run_scope(
+        &repo,
+        &[
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--write-report",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["command"], "benchmark");
+
+    let latest = report_dir.join("benchmark.md");
+    assert!(latest.exists());
+    let latest_contents = fs::read_to_string(&latest).expect("latest report should exist");
+    assert!(latest_contents.contains("# scope benchmark results"));
+    assert!(latest_contents.contains("Fixture: `rust_small`"));
+    assert!(latest_contents.contains("Iterations: 1"));
+    assert!(latest_contents.contains("Mutation target: `src/parser.rs`"));
+    assert!(latest_contents.contains("bench-results/benchmark.md"));
+
+    let snapshot_count = fs::read_dir(&report_dir)
+        .expect("report dir should exist")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("bench-") && name.ends_with(".md"))
+        })
+        .count();
+    assert_eq!(snapshot_count, 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}

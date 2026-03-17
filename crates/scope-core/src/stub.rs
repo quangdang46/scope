@@ -688,6 +688,70 @@ pub fn benchmark(
     )
 }
 
+pub fn render_markdown_benchmark_report(
+    fixture: Option<&str>,
+    iterations: u32,
+    summary: &BenchmarkSummary,
+    generated_at: &str,
+    commit: &str,
+    command: &str,
+) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "# scope benchmark results");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "Date: {generated_at}");
+    let _ = writeln!(output, "Commit: `{commit}`");
+    let _ = writeln!(output, "Build: current working tree");
+    let _ = writeln!(output, "Command: `{command}`");
+    let _ = writeln!(output, "Fixture: `{}`", fixture.unwrap_or("repo_root"));
+    let _ = writeln!(output, "Iterations: {iterations}");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Current performance state");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "### Workload");
+    let _ = writeln!(output, "- Indexed files: {}", summary.indexed_files);
+    let _ = writeln!(
+        output,
+        "- Mutation target: `{}`",
+        summary.mutation.target_file.0
+    );
+    let _ = writeln!(
+        output,
+        "- Mutation kind: `{}`",
+        summary.mutation.change_kind
+    );
+    let _ = writeln!(output);
+    let _ = writeln!(output, "### Phase summary");
+    let _ = writeln!(output, "| Phase | Avg ms | Min ms | Max ms | Files processed | Changed files | Deleted files | Affected files |");
+    let _ = writeln!(output, "|-------|--------|--------|--------|-----------------|---------------|---------------|----------------|");
+    markdown_benchmark_phase_row(&mut output, "Full re-index", &summary.full);
+    markdown_benchmark_phase_row(&mut output, "Incremental re-index", &summary.incremental);
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Assessment");
+    let _ = writeln!(output);
+    let _ = writeln!(
+        output,
+        "- Incremental indexing saved {} ms versus a full re-index.",
+        summary.comparison.saved_ms
+    );
+    let _ = writeln!(
+        output,
+        "- Incremental indexing ran at {}% of the full indexing time.",
+        summary.comparison.incremental_pct_of_full
+    );
+    let _ = writeln!(output, "- The benchmark uses an isolated repo copy and appends a small comment mutation before re-indexing.");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "## Update instructions");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "1. Re-run `{command}`.");
+    let _ = writeln!(
+        output,
+        "2. Review the diff in `bench-results/benchmark.md`."
+    );
+    let _ = writeln!(output, "3. Keep the generated `bench-results/bench-YYYY-MM-DD-HH-MM-SS.md` snapshot if you want a dated artifact.");
+    output
+}
+
 pub fn arch_check(result: ArchCheckResult) -> JsonEnvelope<ArchCheckData> {
     JsonEnvelope::success(
         "arch-check",
@@ -987,6 +1051,20 @@ fn markdown_metric_row(output: &mut String, metric: &str, value: String, delta: 
         .map(format_signed_delta)
         .unwrap_or_else(|| "—".to_string());
     let _ = writeln!(output, "| {metric} | {value} | {delta} |");
+}
+
+fn markdown_benchmark_phase_row(output: &mut String, phase: &str, summary: &BenchmarkPhaseSummary) {
+    let _ = writeln!(
+        output,
+        "| {phase} | {} | {} | {} | {} | {} | {} | {} |",
+        summary.avg_ms,
+        summary.min_ms,
+        summary.max_ms,
+        summary.files_processed_avg,
+        summary.changed_files_avg,
+        summary.deleted_files_avg,
+        summary.affected_files_avg,
+    );
 }
 
 fn format_signed_delta(delta: isize) -> String {
@@ -1410,6 +1488,55 @@ mod tests {
         assert!(markdown.contains("`src/lib.rs` / `lib::helper`"));
         assert!(markdown.contains("## Recommendations"));
         assert!(markdown.contains("trim unreachable code"));
+    }
+
+    #[test]
+    fn render_markdown_benchmark_report_includes_summary_and_instructions() {
+        let markdown = render_markdown_benchmark_report(
+            Some("rust_small"),
+            3,
+            &BenchmarkSummary {
+                indexed_files: 5,
+                mutation: BenchmarkMutationSummary {
+                    target_file: RepoPath::from("src/parser.rs"),
+                    change_kind: "append_comment",
+                },
+                full: BenchmarkPhaseSummary {
+                    avg_ms: 42,
+                    min_ms: 40,
+                    max_ms: 45,
+                    files_processed_avg: 5,
+                    changed_files_avg: 5,
+                    deleted_files_avg: 0,
+                    affected_files_avg: 5,
+                },
+                incremental: BenchmarkPhaseSummary {
+                    avg_ms: 7,
+                    min_ms: 6,
+                    max_ms: 9,
+                    files_processed_avg: 2,
+                    changed_files_avg: 1,
+                    deleted_files_avg: 0,
+                    affected_files_avg: 2,
+                },
+                comparison: BenchmarkComparisonSummary {
+                    saved_ms: 35,
+                    incremental_pct_of_full: 16,
+                },
+            },
+            "2026-03-17 06:00:00",
+            "abc1234",
+            "scope benchmark --fixture rust_small --iterations 3 --write-report",
+        );
+        assert!(markdown.contains("# scope benchmark results"));
+        assert!(markdown.contains("Fixture: `rust_small`"));
+        assert!(markdown.contains("Iterations: 3"));
+        assert!(markdown.contains("Mutation target: `src/parser.rs`"));
+        assert!(markdown.contains("| Full re-index | 42 | 40 | 45 | 5 | 5 | 0 | 5 |"));
+        assert!(markdown.contains("| Incremental re-index | 7 | 6 | 9 | 2 | 1 | 0 | 2 |"));
+        assert!(markdown.contains("Incremental indexing saved 35 ms"));
+        assert!(markdown.contains("bench-results/benchmark.md"));
+        assert!(markdown.contains("bench-results/bench-YYYY-MM-DD-HH-MM-SS.md"));
     }
 
     #[test]

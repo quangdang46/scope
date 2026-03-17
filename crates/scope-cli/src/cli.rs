@@ -529,4 +529,7 @@ pub struct BenchmarkArgs {
     pub fixture: Option<String>,
     #[arg(long)]
     pub iterations: Option<u32>,
+    /// Write benchmark Markdown reports into bench-results/
+    #[arg(long)]
+    pub write_report: bool,
 }

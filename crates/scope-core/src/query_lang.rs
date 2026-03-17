@@ -2,9 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::{
-    RepoPath, ScopeError, ScopeResult, Store, SymbolKind, SymbolRecord, TraversalRecord,
-};
+use crate::{RepoPath, ScopeError, ScopeResult, Store, SymbolKind, SymbolRecord, TraversalRecord};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuerySource {
@@ -19,7 +17,10 @@ pub enum QuerySource {
 pub enum QueryStep {
     Deps,
     Reverse,
-    DepsTransitive { reverse: bool, depth: Option<usize> },
+    DepsTransitive {
+        reverse: bool,
+        depth: Option<usize>,
+    },
     Symbols {
         public_only: bool,
         kind: Option<SymbolKind>,
@@ -786,8 +787,10 @@ mod tests {
     #[test]
     fn parse_transitive_dependency_steps() {
         assert_eq!(
-            parse_query_statement("file \"src/index.ts\" | .deps_transitive | .reverse_transitive(2)")
-                .unwrap(),
+            parse_query_statement(
+                "file \"src/index.ts\" | .deps_transitive | .reverse_transitive(2)"
+            )
+            .unwrap(),
             QueryStatement::Expr(QueryExpr {
                 source: QuerySource::File(RepoPath::from("src/index.ts")),
                 steps: vec![
@@ -856,12 +859,12 @@ mod tests {
         let malformed =
             parse_query_statement("file \"src/index.ts\" | .deps_transitive(foo)").unwrap_err();
         assert_eq!(malformed.kind(), "invalid_input");
-        assert!(malformed.to_string().contains("optional non-negative integer depth"));
+        assert!(malformed
+            .to_string()
+            .contains("optional non-negative integer depth"));
 
-        let unknown_symbols_arg = parse_query_statement(
-            "file \"src/parser.rs\" | .symbols(exported=true)",
-        )
-        .unwrap_err();
+        let unknown_symbols_arg =
+            parse_query_statement("file \"src/parser.rs\" | .symbols(exported=true)").unwrap_err();
         assert_eq!(unknown_symbols_arg.kind(), "invalid_input");
         assert!(unknown_symbols_arg
             .to_string()
@@ -876,10 +879,8 @@ mod tests {
             .to_string()
             .contains("duplicate `public_only`"));
 
-        let invalid_symbol_kind = parse_query_statement(
-            "file \"src/parser.rs\" | .symbols(kind=\"class\")",
-        )
-        .unwrap_err();
+        let invalid_symbol_kind =
+            parse_query_statement("file \"src/parser.rs\" | .symbols(kind=\"class\")").unwrap_err();
         assert_eq!(invalid_symbol_kind.kind(), "invalid_input");
         assert!(invalid_symbol_kind
             .to_string()

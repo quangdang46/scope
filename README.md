@@ -115,7 +115,7 @@ scope stability | risk | cochange | test-map | rename-plan | snapshot | diff-sna
 scope simulate extract ... | report | gate | unused | cycles | diff | tree | split | mirror | entry
 scope serve [--port 7777] [--no-ui]
 scope query [--expr ...]
-scope doctor [--fix] | benchmark [--fixture ...]
+scope doctor [--fix] | benchmark [--fixture ...] [--iterations N] [--write-report]
 ```
 
 Right now:
@@ -126,6 +126,7 @@ Right now:
 - `scope serve` exposes the same core analyses through `/api/*` endpoints with a bundled embedded UI
 - `scope query` supports both single-expression execution and a basic interactive REPL over the query language
 - `scope-mcp` exposes core operations as stdio MCP tools backed by the same store/query layer
+- `scope benchmark --write-report` writes a linehash-style Markdown summary to `bench-results/benchmark.md` plus a timestamped `bench-results/bench-YYYY-MM-DD-HH-MM-SS.md` snapshot
 
 ## Agent Usage Patterns
 

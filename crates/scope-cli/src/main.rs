@@ -9,6 +9,8 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::Local;
+
 use clap::Parser;
 use cli::{
     ArchCommand, ChangeType, Cli, CochangeSortArg, Commands, CycleSeverityArg, RiskSortArg,
@@ -717,11 +719,22 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
+            let iterations = args.iterations.unwrap_or(1);
             let summary = run_benchmark(
                 &context.paths.repo_root,
                 args.fixture.as_deref(),
-                args.iterations.unwrap_or(1),
+                iterations,
             )?;
+            if args.write_report {
+                let command = benchmark_command_string(args.fixture.as_deref(), iterations, true);
+                write_benchmark_reports(
+                    &context.paths.repo_root,
+                    args.fixture.as_deref(),
+                    iterations,
+                    &summary,
+                    &command,
+                )?;
+            }
             serialize_output(
                 &scope_core::stub::benchmark(args.fixture, args.iterations, summary),
                 compact,
@@ -732,6 +745,64 @@ fn run() -> Result<i32, scope_core::ScopeError> {
 
     println!("{output}");
     Ok(exit_code)
+}
+
+fn benchmark_command_string(fixture: Option<&str>, iterations: u32, write_report: bool) -> String {
+    let mut parts = vec!["scope".to_string(), "benchmark".to_string()];
+    if let Some(fixture) = fixture {
+        parts.push("--fixture".to_string());
+        parts.push(fixture.to_string());
+    }
+    parts.push("--iterations".to_string());
+    parts.push(iterations.to_string());
+    if write_report {
+        parts.push("--write-report".to_string());
+    }
+    parts.join(" ")
+}
+
+fn write_benchmark_reports(
+    repo_root: &Path,
+    fixture: Option<&str>,
+    iterations: u32,
+    summary: &scope_core::stub::BenchmarkSummary,
+    command: &str,
+) -> Result<(), scope_core::ScopeError> {
+    let report_dir = repo_root.join("bench-results");
+    fs::create_dir_all(&report_dir)
+        .map_err(|error| scope_core::ScopeError::io(&report_dir, error))?;
+    let now = Local::now();
+    let generated_at = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let snapshot_name = format!("bench-{}.md", now.format("%Y-%m-%d-%H-%M-%S"));
+    let report = scope_core::render_markdown_benchmark_report(
+        fixture,
+        iterations,
+        summary,
+        &generated_at,
+        &git_commit_short(repo_root),
+        command,
+    );
+    let latest_path = report_dir.join("benchmark.md");
+    let snapshot_path = report_dir.join(snapshot_name);
+    fs::write(&latest_path, format!("{report}\n"))
+        .map_err(|error| scope_core::ScopeError::io(&latest_path, error))?;
+    fs::write(&snapshot_path, format!("{report}\n"))
+        .map_err(|error| scope_core::ScopeError::io(&snapshot_path, error))?;
+    Ok(())
+}
+
+fn git_commit_short(repo_root: &Path) -> String {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|stdout| stdout.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn refresh_git_churn(

@@ -60,9 +60,9 @@ pub use serve::{run_server, ServeOptions};
 pub use store::{DatabaseInfo, IndexHealthStats, ParseStatusCounts, Store, INDEX_SCHEMA_VERSION};
 pub use stub::{
     audit, benchmark, callers, calls, context, cycles, deps, diff, diff_snapshot, doctor, explain,
-    gate, impact, index, mcp_stub_message, query, rename_plan, render_markdown_report, report,
-    scaffolded_gate, scaffolded_report, simulate_extract, snapshot_delete, snapshot_list,
-    snapshot_save, stability, surface, surface_diff, test_map_build, test_map_covered_by,
-    test_map_covers, test_map_uncovered, tree, unused, why,
+    gate, impact, index, mcp_stub_message, query, rename_plan, render_markdown_benchmark_report,
+    render_markdown_report, report, scaffolded_gate, scaffolded_report, simulate_extract,
+    snapshot_delete, snapshot_list, snapshot_save, stability, surface, surface_diff,
+    test_map_build, test_map_covered_by, test_map_covers, test_map_uncovered, tree, unused, why,
 };
 pub use tracing::Verbosity;
