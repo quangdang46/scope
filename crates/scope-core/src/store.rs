@@ -205,6 +205,16 @@ struct ContextCandidate {
     pinned: bool,
 }
 
+struct ContextCandidateInput {
+    path: RepoPath,
+    role: ContextFileRole,
+    score: u32,
+    distance: u32,
+    certainty: Certainty,
+    reason: String,
+    pinned: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenameTarget {
     Symbol {
@@ -2644,12 +2654,7 @@ impl Store {
         };
 
         let file_depth = if change_type == "body" { 1 } else { max_depth };
-        Ok(self.traverse_reverse_importers(
-            file_id,
-            target,
-            file_depth,
-            change_type == "side-effect",
-        )?)
+        self.traverse_reverse_importers(file_id, target, file_depth, change_type == "side-effect")
     }
 
     pub fn query_why(
@@ -2772,7 +2777,7 @@ impl Store {
         }
 
         let mut ranked: Vec<_> = candidates.into_values().collect();
-        ranked.sort_by(|left, right| compare_context_candidates(left, right));
+        ranked.sort_by(compare_context_candidates);
 
         let mut must_read = Vec::new();
         let mut should_read = Vec::new();
@@ -2852,23 +2857,27 @@ impl Store {
 
         self.upsert_context_candidate(
             candidates,
-            path.clone(),
-            ContextFileRole::Target,
-            200,
-            0,
-            Certainty::Exact,
-            format!("defines or contains target {target}"),
-            true,
+            ContextCandidateInput {
+                path: path.clone(),
+                role: ContextFileRole::Target,
+                score: 200,
+                distance: 0,
+                certainty: Certainty::Exact,
+                reason: format!("defines or contains target {target}"),
+                pinned: true,
+            },
         )?;
         self.upsert_context_candidate(
             candidates,
-            path.clone(),
-            ContextFileRole::DefinesTargetSymbol,
-            180,
-            0,
-            Certainty::Exact,
-            format!("defines symbol {target}"),
-            true,
+            ContextCandidateInput {
+                path: path.clone(),
+                role: ContextFileRole::DefinesTargetSymbol,
+                score: 180,
+                distance: 0,
+                certainty: Certainty::Exact,
+                reason: format!("defines symbol {target}"),
+                pinned: true,
+            },
         )?;
 
         if includes_callers(change_type) {
@@ -2921,13 +2930,15 @@ impl Store {
     ) -> ScopeResult<()> {
         self.upsert_context_candidate(
             candidates,
-            path.clone(),
-            ContextFileRole::Target,
-            200,
-            0,
-            Certainty::Exact,
-            format!("target file {}", path.0),
-            true,
+            ContextCandidateInput {
+                path: path.clone(),
+                role: ContextFileRole::Target,
+                score: 200,
+                distance: 0,
+                certainty: Certainty::Exact,
+                reason: format!("target file {}", path.0),
+                pinned: true,
+            },
         )?;
 
         for dependency in self.query_deps(path)? {
@@ -2969,13 +2980,15 @@ impl Store {
         };
         self.upsert_context_candidate(
             candidates,
-            path,
-            role,
-            score_for_candidate(base_score, traversal.distance, &traversal.certainty),
-            traversal.distance,
-            traversal.certainty,
-            traversal.reason,
-            false,
+            ContextCandidateInput {
+                path,
+                role,
+                score: score_for_candidate(base_score, traversal.distance, &traversal.certainty),
+                distance: traversal.distance,
+                certainty: traversal.certainty,
+                reason: traversal.reason,
+                pinned: false,
+            },
         )
     }
 
@@ -2988,30 +3001,35 @@ impl Store {
     ) -> ScopeResult<()> {
         self.upsert_context_candidate(
             candidates,
-            dependency.path,
-            role,
-            score_for_candidate(base_score, 1, &dependency.certainty),
-            1,
-            dependency.certainty,
-            dependency
-                .import_text
-                .map(|text| format!("imported via {text}"))
-                .unwrap_or_else(|| "direct dependency of target file".to_string()),
-            false,
+            ContextCandidateInput {
+                path: dependency.path,
+                role,
+                score: score_for_candidate(base_score, 1, &dependency.certainty),
+                distance: 1,
+                certainty: dependency.certainty,
+                reason: dependency
+                    .import_text
+                    .map(|text| format!("imported via {text}"))
+                    .unwrap_or_else(|| "direct dependency of target file".to_string()),
+                pinned: false,
+            },
         )
     }
 
     fn upsert_context_candidate(
         &self,
         candidates: &mut HashMap<RepoPath, ContextCandidate>,
-        path: RepoPath,
-        role: ContextFileRole,
-        score: u32,
-        distance: u32,
-        certainty: Certainty,
-        reason: String,
-        pinned: bool,
+        input: ContextCandidateInput,
     ) -> ScopeResult<()> {
+        let ContextCandidateInput {
+            path,
+            role,
+            score,
+            distance,
+            certainty,
+            reason,
+            pinned,
+        } = input;
         let estimated_tokens = self.estimate_file_tokens(&path)?;
         let candidate = candidates
             .entry(path.clone())
@@ -4821,11 +4839,7 @@ fn rename_edit_from_import(
         line: start_line,
         before_text: old_name.to_string(),
         after_text: new_name.to_string(),
-        kind: if raw_text.starts_with("export ") {
-            RenameEditKind::ImportSpecifier
-        } else {
-            RenameEditKind::ImportSpecifier
-        },
+        kind: RenameEditKind::ImportSpecifier,
         verified: true,
         deferred_reason: None,
     })

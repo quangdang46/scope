@@ -1201,7 +1201,7 @@ fn build_context_pack(
         sections.push(change_section);
     }
 
-    let header_without_used = vec![
+    let header_without_used = [
         "=== SCOPE CONTEXT PACK ===".to_string(),
         format!("Target:      {target}"),
         format!("Change type: {change_type}"),
@@ -1239,7 +1239,7 @@ fn build_context_pack(
         if truncated { "yes" } else { "no" }
     );
 
-    let header = vec![
+    let header = [
         "=== SCOPE CONTEXT PACK ===".to_string(),
         format!("Target:      {target}"),
         format!("Change type: {change_type}"),
@@ -1744,6 +1744,101 @@ fn apply_benchmark_edit(path: &Path) -> Result<(), scope_core::ScopeError> {
     };
     source.push_str(suffix);
     fs::write(path, source).map_err(|error| scope_core::ScopeError::io(path, error))
+}
+
+fn index_repo(
+    repo_root: &std::path::Path,
+    store: &scope_core::Store,
+) -> Result<IndexRunStats, scope_core::ScopeError> {
+    let entries = scan_repo(repo_root, &ScanConfig::default())?;
+    let extracts: Vec<_> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            let adapter = adapter_for_language(entry.language)?;
+            if !scope_core::adapters::supports_path(adapter, &entry.absolute_path) {
+                return None;
+            }
+            let source = fs::read_to_string(&entry.absolute_path).ok()?;
+            let mut extract = adapter.extract(&entry, &source);
+            let metadata = fs::metadata(&entry.absolute_path).ok()?;
+            let modified = metadata.modified().ok()?;
+            let modified_seconds = modified
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs() as i64);
+            extract.file.content_hash = Some(blake3::hash(source.as_bytes()).to_hex().to_string());
+            extract.file.mtime_unix_seconds = modified_seconds;
+            extract.file.size_bytes = Some(metadata.len() as i64);
+            Some(extract)
+        })
+        .collect();
+
+    let extract_map: HashMap<RepoPath, scope_core::ExtractResult> = extracts
+        .into_iter()
+        .map(|extract| (extract.file.path.clone(), extract))
+        .collect();
+    let scanned_paths: HashSet<_> = extract_map.keys().cloned().collect();
+    let indexed_paths = store.list_indexed_files()?;
+    if indexed_paths.is_empty() {
+        let mut all_extracts: Vec<_> = extract_map.into_values().collect();
+        all_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
+        let indexed_files = all_extracts.len();
+        store.persist_extract_results(&all_extracts)?;
+        return Ok(IndexRunStats {
+            indexed_files,
+            changed_files: indexed_files,
+            deleted_files: 0,
+            affected_files: indexed_files,
+        });
+    }
+
+    let mut changed_or_new = Vec::new();
+    for extract in extract_map.values() {
+        match store.classify_file_change(&extract.file)? {
+            None | Some(true) => changed_or_new.push(extract.file.path.clone()),
+            Some(false) => {}
+        }
+    }
+
+    let deleted_paths: Vec<_> = indexed_paths
+        .into_iter()
+        .filter(|path| !scanned_paths.contains(path))
+        .collect();
+
+    let mut affected_paths: HashSet<_> = changed_or_new.iter().cloned().collect();
+    let mut closure_seeds = changed_or_new;
+    closure_seeds.extend(deleted_paths.iter().cloned());
+
+    for dependent in store.reverse_dependency_closure(&closure_seeds)? {
+        affected_paths.insert(dependent);
+    }
+
+    for path in &deleted_paths {
+        let _ = store.delete_file(path)?;
+    }
+
+    let mut affected_extracts: Vec<_> = affected_paths
+        .into_iter()
+        .filter_map(|path| extract_map.get(&path).cloned())
+        .collect();
+    affected_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
+
+    for extract in &affected_extracts {
+        store.upsert_file(&extract.file)?;
+    }
+    for extract in &affected_extracts {
+        store.persist_extract_result(extract)?;
+    }
+    for extract in &affected_extracts {
+        store.refresh_call_edges(extract)?;
+    }
+
+    Ok(IndexRunStats {
+        indexed_files: extract_map.len(),
+        changed_files: closure_seeds.len().saturating_sub(deleted_paths.len()),
+        deleted_files: deleted_paths.len(),
+        affected_files: affected_extracts.len(),
+    })
 }
 
 #[cfg(test)]
@@ -2832,99 +2927,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(repo);
     }
-}
-
-fn index_repo(
-    repo_root: &std::path::Path,
-    store: &scope_core::Store,
-) -> Result<IndexRunStats, scope_core::ScopeError> {
-    let entries = scan_repo(repo_root, &ScanConfig::default())?;
-    let extracts: Vec<_> = entries
-        .into_iter()
-        .filter_map(|entry| {
-            let adapter = adapter_for_language(entry.language)?;
-            if !scope_core::adapters::supports_path(adapter, &entry.absolute_path) {
-                return None;
-            }
-            let source = fs::read_to_string(&entry.absolute_path).ok()?;
-            let mut extract = adapter.extract(&entry, &source);
-            let metadata = fs::metadata(&entry.absolute_path).ok()?;
-            let modified = metadata.modified().ok()?;
-            let modified_seconds = modified
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .map(|duration| duration.as_secs() as i64);
-            extract.file.content_hash = Some(blake3::hash(source.as_bytes()).to_hex().to_string());
-            extract.file.mtime_unix_seconds = modified_seconds;
-            extract.file.size_bytes = Some(metadata.len() as i64);
-            Some(extract)
-        })
-        .collect();
-
-    let extract_map: HashMap<RepoPath, scope_core::ExtractResult> = extracts
-        .into_iter()
-        .map(|extract| (extract.file.path.clone(), extract))
-        .collect();
-    let scanned_paths: HashSet<_> = extract_map.keys().cloned().collect();
-    let indexed_paths = store.list_indexed_files()?;
-    if indexed_paths.is_empty() {
-        let mut all_extracts: Vec<_> = extract_map.into_values().collect();
-        all_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
-        let indexed_files = all_extracts.len();
-        store.persist_extract_results(&all_extracts)?;
-        return Ok(IndexRunStats {
-            indexed_files,
-            changed_files: indexed_files,
-            deleted_files: 0,
-            affected_files: indexed_files,
-        });
-    }
-
-    let mut changed_or_new = Vec::new();
-    for extract in extract_map.values() {
-        match store.classify_file_change(&extract.file)? {
-            None | Some(true) => changed_or_new.push(extract.file.path.clone()),
-            Some(false) => {}
-        }
-    }
-
-    let deleted_paths: Vec<_> = indexed_paths
-        .into_iter()
-        .filter(|path| !scanned_paths.contains(path))
-        .collect();
-
-    let mut affected_paths: HashSet<_> = changed_or_new.iter().cloned().collect();
-    let mut closure_seeds = changed_or_new;
-    closure_seeds.extend(deleted_paths.iter().cloned());
-
-    for dependent in store.reverse_dependency_closure(&closure_seeds)? {
-        affected_paths.insert(dependent);
-    }
-
-    for path in &deleted_paths {
-        let _ = store.delete_file(path)?;
-    }
-
-    let mut affected_extracts: Vec<_> = affected_paths
-        .into_iter()
-        .filter_map(|path| extract_map.get(&path).cloned())
-        .collect();
-    affected_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
-
-    for extract in &affected_extracts {
-        store.upsert_file(&extract.file)?;
-    }
-    for extract in &affected_extracts {
-        store.persist_extract_result(extract)?;
-    }
-    for extract in &affected_extracts {
-        store.refresh_call_edges(extract)?;
-    }
-
-    Ok(IndexRunStats {
-        indexed_files: extract_map.len(),
-        changed_files: closure_seeds.len().saturating_sub(deleted_paths.len()),
-        deleted_files: deleted_paths.len(),
-        affected_files: affected_extracts.len(),
-    })
 }

@@ -114,7 +114,7 @@ impl Adapter for RustAdapter {
             ));
 
             let declared_function_qualname = parse_top_level_symbol(trimmed, &entry.path, &span)
-                .map(|symbol| {
+                .and_then(|symbol| {
                     let qualname = if symbol.kind == SymbolKind::Function {
                         Some(symbol.qualname.clone())
                     } else {
@@ -122,8 +122,7 @@ impl Adapter for RustAdapter {
                     };
                     symbols.push(symbol);
                     qualname
-                })
-                .flatten();
+                });
 
             if let Some(import_record) =
                 parse_use_declaration(trimmed, &entry.path, &crate_root, &module_dir, &span)
@@ -241,27 +240,25 @@ impl Adapter for TsJsAdapter {
             ));
 
             let declared_function_qualname =
-                parse_ts_js_top_level_symbol(trimmed, &entry.path, &span)
-                    .map(|symbol| {
-                        let qualname = if symbol.kind == SymbolKind::Function {
-                            Some(symbol.qualname.clone())
-                        } else {
-                            None
-                        };
-                        if symbol.exported {
-                            exports.push(ExportRecord {
-                                file: entry.path.clone(),
-                                name: symbol.name.clone(),
-                                qualname: Some(symbol.qualname.clone()),
-                                kind: symbol.kind.clone(),
-                                visibility: symbol.visibility.clone(),
-                                span: symbol.span.clone(),
-                            });
-                        }
-                        symbols.push(symbol);
-                        qualname
-                    })
-                    .flatten();
+                parse_ts_js_top_level_symbol(trimmed, &entry.path, &span).and_then(|symbol| {
+                    let qualname = if symbol.kind == SymbolKind::Function {
+                        Some(symbol.qualname.clone())
+                    } else {
+                        None
+                    };
+                    if symbol.exported {
+                        exports.push(ExportRecord {
+                            file: entry.path.clone(),
+                            name: symbol.name.clone(),
+                            qualname: Some(symbol.qualname.clone()),
+                            kind: symbol.kind.clone(),
+                            visibility: symbol.visibility.clone(),
+                            span: symbol.span.clone(),
+                        });
+                    }
+                    symbols.push(symbol);
+                    qualname
+                });
 
             let previous_brace_depth = brace_depth;
             brace_depth += line_open_braces - line_close_braces;
@@ -1132,12 +1129,12 @@ fn extract_call_sites_from_line(
             continue;
         }
 
-        let Some(candidate) = callable_candidate_before_paren(&scan_line, index) else {
+        let Some(candidate) = callable_candidate_before_paren(scan_line, index) else {
             continue;
         };
 
         if is_non_call_keyword(&candidate.text)
-            || looks_like_macro_invocation(&scan_line, candidate.start)
+            || looks_like_macro_invocation(scan_line, candidate.start)
             || declared_function_name.as_deref() == Some(candidate.text.as_str())
         {
             continue;

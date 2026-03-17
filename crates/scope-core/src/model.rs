@@ -6,7 +6,7 @@ use std::collections::HashMap;
 pub struct RepoPath(pub String);
 
 /// Parsed TypeScript compiler configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TsConfig {
     /// Base directory for non-relative module resolution.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -15,15 +15,6 @@ pub struct TsConfig {
     /// Path aliases for module resolution (e.g., `"@/*": ["src/*"]`).
     #[serde(default)]
     pub paths: HashMap<String, Vec<String>>,
-}
-
-impl Default for TsConfig {
-    fn default() -> Self {
-        Self {
-            base_url: None,
-            paths: HashMap::new(),
-        }
-    }
 }
 
 /// Resolved tsconfig path mapping result.

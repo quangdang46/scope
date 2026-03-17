@@ -4,17 +4,9 @@ use ignore::WalkBuilder;
 
 use crate::{RepoPath, ScopeError, ScopeResult};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScanConfig {
     pub include_hidden: bool,
-}
-
-impl Default for ScanConfig {
-    fn default() -> Self {
-        Self {
-            include_hidden: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

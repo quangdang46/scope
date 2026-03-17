@@ -49,7 +49,7 @@ fn handle_message(request: &Value) -> Option<Value> {
     let params = request.get("params").cloned().unwrap_or(Value::Null);
 
     match method {
-        "initialize" => id.map(|id| initialize_response(id)),
+        "initialize" => id.map(initialize_response),
         "ping" => id.map(|id| jsonrpc_result(id, json!({}))),
         "tools/list" => id.map(|id| jsonrpc_result(id, json!({ "tools": tool_registry() }))),
         "tools/call" => {
@@ -1816,7 +1816,7 @@ fn build_context_pack(
         sections.push(change_section);
     }
 
-    let header_without_used = vec![
+    let header_without_used = [
         "=== SCOPE CONTEXT PACK ===".to_string(),
         format!("Target:      {target}"),
         format!("Change type: {change_type}"),
@@ -1854,7 +1854,7 @@ fn build_context_pack(
         if truncated { "yes" } else { "no" }
     );
 
-    let header = vec![
+    let header = [
         "=== SCOPE CONTEXT PACK ===".to_string(),
         format!("Target:      {target}"),
         format!("Change type: {change_type}"),
