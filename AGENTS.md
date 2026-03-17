@@ -31,6 +31,41 @@
 
 ---
 
+## scope — Local Static Analysis
+
+`scope` is the repository's local static-analysis CLI for dependency, symbol, impact, and architecture queries.
+
+### Recommended Workflow
+
+1. Refresh the index for the current checkout when needed:
+   ```bash
+   scope index .
+   ```
+2. Ask the narrowest query that answers the current question.
+3. Prefer `--compact` when feeding the result back into an agent loop.
+4. Treat results as static evidence, then validate edits with tests/builds.
+
+### Useful Commands
+
+```bash
+scope --compact deps path/to/file.rs
+scope --compact deps path/to/file.rs --reverse
+scope --compact symbols path/to/file.rs --public-only
+scope --compact callers module::symbol
+scope --compact impact module::symbol --change-type body
+scope --compact why src/from.rs src/to.rs
+scope --compact context --target module::symbol --change-type body --budget 400
+scope pack module::symbol --change-type body --budget 400
+```
+
+### Rules
+
+- Use `scope` before editing when you need fast evidence about dependencies, callers, symbols, or blast radius
+- Prefer the narrowest command that answers the question instead of broad manual searching
+- The strongest semantic support today is heuristic Rust and TS/JS extraction; Python, Ruby, and Go are scan-only
+- `scope` is static analysis, not proof that a change is safe
+
+---
 
 ## MCP Agent Mail — Multi-Agent Coordination
 
