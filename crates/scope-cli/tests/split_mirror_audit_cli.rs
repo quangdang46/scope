@@ -79,6 +79,8 @@ fn read_golden(name: &str) -> String {
 fn run_scope(repo: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_scope"))
         .current_dir(repo)
+        .arg("--repo-root")
+        .arg(repo)
         .args(args)
         .output()
         .expect("scope binary should run")
