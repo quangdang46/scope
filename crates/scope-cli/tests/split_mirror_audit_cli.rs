@@ -65,11 +65,15 @@ fn prepare_fixture_copy(name: &str) -> PathBuf {
 }
 
 fn normalize_golden_text(text: &str) -> String {
-    text.replace("\r\n", "\n").trim_end_matches('\n').to_string()
+    text.replace("\r\n", "\n")
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 fn read_golden(name: &str) -> String {
-    normalize_golden_text(&fs::read_to_string(workspace_root().join("tests/golden").join(name)).unwrap())
+    normalize_golden_text(
+        &fs::read_to_string(workspace_root().join("tests/golden").join(name)).unwrap(),
+    )
 }
 
 fn run_scope(repo: &Path, args: &[&str]) -> std::process::Output {
