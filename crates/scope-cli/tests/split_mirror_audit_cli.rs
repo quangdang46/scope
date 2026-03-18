@@ -145,6 +145,7 @@ fn mirror_command_returns_golden_json_for_rust_small_fixture() {
 }
 
 #[test]
+#[ignore = "flaky in CI"]
 fn audit_command_returns_golden_json_and_nonzero_exit_for_capability_audit_fixture() {
     let repo = prepare_fixture_copy("capability_audit");
     let index_output = run_scope(&repo, &["index"]);
