@@ -2,8 +2,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -21,7 +24,11 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("scope-cli-{prefix}-{nanos}"))
+    let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "scope-cli-{prefix}-{}-{nanos}-{sequence}",
+        std::process::id()
+    ))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {
@@ -36,11 +43,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path);
         } else {
-            if src_path
-                .strip_prefix(src)
-                .ok()
-                .and_then(|relative| relative.to_str())
-                == Some(".scope/index.db")
+            if src_path.file_name().and_then(|name| name.to_str()) == Some("index.db")
+                && src_path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some(".scope")
             {
                 continue;
             }
@@ -56,11 +64,12 @@ fn prepare_fixture_copy(name: &str) -> PathBuf {
     dst
 }
 
+fn normalize_golden_text(text: &str) -> String {
+    text.replace("\r\n", "\n").trim_end_matches('\n').to_string()
+}
+
 fn read_golden(name: &str) -> String {
-    fs::read_to_string(workspace_root().join("tests/golden").join(name))
-        .unwrap()
-        .trim_end_matches('\n')
-        .to_string()
+    normalize_golden_text(&fs::read_to_string(workspace_root().join("tests/golden").join(name)).unwrap())
 }
 
 fn run_scope(repo: &Path, args: &[&str]) -> std::process::Output {
@@ -82,13 +91,13 @@ fn entry_list_command_returns_golden_json_for_capability_audit_fixture() {
 
     let actual = String::from_utf8_lossy(&output.stdout);
     let value: serde_json::Value =
-        serde_json::from_str(actual.trim()).expect("stdout should be JSON");
+        serde_json::from_str(&normalize_golden_text(&actual)).expect("stdout should be JSON");
     assert_eq!(value["command"], "entry-list");
     assert_eq!(value["status"], "ok");
     assert_eq!(value["data"]["result"]["summary"]["entry_points"], 2);
 
     let expected = read_golden("capability_audit_entry_list.json");
-    assert_eq!(actual.trim(), expected);
+    assert_eq!(normalize_golden_text(&actual), expected);
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -104,14 +113,14 @@ fn entry_cone_command_returns_golden_json_for_capability_audit_fixture() {
 
     let actual = String::from_utf8_lossy(&output.stdout);
     let value: serde_json::Value =
-        serde_json::from_str(actual.trim()).expect("stdout should be JSON");
+        serde_json::from_str(&normalize_golden_text(&actual)).expect("stdout should be JSON");
     assert_eq!(value["command"], "entry-cone");
     assert_eq!(value["status"], "ok");
     assert_eq!(value["data"]["result"]["entry"], "src/workers/job.ts");
     assert_eq!(value["data"]["result"]["summary"]["reachable_files"], 3);
 
     let expected = read_golden("capability_audit_entry_cone_job.json");
-    assert_eq!(actual.trim(), expected);
+    assert_eq!(normalize_golden_text(&actual), expected);
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -127,7 +136,7 @@ fn entry_reaches_command_returns_golden_json_for_capability_audit_fixture() {
 
     let actual = String::from_utf8_lossy(&output.stdout);
     let value: serde_json::Value =
-        serde_json::from_str(actual.trim()).expect("stdout should be JSON");
+        serde_json::from_str(&normalize_golden_text(&actual)).expect("stdout should be JSON");
     assert_eq!(value["command"], "entry-reaches");
     assert_eq!(value["status"], "ok");
     assert_eq!(value["data"]["result"]["target"], "src/shared/api.ts");
@@ -137,7 +146,7 @@ fn entry_reaches_command_returns_golden_json_for_capability_audit_fixture() {
     );
 
     let expected = read_golden("capability_audit_entry_reaches_shared_api.json");
-    assert_eq!(actual.trim(), expected);
+    assert_eq!(normalize_golden_text(&actual), expected);
 
     fs::remove_dir_all(repo).unwrap();
 }
@@ -153,14 +162,14 @@ fn entry_unreachable_command_returns_golden_json_for_capability_audit_fixture() 
 
     let actual = String::from_utf8_lossy(&output.stdout);
     let value: serde_json::Value =
-        serde_json::from_str(actual.trim()).expect("stdout should be JSON");
+        serde_json::from_str(&normalize_golden_text(&actual)).expect("stdout should be JSON");
     assert_eq!(value["command"], "entry-unreachable");
     assert_eq!(value["status"], "ok");
     assert_eq!(value["data"]["result"]["reachable_files"], 4);
     assert_eq!(value["data"]["result"]["unreachable_files"], 0);
 
     let expected = read_golden("capability_audit_entry_unreachable.json");
-    assert_eq!(actual.trim(), expected);
+    assert_eq!(normalize_golden_text(&actual), expected);
 
     fs::remove_dir_all(repo).unwrap();
 }

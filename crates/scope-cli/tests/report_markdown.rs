@@ -2,8 +2,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -21,7 +24,11 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("scope-cli-{prefix}-{nanos}"))
+    let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "scope-cli-{prefix}-{}-{nanos}-{sequence}",
+        std::process::id()
+    ))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {
@@ -36,11 +43,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path);
         } else {
-            if src_path
-                .strip_prefix(src)
-                .ok()
-                .and_then(|relative| relative.to_str())
-                == Some(".scope/index.db")
+            if src_path.file_name().and_then(|name| name.to_str()) == Some("index.db")
+                && src_path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some(".scope")
             {
                 continue;
             }

@@ -1860,8 +1860,11 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1883,7 +1886,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("scope-cli-{prefix}-{nanos}"))
+        let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "scope-cli-{prefix}-{}-{nanos}-{sequence}",
+            std::process::id()
+        ))
     }
 
     fn copy_dir_recursive(src: &Path, dst: &Path) {
@@ -1919,11 +1926,14 @@ mod tests {
         dst
     }
 
-    fn read_golden(name: &str) -> String {
-        fs::read_to_string(golden_root().join(name))
-            .unwrap()
+    fn normalize_golden_text(text: &str) -> String {
+        text.replace("\r\n", "\n")
             .trim_end_matches('\n')
             .to_string()
+    }
+
+    fn read_golden(name: &str) -> String {
+        normalize_golden_text(&fs::read_to_string(golden_root().join(name)).unwrap())
     }
 
     #[test]
@@ -2059,6 +2069,7 @@ mod tests {
             ]
         );
 
+        drop(store);
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -2558,7 +2569,7 @@ mod tests {
         let actual = build_context_pack(&store, "parser::parse", "body", 400).unwrap();
         let expected = read_golden("rust_small_parse_pack_body.txt");
 
-        assert_eq!(actual, expected);
+        assert_eq!(normalize_golden_text(&actual), expected);
         assert!(actual.contains("--- PUBLIC SURFACE (src/parser.rs) ---"));
         assert!(actual.contains("--- DIRECT CALLERS ---"));
         assert!(actual.contains("--- BODY IMPACT ---"));
@@ -2577,7 +2588,7 @@ mod tests {
             build_context_pack(&store, "auth::middleware::verifyToken", "rename", 400).unwrap();
         let expected = read_golden("ts_small_verify_token_pack_rename.txt");
 
-        assert_eq!(actual, expected);
+        assert_eq!(normalize_golden_text(&actual), expected);
         assert!(actual.contains("--- PUBLIC SURFACE (src/auth/middleware.ts) ---"));
         assert!(actual.contains("--- DIRECT CALLEES ---"));
         assert!(actual.contains("--- RENAME IMPACT ---"));
@@ -2596,7 +2607,7 @@ mod tests {
             build_context_pack(&store, "auth::middleware::verifyToken", "rename", 120).unwrap();
         let expected = read_golden("ts_small_verify_token_pack_rename_budget.txt");
 
-        assert_eq!(actual, expected);
+        assert_eq!(normalize_golden_text(&actual), expected);
         assert!(actual.contains("truncated: yes"));
 
         let _ = fs::remove_dir_all(repo);
