@@ -945,11 +945,7 @@ fn query_expr_supports_quoted_pipes_escapes_and_let_bindings() {
 
     let parser_pipe_output = run_scope(
         &repo,
-        &[
-            "query",
-            "--expr",
-            "file \"src/a|b.rs\" | .symbols | count",
-        ],
+        &["query", "--expr", "file \"src/a|b.rs\" | .symbols | count"],
     );
     assert_eq!(parser_pipe_output.status.code(), Some(2));
     let parser_pipe_error: serde_json::Value =
@@ -969,10 +965,8 @@ fn query_expr_supports_quoted_pipes_escapes_and_let_bindings() {
         ],
     );
     assert_eq!(escaped_quote_parser_output.status.code(), Some(2));
-    let escaped_quote_parser_error: serde_json::Value = serde_json::from_slice(
-        &escaped_quote_parser_output.stderr,
-    )
-    .expect("stderr should be JSON");
+    let escaped_quote_parser_error: serde_json::Value =
+        serde_json::from_slice(&escaped_quote_parser_output.stderr).expect("stderr should be JSON");
     assert_eq!(escaped_quote_parser_error["data"]["kind"], "invalid_input");
     assert!(escaped_quote_parser_error["data"]["message"]
         .as_str()
@@ -981,11 +975,7 @@ fn query_expr_supports_quoted_pipes_escapes_and_let_bindings() {
 
     let backslash_output = run_scope(
         &repo,
-        &[
-            "query",
-            "--expr",
-            "file \"src/path\\\\file.rs\" | count",
-        ],
+        &["query", "--expr", "file \"src/path\\\\file.rs\" | count"],
     );
     assert_eq!(backslash_output.status.code(), Some(2));
     let backslash_error: serde_json::Value =

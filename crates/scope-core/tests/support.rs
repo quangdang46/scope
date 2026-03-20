@@ -9,7 +9,8 @@ pub fn create_cochange_fixture_repo(target_dir: &Path) {
     if target_dir.exists() {
         fs::remove_dir_all(target_dir).expect("existing cochange fixture repo should be removable");
     }
-    fs::create_dir_all(target_dir.join("src")).expect("cochange fixture src directory should exist");
+    fs::create_dir_all(target_dir.join("src"))
+        .expect("cochange fixture src directory should exist");
 
     run_git(target_dir, ["init", "-q"]);
     run_git(target_dir, ["config", "user.name", "Scope Fixture"]);
