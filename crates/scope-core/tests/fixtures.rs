@@ -5,6 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[path = "support.rs"]
+mod support;
+
 use scope_core::{
     adapter_for_language, arch_check, load_arch_config, scan_repo, stub, Certainty, CycleSeverity,
     EdgeKind, NodeKind, PublicSurfaceChange, PublicSurfaceChangeKind, PublicSurfaceSymbol,
@@ -132,7 +135,7 @@ fn normalize_report_like_json(value: &mut serde_json::Value) {
 }
 
 #[test]
-fn cochange_fixture_contains_history_script() {
+fn cochange_fixture_contains_history_recipe() {
     let root = fixture_root("cochange");
     assert!(root.join("README.txt").is_file(), "missing cochange README");
     let script = root.join("create_git_history.sh");
@@ -1256,12 +1259,8 @@ fn risk_query_reports_expected_scores_and_fallbacks() {
 
 #[test]
 fn generated_cochange_fixture_creates_expected_commit_history() {
-    let fixture_root = fixture_root("cochange");
-    let script = fixture_root.join("create_git_history.sh");
     let repo = unique_temp_dir("cochange-generated");
-
-    let status = Command::new(&script).arg(&repo).status().unwrap();
-    assert!(status.success());
+    support::create_cochange_fixture_repo(&repo);
 
     let output = Command::new("git")
         .arg("-C")
@@ -1282,12 +1281,8 @@ fn generated_cochange_fixture_creates_expected_commit_history() {
 
 #[test]
 fn generated_cochange_fixture_persists_expected_file_churn() {
-    let fixture_root = fixture_root("cochange");
-    let script = fixture_root.join("create_git_history.sh");
     let repo = unique_temp_dir("cochange-churn");
-
-    let status = Command::new(&script).arg(&repo).status().unwrap();
-    assert!(status.success());
+    support::create_cochange_fixture_repo(&repo);
 
     let store = index_fixture(&repo);
     let output = Command::new("git")

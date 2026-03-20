@@ -57,7 +57,10 @@ pub use query_lang::{
 };
 pub use scanner::{scan_repo, ScanConfig, ScanEntry, SupportedLanguage};
 pub use serve::{run_server, ServeOptions};
-pub use store::{DatabaseInfo, IndexHealthStats, ParseStatusCounts, Store, INDEX_SCHEMA_VERSION};
+pub use store::{
+    validate_cochange_args, DatabaseInfo, IndexHealthStats, ParseStatusCounts, Store,
+    INDEX_SCHEMA_VERSION,
+};
 pub use stub::{
     audit, benchmark, callers, calls, context, cycles, deps, diff, diff_snapshot, doctor, explain,
     gate, impact, index, mcp_stub_message, query, rename_plan, render_markdown_benchmark_report,

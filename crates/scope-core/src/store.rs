@@ -38,6 +38,31 @@ use crate::{
 
 const DEFAULT_TRANSITIVE_DEPTH: u32 = 8;
 
+pub fn validate_cochange_args(
+    days: u32,
+    min_shared_commits: usize,
+    top: Option<usize>,
+) -> ScopeResult<()> {
+    if days == 0 {
+        return Err(ScopeError::InvalidInput(
+            "cochange window days must be greater than 0".to_string(),
+        ));
+    }
+    if min_shared_commits == 0 {
+        return Err(ScopeError::InvalidInput(
+            "min_shared_commits must be greater than 0".to_string(),
+        ));
+    }
+    if let Some(top) = top {
+        if top == 0 {
+            return Err(ScopeError::InvalidInput(
+                "top must be greater than 0".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub const INDEX_SCHEMA_VERSION: u32 = 6;
 
 const INITIAL_MIGRATION: &str = r#"
@@ -1264,23 +1289,7 @@ impl Store {
         top: Option<usize>,
         sort: CochangeSort,
     ) -> ScopeResult<CochangeResult> {
-        if days == 0 {
-            return Err(ScopeError::InvalidInput(
-                "cochange window days must be greater than 0".to_string(),
-            ));
-        }
-        if min_shared_commits == 0 {
-            return Err(ScopeError::InvalidInput(
-                "min_shared_commits must be greater than 0".to_string(),
-            ));
-        }
-        if let Some(top) = top {
-            if top == 0 {
-                return Err(ScopeError::InvalidInput(
-                    "top must be greater than 0".to_string(),
-                ));
-            }
-        }
+        validate_cochange_args(days, min_shared_commits, top)?;
 
         let Some(target_file_id) = self.file_id(target)? else {
             return Err(ScopeError::InvalidInput(format!(

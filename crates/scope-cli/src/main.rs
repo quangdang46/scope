@@ -29,8 +29,8 @@ use rustyline::{
 use scope_core::config::ensure_scope_dir;
 use scope_core::{
     adapter_for_language, arch_check, arch_explain, arch_init, load_arch_config, scan_repo,
-    BootstrapOptions, CochangeSort, CycleSeverity, DatabaseInfo, RiskSort, ScanConfig, SymbolKind,
-    Verbosity,
+    validate_cochange_args, BootstrapOptions, CochangeSort, CycleSeverity, DatabaseInfo, RiskSort,
+    ScanConfig, SymbolKind, Verbosity,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -391,6 +391,7 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             serialize_output(&scope_core::stub::risk(result), compact)
         }
         Commands::Cochange(args) => {
+            validate_cochange_args(args.days, args.min_shared_commits, args.top)?;
             let bootstrap_options = BootstrapOptions {
                 repo_root_override: cli.repo_root.clone(),
                 db_override: cli.db.clone(),
