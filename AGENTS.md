@@ -1,69 +1,323 @@
-## linehash — Stable Line-Anchored Editing
+## why — Git History Archaeology CLI
 
-`linehash` is installed in this environment and must always be used for file-targeted reads and edits when a shell-based edit workflow is appropriate.
+`why` is a code-archaeology CLI that answers "why does this code exist?" by analyzing git history and synthesizing explanations via LLM. It provides risk assessment, ownership signals, and change context before you modify unfamiliar code.
 
-### Why to Prefer It
+### Why It's Useful
 
-- Uses content-hashed line anchors like `12:ab` instead of fragile exact-text matching
-- Rejects stale or ambiguous edits instead of guessing
-- Works well for agent-driven file editing and concurrent-change detection
+- **Prevents accidental deletions:** Understand why code was written before removing "dead-looking" functions
+- **Risk-aware changes:** Get HIGH/MEDIUM/LOW risk signals based on commit history and keywords
+- **Ownership discovery:** Find who knows the code and bus-factor risks with `--team`
+- **Co-change awareness:** See coupled files before broad refactors with `--coupled`
+- **Incident context:** Link code to past hotfixes, security patches, and incidents
+- **LLM-powered synthesis:** One LLM call per query with structured git data as input
 
-### Preferred Workflow
-
-1. Read with anchors:
-   ```bash
-   linehash read <file>
-   ```
-2. Apply targeted edits by anchor:
-   ```bash
-   linehash edit <file> <line:hash> <new-content>
-   linehash edit <file> <start:hash>..<end:hash> <new-content>
-   linehash insert <file> <line:hash> <new-content>
-   linehash delete <file> <line:hash>
-   ```
-3. If an anchor is stale or ambiguous, re-run `linehash read <file>` and retry using the new anchors.
-
-### Rules
-
-- Prefer `linehash` over ad-hoc text replacement when editing specific file lines
-- Use `linehash read` to refresh anchors before editing files that may have changed
-- Treat stale-anchor failures as a signal to re-read, not to force the edit
-
----
-
-## scope — Local Static Analysis
-
-`scope` is the repository's local static-analysis CLI for dependency, symbol, impact, and architecture queries.
-
-### Recommended Workflow
-
-1. Refresh the index for the current checkout when needed:
-   ```bash
-   scope index .
-   ```
-2. Ask the narrowest query that answers the current question.
-3. Prefer `--compact` when feeding the result back into an agent loop.
-4. Treat results as static evidence, then validate edits with tests/builds.
-
-### Useful Commands
+### Quick Start
 
 ```bash
-scope --compact deps path/to/file.rs
-scope --compact deps path/to/file.rs --reverse
-scope --compact symbols path/to/file.rs --public-only
-scope --compact callers module::symbol
-scope --compact impact module::symbol --change-type body
-scope --compact why src/from.rs src/to.rs
-scope --compact context --target module::symbol --change-type body --budget 400
-scope pack module::symbol --change-type body --budget 400
+# Basic query
+why src/auth.rs:verify_token
+
+# Validate config and test LLM connectivity
+why doctor
 ```
 
-### Rules
+### Query Syntax
 
-- Use `scope` before editing when you need fast evidence about dependencies, callers, symbols, or blast radius
-- Prefer the narrowest command that answers the question instead of broad manual searching
-- The strongest semantic support today is heuristic Rust and TS/JS extraction; Python, Ruby, and Go are scan-only
-- `scope` is static analysis, not proof that a change is safe
+| Form | Example | Description |
+|------|---------|-------------|
+| `<file>:<line>` | `why src/auth.rs:42` | Query specific line |
+| `<file>:<symbol>` | `why src/auth.rs:verify_token` | Query function/method |
+| `<file>:<Type::method>` | `why src/auth.rs:AuthService::login` | Qualified Rust method |
+| `<file> --lines <start:end>` | `why src/auth.rs --lines 40:45` | Query line range |
+
+### Command Reference
+
+**Core Queries:**
+| Command | Purpose |
+|---------|---------|
+| `why <target>` | Basic archaeology query with LLM synthesis |
+| `why <target> --no-llm` | Heuristic-only mode (no LLM call) |
+| `why <target> --json` | Machine-readable output |
+| `why <target> --since 30` | Limit to recent 30 days |
+
+**Risk & History:**
+| Command | Purpose |
+|---------|---------|
+| `why <target> --blame-chain` | Walk past mechanical edits to true origin |
+| `why <target> --evolution` | Rename-aware target history timeline |
+| `why <target> --team` | Show ownership and bus-factor signals |
+| `why <target> --coupled` | Show file-level co-change coupling |
+
+**Code Actions:**
+| Command | Purpose |
+|---------|---------|
+| `why <target> --annotate` | Write evidence-backed doc annotation |
+| `why <target> --split` | Show archaeology-guided split suggestions |
+| `why <target> --rename-safe` | Assess whether Rust symbol rename is safe |
+| `why <target> --watch` | Refresh report when file changes |
+
+**Repo-Wide Commands:**
+| Command | Purpose |
+|---------|---------|
+| `why hotspots --limit 10` | Top churn × risk files |
+| `why health` | Repo health dashboard |
+| `why health --ci 80` | CI gate with threshold |
+| `why time-bombs` | Aged TODOs and expired markers |
+| `why ghost --limit 10` | Uncalled high-risk functions |
+| `why onboard --limit 10` | Top symbols for new engineers |
+| `why diff-review --no-llm` | Review staged diff |
+| `why pr-template` | Generate PR template from staged diff |
+
+**Config & Diagnostics:**
+| Command | Purpose |
+|---------|---------|
+| `why config init` | Interactive setup (main entry point) |
+| `why config init --local` | Create repo-local config |
+| `why config get` | Show current effective config |
+| `why doctor` | Validate config and test LLM |
+| `why doctor --json` | Machine-readable diagnostics |
+
+### Typical Agent Workflow
+
+1. **Before deleting or refactoring unfamiliar code:**
+   ```bash
+   why src/legacy.rs:old_function --no-llm
+   ```
+   Check risk level and history before touching.
+
+2. **For broader refactors:**
+   ```bash
+   why src/auth.rs:verify_token --coupled --team
+   ```
+   See coupled files and ownership before planning scope.
+
+3. **For rename operations:**
+   ```bash
+   why src/auth.rs:verify_token --rename-safe
+   ```
+   Check caller risk to assess rename safety.
+
+4. **Before PR:**
+   ```bash
+   why diff-review --no-llm
+   why pr-template
+   ```
+   Review staged changes and generate template.
+
+5. **Health check:**
+   ```bash
+   why health --json
+   why hotspots --limit 5
+   ```
+   Understand repo-wide debt signals.
+
+### Risk Levels
+
+| Level | Meaning |
+|-------|---------|
+| **HIGH** | Stop and investigate. Likely security, incident, or critical business logic. |
+| **MEDIUM** | Review carefully. Migration, integration, or compatibility-sensitive code. |
+| **LOW** | Routine code. Standard review practices apply. |
+
+### Supported Languages
+
+Symbol resolution works for: Rust (`.rs`), Go (`.go`), JavaScript (`.js`), TypeScript (`.ts`, `.tsx`), Java (`.java`), Python (`.py`)
+
+### Cache Behavior
+
+- Query results cached in `.why/cache.jsonl`
+- Health snapshots stored in `.why/health.jsonl`
+- Use `--no-cache` to bypass cache
+- Cache keys include `HEAD` hash prefix for natural invalidation
+
+### Common Pitfalls
+
+- **"could not find repository"**: Run from inside a git repo, or use repo-wide commands like `why doctor` from anywhere
+- **Ambiguous symbol**: Use qualified name like `Module::function` instead of just `function`
+- **No LLM synthesis**: Check `why doctor` for config/auth issues; fallback to `--no-llm` for heuristic-only
+- **Missing credentials**: Run `why config init` or set `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`ZAI_API_KEY`
+
+### Rules for Agents
+
+- **Always run `why` before deleting unfamiliar code** — it may be a security fix or incident response
+- Treat `HIGH` risk output as a stop-and-investigate signal
+- Use `--blame-chain` to find true origin, not just last mechanical edit
+- Use `--coupled` and `--team` before broader refactors
+- Use `--no-llm` in CI or when LLM is unavailable
+- Use `why doctor` to diagnose config/auth issues
+
+---
+## linehash — Hash-Anchored File Editing
+
+`linehash` is a file editing tool that uses content-hashed line anchors (`12:ab3f`) instead of fragile exact-text matching. It's designed for agent-driven editing where concurrent changes are expected and edit safety is critical.
+
+### Why It's Useful
+
+- **Stable anchors:** Uses `line:hash` format that survives nearby edits—line numbers shift but hashes stay valid
+- **Concurrent-safe:** Detects stale anchors when content changed; fails explicitly instead of guessing
+- **Audit trail:** Optional `--receipt` and `--audit-log` for tracking edit history
+- **No merge conflicts:** Each edit is independent; no patch files that conflict
+- **Works with any text:** Language-agnostic; no parsing required
+
+### The Anchor Format
+
+Anchors are `line_number:content_hash` pairs like `42:a3f2`:
+
+- **line_number**: 1-based line number (for human readability)
+- **content_hash**: First 4+ chars of SHA-256 of line content (for stability)
+
+Example output from `linehash read`:
+```
+  1:a1b2  fn main() {
+  2:c3d4      println!("hello");
+  3:e5f6  }
+```
+
+### Command Reference
+
+**Reading:**
+| Command | Purpose |
+|---------|---------|
+| `linehash read <file>` | Show file with line:hash anchors |
+| `linehash read <file> --anchor 42:a3f2` | Show context around specific anchor |
+| `linehash read <file> --context 10` | Set context lines (default: 5) |
+| `linehash index <file>` | Show just anchors, no content |
+
+**Editing:**
+| Command | Purpose |
+|---------|---------|
+| `linehash edit <file> <anchor> <content>` | Replace line at anchor |
+| `linehash edit <file> <start>..<end> <content>` | Replace line range |
+| `linehash insert <file> <anchor> <content>` | Insert after anchor |
+| `linehash insert <file> <anchor> <content> --before` | Insert before anchor |
+| `linehash delete <file> <anchor>` | Delete line at anchor |
+| `linehash delete <file> <start>..<end>` | Delete line range |
+
+**Searching:**
+| Command | Purpose |
+|---------|---------|
+| `linehash grep <file> <pattern>` | Search with anchor output |
+| `linehash grep <file> <pattern> --case-insensitive` | Case-insensitive search |
+| `linehash annotate <file> <query>` | Find and annotate matching lines |
+| `linehash annotate <file> <regex> --regex` | Regex search |
+| `linehash find-block <file> <anchor>` | Find enclosing block (brace/indent) |
+
+**Utilities:**
+| Command | Purpose |
+|---------|---------|
+| `linehash verify <file>` | Verify file integrity |
+| `linehash stats <file>` | File statistics |
+| `linehash patch <file> <patch-file>` | Apply patch by anchors |
+| `linehash swap <file> <anchor1> <anchor2>` | Swap two lines |
+| `linehash move <file> <anchor> <target-anchor>` | Move line to new position |
+| `linehash indent <file> <anchor> <levels>` | Adjust indentation |
+
+**Advanced:**
+| Command | Purpose |
+|---------|---------|
+| `linehash from-diff <diff-file>` | Convert diff to anchor edits |
+| `linehash merge-patches <file> <patch1> <patch2>` | Merge multiple patches |
+| `linehash watch <file>` | Watch file for changes |
+| `linehash explode <file>` | Split file into per-line files |
+| `linehash implode <file>` | Reassemble from per-line files |
+
+### Typical Agent Workflow
+
+1. **Read file with anchors:**
+   ```bash
+   linehash read src/main.rs
+   ```
+
+2. **Find specific content:**
+   ```bash
+   linehash grep src/main.rs "fn process" --json
+   ```
+
+3. **Apply targeted edit:**
+   ```bash
+   linehash edit src/main.rs 42:a3f2 "fn process_data(input: &str) -> Result<()> {"
+   ```
+
+4. **Verify change:**
+   ```bash
+   linehash read src/main.rs --anchor 42:a3f2
+   ```
+
+5. **If anchor is stale, re-read and retry:**
+   ```bash
+   linehash read src/main.rs  # Get fresh anchors
+   linehash edit src/main.rs 42:new_hash "..."
+   ```
+
+### Range Edits
+
+Replace multiple lines with range syntax:
+
+```bash
+# Replace lines 10-15
+linehash edit src/main.rs 10:a1b2..15:c3d4 "new content\nspanning\nmultiple lines"
+
+# Delete lines 20-25
+linehash delete src/main.rs 20:e5f6..25:g7h8
+```
+
+### Safety Features
+
+**Stale anchor detection:**
+```
+Error: anchor 42:a3f2 is stale (line content changed)
+Hint: re-run `linehash read src/main.rs` to get fresh anchors
+```
+
+**Ambiguous anchor detection:**
+```
+Error: anchor 42:a3 matches multiple lines
+Hint: use more hash characters: 42:a3f2e1
+```
+
+**Dry-run mode:**
+```bash
+linehash edit src/main.rs 42:a3f2 "new content" --dry-run
+```
+
+**Audit logging:**
+```bash
+linehash edit src/main.rs 42:a3f2 "new content" --receipt --audit-log edits.jsonl
+```
+
+### JSON Output
+
+All commands support `--json` for machine-readable output:
+
+```bash
+linehash read src/main.rs --json
+linehash grep src/main.rs "fn " --json
+linehash edit src/main.rs 42:a3f2 "new" --json
+```
+
+### Common Pitfalls
+
+- **Stale anchor:** Content changed since last read → re-run `linehash read`
+- **Ambiguous anchor:** Hash too short → use more characters from original hash
+- **Line shifted:** Nearby edits changed line numbers → hash still works, just re-read
+- **File deleted:** Obviously fails → check file exists before editing
+- **Binary file:** Only works on text files → don't use on binaries
+
+### Rules for Agents
+
+- **Always prefer `linehash` over `sed`/`awk`** for targeted line edits
+- **Re-read before editing** if file may have changed (other agents, user edits)
+- **Treat stale-anchor failures as safety signals**, not errors to bypass
+- **Use `--dry-run` first** when editing critical files
+- **Use `--json` output** for parsing in scripts
+- **Never force an edit** when anchor is stale—always re-read and retry
+
+### When NOT to Use linehash
+
+- **Large insertions:** For adding many lines, use a heredoc or write the whole file
+- **Whole-file rewrites:** Just use `Write` tool directly
+- **Binary files:** linehash only works on text
+- **Complex refactors:** Use tree-sitter based tools for AST-aware changes
 
 ---
 
@@ -328,6 +582,12 @@ git push                # Push to remote
 3. **Update issue status** - Close finished work, update in-progress items
 4. **Sync beads** - `br sync --flush-only` to export to JSONL
 5. **Hand off** - Provide context for next session
+
+### Commit Discipline
+
+- **Always run checks before committing**: For any code change, run tests, linters, builds,,format and `ubs $(git diff --name-only --cached)` on staged files before creating a commit.
+- **Only commit when checks pass**: Do not commit if tests, linters, builds, or UBS are failing, unless you are explicitly committing a known-broken state with a clear reason in the commit message and associated issue.
+- **Treat every change as commit-ready**: Work as if any local change could be committed; keep changes small, coherent, and fully validated before `git commit`.
 
 ---
 
