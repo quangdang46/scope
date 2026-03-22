@@ -164,7 +164,8 @@ fn simulate_extract_reports_expected_graph_delta_for_rust_fixture() {
     let expected = read_golden("rust_small_simulate_extract.json");
     assert_eq!(actual, expected);
 
-    fs::remove_dir_all(repo).unwrap();
+    drop(store);
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -185,7 +186,8 @@ fn simulate_extract_rejects_symbols_from_multiple_files() {
         .to_string()
         .contains("requires all symbols to come from the same indexed file"));
 
-    fs::remove_dir_all(repo).unwrap();
+    drop(store);
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -206,6 +208,7 @@ fn simulate_extract_rejects_existing_target_file() {
         .to_string()
         .contains("target file `src/parser.rs` already exists in the index"));
 
+    drop(store);
     let _ = fs::remove_dir_all(repo);
 }
 
@@ -227,6 +230,7 @@ fn simulate_extract_rejects_duplicate_symbols() {
         .to_string()
         .contains("received duplicate symbol `lib::parser`"));
 
+    drop(store);
     let _ = fs::remove_dir_all(repo);
 }
 
@@ -248,7 +252,8 @@ fn simulate_extract_rejects_empty_symbol_names() {
         .to_string()
         .contains("does not allow empty symbol names"));
 
-    fs::remove_dir_all(repo).unwrap();
+    drop(store);
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -269,7 +274,8 @@ fn simulate_extract_rejects_unresolved_symbols() {
         .to_string()
         .contains("could not resolve symbol `lib::missing_symbol`"));
 
-    fs::remove_dir_all(repo).unwrap();
+    drop(store);
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -290,5 +296,6 @@ fn simulate_extract_rejects_target_file_matching_source_file() {
         .to_string()
         .contains("target file must differ from the source file"));
 
-    fs::remove_dir_all(repo).unwrap();
+    drop(store);
+    let _ = fs::remove_dir_all(repo);
 }
