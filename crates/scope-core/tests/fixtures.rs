@@ -30,15 +30,19 @@ fn golden_root() -> PathBuf {
     repo_root().join("tests/golden")
 }
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("scope-{prefix}-{nanos}"))
+    let count = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
+    std::env::temp_dir().join(format!("scope-{prefix}-{nanos}-{count}"))
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) {
+fn copy_dir_recursive(root: &Path, src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
 
     for entry in fs::read_dir(src).unwrap() {
@@ -48,13 +52,18 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         let file_type = entry.file_type().unwrap();
 
         if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path);
+            copy_dir_recursive(root, &src_path, &dst_path);
         } else {
             if src_path
-                .strip_prefix(src)
+                .strip_prefix(root)
                 .ok()
                 .and_then(|relative| relative.to_str())
                 == Some(".scope/index.db")
+                || src_path
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(|relative| relative.to_str())
+                    == Some(".scope\\index.db")
             {
                 continue;
             }
@@ -66,7 +75,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 fn prepare_fixture_copy(name: &str) -> PathBuf {
     let src = fixture_root(name);
     let dst = unique_temp_dir(name);
-    copy_dir_recursive(&src, &dst);
+    copy_dir_recursive(&src, &src, &dst);
     dst
 }
 
@@ -102,6 +111,7 @@ fn index_fixture(repo_root: &Path) -> Store {
 fn read_golden(name: &str) -> String {
     fs::read_to_string(golden_root().join(name))
         .unwrap()
+        .replace("\r\n", "\n")
         .trim_end_matches('\n')
         .to_string()
 }
@@ -234,6 +244,7 @@ fn snapshot_round_trip_and_diff_work_for_rust_small_fixture() {
         }
     );
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -329,6 +340,7 @@ fn rust_small_forward_deps_match_golden_json() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -345,6 +357,7 @@ fn rust_small_reverse_deps_match_golden_json() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -372,6 +385,7 @@ fn ts_small_is_scanned_and_indexed_by_fixture_indexer() {
         vec!["src/auth/index.ts", "src/utils/formatter.ts"]
     );
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -457,6 +471,7 @@ fn mixed_repo_scans_and_indexes_rust_and_typescript_together() {
         vec!["verifyToken"]
     );
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -473,6 +488,7 @@ fn rust_small_symbols_query_matches_golden_json() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -489,6 +505,7 @@ fn rust_small_public_symbols_query_matches_golden_json() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -514,6 +531,7 @@ fn rust_small_function_symbols_query_matches_golden_json() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -538,6 +556,7 @@ fn ts_small_forward_deps_match_expected_paths() {
         vec!["src/auth/aliases.ts", "src/auth/middleware.ts"]
     );
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -609,6 +628,7 @@ fn ts_small_reverse_deps_and_symbols_and_calls_work_conservatively() {
         .collect();
     assert_eq!(format_callees, vec!["utils::logger::log"]);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -723,6 +743,7 @@ fn rust_small_direct_calls_are_resolved_conservatively() {
     // parser::parse is called transitively by the same two indexed callers that the golden captures.
     assert_eq!(parser_callers_transitive.len(), 2);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -765,6 +786,7 @@ fn rust_small_explain_query_matches_golden_json() {
     assert_eq!(filtered[0].qualname.as_deref(), Some("resolver::resolve"));
     assert_eq!(filtered[0].distance, 1);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -789,6 +811,7 @@ fn rust_small_public_surface_contains_only_exported_symbols() {
         .iter()
         .all(|symbol| symbol.qualname.starts_with("parser::")));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -832,6 +855,7 @@ fn ts_small_public_surface_diff_captures_added_removed_and_modified_symbols() {
             .as_ref()
             .is_some_and(|symbol| symbol.name == "verify")));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -851,6 +875,7 @@ fn rust_small_public_surface_is_deterministically_sorted_by_line_then_qualname()
 
     assert_eq!(ordered, vec![(1, "parser::parse")]);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -867,6 +892,7 @@ fn rust_small_public_surface_includes_exported_resolver_symbol() {
     assert_eq!(surface.symbols.len(), 1);
     assert_eq!(surface.symbols[0].qualname, "resolver::resolve");
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -917,6 +943,7 @@ fn fixture_indexing_persists_file_fingerprint_metadata() {
     assert!(state.mtime_unix_seconds.is_some());
     assert!(state.size_bytes.is_some_and(|size| size > 0));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -945,6 +972,7 @@ fn doctor_output_reports_index_health_counts() {
     assert_eq!(envelope.data.checks[0].name, "files_indexed");
     assert_eq!(envelope.data.checks[0].status, "ok");
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -987,6 +1015,7 @@ fn dynamic_limits_fixture_reports_partial_parse_health_without_false_edges() {
         .unwrap();
     assert!(plugin_calls.is_empty());
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1042,6 +1071,7 @@ fn benchmark_output_reports_full_and_incremental_timing_summary() {
     assert_eq!(envelope.data.summary.incremental.avg_ms, 7);
     assert_eq!(envelope.data.summary.comparison.saved_ms, 35);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1146,6 +1176,7 @@ fn stability_query_reports_expected_scores_and_filtering() {
     assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
     assert_eq!(envelope.data.result, filtered);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1255,6 +1286,7 @@ fn risk_query_reports_expected_scores_and_fallbacks() {
         Err(scope_core::ScopeError::InvalidInput(_))
     ));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1276,7 +1308,6 @@ fn generated_cochange_fixture_creates_expected_commit_history() {
     assert!(log.contains("parser utils and resolver evolve together"));
     assert!(log.contains("parser evolves alone"));
     assert!(log.contains("resolver evolves alone"));
-
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1355,6 +1386,7 @@ fn generated_cochange_fixture_persists_expected_file_churn() {
     assert_eq!(result.files[0].path, RepoPath::from("src/utils.rs"));
     assert_eq!(result.files[1].path, RepoPath::from("src/resolver.rs"));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1380,6 +1412,7 @@ fn query_result_matches_golden_json_for_rust_small_fixture() {
     assert_eq!(actual, expected);
     assert!(session.binding_names().is_empty());
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1405,6 +1438,7 @@ fn query_result_matches_golden_json_for_let_binding_fixture() {
     assert_eq!(actual, expected);
     assert_eq!(session.binding_names(), vec!["roots".to_string()]);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1427,6 +1461,7 @@ fn query_result_matches_golden_json_for_shared_binding_followup_fixture() {
     assert_eq!(actual, expected);
     assert_eq!(session.binding_names(), vec!["roots".to_string()]);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1453,6 +1488,7 @@ fn query_followup_error_preserves_existing_shared_binding_fixture() {
     let followup = scope_core::execute_query("$roots | count", &store, &mut session).unwrap();
     assert_eq!(followup, scope_core::QueryValue::Number(3));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1470,6 +1506,7 @@ fn report_query_matches_golden_json_for_rust_small_fixture() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1520,6 +1557,7 @@ fn report_query_matches_golden_json_for_snapshot_comparison() {
     assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
     assert_eq!(envelope.data.result, report);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1537,6 +1575,7 @@ fn gate_query_matches_golden_json_for_strict_arch_fixture() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1563,6 +1602,7 @@ fn gate_query_uses_default_thresholds_and_fails_strict_arch_fixture() {
     assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
     assert_eq!(envelope.data.result, gate);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1595,6 +1635,7 @@ fn gate_query_warns_for_missing_compare_on_delta_only_gate() {
         .detail
         .contains("comparison snapshot required for min_delta"));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1623,6 +1664,7 @@ fn gate_query_respects_skipped_custom_gate() {
     assert_eq!(gate.summary.warnings, 0);
     assert_eq!(gate.evaluations[0].status, scope_core::GateStatus::Skipped);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1772,6 +1814,7 @@ fn cochange_query_reports_expected_scores_and_filters() {
         Err(scope_core::ScopeError::InvalidInput(_))
     ));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1824,6 +1867,7 @@ fn utility_queries_report_expected_results_for_rust_small_fixture() {
         Err(scope_core::ScopeError::InvalidInput(_))
     ));
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1864,6 +1908,7 @@ fn utility_queries_report_expected_results_for_ts_small_fixture() {
     let diff_expected = read_golden("ts_small_diff_head.json");
     assert_eq!(diff_actual, diff_expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -1904,6 +1949,7 @@ fn utility_queries_report_expected_results_for_mixed_repo_fixture() {
     let diff_expected = read_golden("mixed_repo_diff_head.json");
     assert_eq!(diff_actual, diff_expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -2055,6 +2101,7 @@ fn rust_small_impact_queries_match_golden_json() {
         );
     }
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -2300,6 +2347,7 @@ fn test_map_queries_cover_expected_fixture_cones() {
         RepoPath::from("src/routes/api.ts")
     );
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -2355,6 +2403,7 @@ fn arch_violations_fixture_matches_expected_json() {
     let expected = read_golden("arch_violations_check.json");
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -2394,6 +2443,7 @@ fn capability_audit_fixture_matches_golden_json() {
     let expected = read_golden("capability_audit_network.json");
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -2446,5 +2496,6 @@ fn capability_audit_entry_queries_match_golden_json() {
     let entry_unreachable_expected = read_golden("capability_audit_entry_unreachable.json");
     assert_eq!(entry_unreachable_actual, entry_unreachable_expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }

@@ -21,12 +21,16 @@ fn golden_root() -> PathBuf {
     repo_root().join("tests/golden")
 }
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("scope-rename-plan-{prefix}-{nanos}"))
+    let count = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
+    std::env::temp_dir().join(format!("scope-rename-plan-{prefix}-{nanos}-{count}"))
 }
 
 fn copy_dir_recursive(root: &Path, src: &Path, dst: &Path) {
