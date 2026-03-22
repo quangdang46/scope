@@ -3,172 +3,129 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
-      - "scope-v*"
-      - "scope-mcp-v*"
-      - "release-all-v*"
+      - 'v*.*.*'
 
 permissions:
   contents: write
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  prepare:
-    name: Prepare release metadata
-    runs-on: ubuntu-latest
-    outputs:
-      bins: ${{ steps.meta.outputs.bins }}
-      release_version: ${{ steps.meta.outputs.release_version }}
-    steps:
-      - id: meta
-        shell: bash
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          case "$tag" in
-            v*)
-              bins="scope"
-              release_version="$tag"
-              ;;
-            scope-v*)
-              bins="scope"
-              release_version="${tag#scope-}"
-              ;;
-            scope-mcp-v*)
-              bins="scope-mcp"
-              release_version="${tag#scope-mcp-}"
-              ;;
-            release-all-v*)
-              bins="scope scope-mcp"
-              release_version="${tag#release-all-}"
-              ;;
-            *)
-              echo "Unsupported tag: $tag" >&2
-              exit 1
-              ;;
-          esac
-          echo "bins=$bins" >> "$GITHUB_OUTPUT"
-          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
-
   build:
-    name: Build ${{ matrix.target }}
-    needs: prepare
+    name: Build ${{ matrix.crate }} for ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
+        crate: [scope-cli, scope-mcp]
+        target: 
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-msvc
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            asset_suffix: linux-x86_64
-            archive_ext: tar.gz
-            use_cross: true
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            asset_suffix: linux-aarch64
-            archive_ext: tar.gz
-            use_cross: true
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            asset_suffix: macos-x86_64
-            archive_ext: tar.gz
-            use_cross: false
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            asset_suffix: macos-aarch64
-            archive_ext: tar.gz
-            use_cross: false
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            asset_suffix: windows-x86_64
-            archive_ext: zip
-            use_cross: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            method: cross
+            suffix: linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            method: cross
+            suffix: linux-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            method: native
+            suffix: macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            method: native
+            suffix: macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            method: native
+            suffix: windows-x86_64
+          - crate: scope-cli
+            bin: scope
+          - crate: scope-mcp
+            bin: scope-mcp
+
+    # Route by tag prefix
+    if: >
+      startsWith(github.ref, 'refs/tags/release-all-v') ||
+      (matrix.crate == 'scope-cli' && startsWith(github.ref, 'refs/tags/scope-v')) ||
+      (matrix.crate == 'scope-mcp' && startsWith(github.ref, 'refs/tags/scope-mcp-v'))
+
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - if: ${{ matrix.use_cross }}
+
+      - name: Install cross
+        if: matrix.method == 'cross'
         uses: taiki-e/install-action@cross
-      - name: Build binaries
-        shell: bash
-        env:
-          BINS: ${{ needs.prepare.outputs.bins }}
-          TARGET: ${{ matrix.target }}
-          USE_CROSS: ${{ matrix.use_cross }}
+
+      - name: Build
         run: |
-          if [ "$USE_CROSS" = "true" ]; then
-            builder="cross"
+          if [ "${{ matrix.method }}" = "cross" ]; then
+            cross build --release --target ${{ matrix.target }} --package ${{ matrix.crate }}
           else
-            builder="cargo"
+            cargo build --release --target ${{ matrix.target }} --package ${{ matrix.crate }}
           fi
 
-          for bin in $BINS; do
-            "$builder" build --locked --release --target "$TARGET" --bin "$bin"
-          done
-      - name: Package artifacts
+      - name: Package
         shell: bash
-        env:
-          BINS: ${{ needs.prepare.outputs.bins }}
-          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
-          TARGET: ${{ matrix.target }}
-          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
-          ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
-          dist_dir="$RUNNER_TEMP/dist"
-          mkdir -p "$dist_dir"
+          cd target/${{ matrix.target }}/release
+          
+          # Extract exact version (vX.Y.Z) to conform to install script expectations
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG" =~ (v[0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            VERSION="$TAG"
+          fi
+          
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            BIN_NAME="${{ matrix.bin }}.exe"
+            ARCHIVE="${{ matrix.bin }}-${VERSION}-${{ matrix.suffix }}.zip"
+            7z a "../../${ARCHIVE}" "${BIN_NAME}"
+            cd ../../
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          else
+            BIN_NAME="${{ matrix.bin }}"
+            ARCHIVE="${{ matrix.bin }}-${VERSION}-${{ matrix.suffix }}.tar.gz"
+            tar -czf "../../${ARCHIVE}" "${BIN_NAME}"
+            cd ../../
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          fi
 
-          checksum_file() {
-            local file="$1"
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "$file" | awk '{print $1}'
-            else
-              shasum -a 256 "$file" | awk '{print $1}'
-            fi
-          }
-
-          for bin in $BINS; do
-            if [ "$ARCHIVE_EXT" = "zip" ]; then
-              executable="${bin}.exe"
-            else
-              executable="$bin"
-            fi
-
-            built_path="target/${TARGET}/release/${executable}"
-            stage_dir="$RUNNER_TEMP/${bin}-${ASSET_SUFFIX}"
-            mkdir -p "$stage_dir"
-            cp "$built_path" "$stage_dir/$executable"
-
-            archive_name="${bin}-${RELEASE_VERSION}-${ASSET_SUFFIX}.${ARCHIVE_EXT}"
-            archive_path="$dist_dir/$archive_name"
-
-            if [ "$ARCHIVE_EXT" = "zip" ]; then
-              powershell -NoProfile -Command "Compress-Archive -Path '$stage_dir\\$executable' -DestinationPath '$archive_path' -Force"
-            else
-              tar -C "$stage_dir" -czf "$archive_path" "$executable"
-            fi
-
-            checksum_file "$archive_path" > "${archive_path}.sha256"
-          done
-      - uses: actions/upload-artifact@v4
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: artifacts-${{ matrix.target }}
-          path: ${{ runner.temp }}/dist/*
-          if-no-files-found: error
+          name: target-${{ matrix.crate }}-${{ matrix.target }}
+          path: |
+            target/${{ matrix.bin }}-*.zip
+            target/${{ matrix.bin }}-*.zip.sha256
+            target/${{ matrix.bin }}-*.tar.gz
+            target/${{ matrix.bin }}-*.tar.gz.sha256
 
   release:
-    name: Publish GitHub release
-    needs: [prepare, build]
+    name: GitHub Release
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: output
+          pattern: target-*
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          files: output/*
           generate_release_notes: true
-          files: dist/*

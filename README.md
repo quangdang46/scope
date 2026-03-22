@@ -1,8 +1,31 @@
-# scope
+# 🔭 scope
 
 > Local static-analysis workspace for dependency, impact, and architecture queries.
 >
 > Today, `scope` is a working local static-analysis workspace with a SQLite-backed index, a broad Rust CLI, a local HTTP API/UI, and a stdio MCP wrapper. The strongest semantic indexing support today is heuristic Rust and TS/JS extraction; parser-backed resolution, tighter traversal precision, and richer module resolution are still in progress.
+
+---
+
+## 🚀 Quick Install
+
+### Pre-compiled Binary
+This project is still under active development, but the fastest way to install the `scope` CLI is using our curl-pipe installer (Mac/Linux/WSL):
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/scope/main/install.sh?$(date +%s)" | bash
+```
+
+### Local Development
+For local development, you can run directly via cargo:
+
+```bash
+cargo run -p scope-cli -- --help
+cargo run -p scope-cli -- index .
+cargo run -p scope-cli -- --compact deps src/lib.rs
+cargo run -p scope-cli -- report
+cargo run -p scope-cli -- serve --port 7777
+cargo run -p scope-mcp
+```
 
 ---
 
@@ -252,24 +275,6 @@ Compact mode is intended for agent loops and transport efficiency, not for human
 
 This model is intended to support machine-first static analysis without implying runtime guarantees.
 
-## Installation
-
-This project is still under active development, but the `scope` CLI can be installed from GitHub:
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/scope/main/install.sh?$(date +%s)" | bash
-```
-
-For local development:
-
-```bash
-cargo run -p scope-cli -- --help
-cargo run -p scope-cli -- index .
-cargo run -p scope-cli -- --compact deps src/lib.rs
-cargo run -p scope-cli -- report
-cargo run -p scope-cli -- serve --port 7777
-cargo run -p scope-mcp
-```
 
 ## Near-Term Roadmap
 

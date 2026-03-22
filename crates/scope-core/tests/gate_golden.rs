@@ -145,6 +145,7 @@ fn gate_query_warning_matches_golden_json() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -174,6 +175,7 @@ fn gate_query_skipped_matches_golden_json() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -214,5 +216,6 @@ fn gate_query_compare_warning_matches_golden_json() {
 
     assert_eq!(actual, expected);
 
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
