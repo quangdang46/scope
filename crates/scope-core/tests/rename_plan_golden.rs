@@ -101,6 +101,7 @@ fn index_fixture(repo_root: &Path) -> Store {
 fn read_golden(name: &str) -> String {
     fs::read_to_string(golden_root().join(name))
         .unwrap()
+        .replace("\r\n", "\n")
         .trim_end_matches('\n')
         .to_string()
 }

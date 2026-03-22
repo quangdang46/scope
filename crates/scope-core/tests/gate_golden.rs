@@ -97,7 +97,12 @@ fn index_fixture(repo_root: &Path) -> Store {
 }
 
 fn read_golden_json(name: &str) -> serde_json::Value {
-    serde_json::from_str(&fs::read_to_string(golden_root().join(name)).unwrap()).unwrap()
+    serde_json::from_str(
+        &fs::read_to_string(golden_root().join(name))
+            .unwrap()
+            .replace("\r\n", "\n"),
+    )
+    .unwrap()
 }
 
 fn normalize_report_like_json(value: &mut serde_json::Value) {
