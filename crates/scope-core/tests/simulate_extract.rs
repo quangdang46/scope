@@ -29,6 +29,32 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("scope-simulate-{prefix}-{nanos}"))
 }
 
+fn is_text_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some(
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "py"
+                | "rb"
+                | "go"
+                | "toml"
+                | "json"
+                | "md"
+                | "txt"
+                | "yml"
+                | "yaml"
+                | "cfg"
+                | "ini"
+                | "html"
+                | "css"
+                | "sh"
+        )
+    )
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
 
@@ -49,7 +75,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
             {
                 continue;
             }
-            fs::copy(&src_path, &dst_path).unwrap();
+            if is_text_file(&src_path) {
+                let content = fs::read_to_string(&src_path).unwrap();
+                fs::write(&dst_path, content.replace("\r\n", "\n")).unwrap();
+            } else {
+                fs::copy(&src_path, &dst_path).unwrap();
+            }
         }
     }
 }
