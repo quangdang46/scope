@@ -13,9 +13,10 @@ jobs:
     name: Build ${{ matrix.crate }} for ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         crate: [scope-cli, scope-mcp]
-        target: 
+        target:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
           - x86_64-apple-darwin
@@ -47,12 +48,6 @@ jobs:
           - crate: scope-mcp
             bin: scope-mcp
 
-    # Route by tag prefix
-    if: >
-      startsWith(github.ref, 'refs/tags/release-all-v') ||
-      (matrix.crate == 'scope-cli' && startsWith(github.ref, 'refs/tags/scope-v')) ||
-      (matrix.crate == 'scope-mcp' && startsWith(github.ref, 'refs/tags/scope-mcp-v'))
-
     steps:
       - uses: actions/checkout@v4
 
@@ -66,6 +61,7 @@ jobs:
         uses: taiki-e/install-action@cross
 
       - name: Build
+        shell: bash
         run: |
           if [ "${{ matrix.method }}" = "cross" ]; then
             cross build --release --target ${{ matrix.target }} --package ${{ matrix.crate }}
@@ -77,15 +73,14 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          
-          # Extract exact version (vX.Y.Z) to conform to install script expectations
+
           TAG="${GITHUB_REF#refs/tags/}"
           if [[ "$TAG" =~ (v[0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
             VERSION="${BASH_REMATCH[1]}"
           else
             VERSION="$TAG"
           fi
-          
+
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             BIN_NAME="${{ matrix.bin }}.exe"
             ARCHIVE="${{ matrix.bin }}-${VERSION}-${{ matrix.suffix }}.zip"
@@ -116,7 +111,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
