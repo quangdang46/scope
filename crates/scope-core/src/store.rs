@@ -7283,6 +7283,7 @@ mod tests {
             Some("use crate::parser;")
         );
 
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -7342,6 +7343,7 @@ mod tests {
             vec!["src/lib.rs", "src/parser.rs", "src/utils.rs"]
         );
 
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -7390,6 +7392,7 @@ mod tests {
             vec!["src/parser.rs", "src/lib.rs", "src/main.rs"]
         );
 
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

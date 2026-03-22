@@ -29,7 +29,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("scope-rename-plan-{prefix}-{nanos}"))
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) {
+fn copy_dir_recursive(root: &Path, src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
 
     for entry in fs::read_dir(src).unwrap() {
@@ -39,13 +39,18 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         let file_type = entry.file_type().unwrap();
 
         if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path);
+            copy_dir_recursive(root, &src_path, &dst_path);
         } else {
             if src_path
-                .strip_prefix(src)
+                .strip_prefix(root)
                 .ok()
                 .and_then(|relative| relative.to_str())
                 == Some(".scope/index.db")
+                || src_path
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(|relative| relative.to_str())
+                    == Some(".scope\\index.db")
             {
                 continue;
             }
@@ -57,7 +62,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 fn prepare_fixture_copy(name: &str) -> PathBuf {
     let src = fixture_root(name);
     let dst = unique_temp_dir(name);
-    copy_dir_recursive(&src, &dst);
+    copy_dir_recursive(&src, &src, &dst);
     dst
 }
 
@@ -119,6 +124,8 @@ fn symbol_rename_plan_dry_run_matches_golden_json() {
     assert!(plan.skipped.is_empty());
     assert!(!plan.applied);
 
+    drop(plan);
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -156,6 +163,8 @@ fn symbol_rename_plan_apply_matches_golden_json_and_updates_fixture() {
     assert!(middleware.contains("export function verifySession(token: string): boolean"));
     assert!(!middleware.contains("export function verifyToken(token: string): boolean"));
 
+    drop(plan);
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -177,6 +186,8 @@ fn file_rename_plan_dry_run_matches_golden_json() {
     assert!(!plan.applied);
     assert_eq!(plan.summary.files_considered, 2);
 
+    drop(plan);
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }
 
@@ -205,5 +216,7 @@ fn file_rename_plan_apply_matches_golden_json_and_rewrites_import_paths_only() {
     assert!(repo.join("src/parser.rs").is_file());
     assert!(!repo.join("src/parser2.rs").exists());
 
+    drop(plan);
+    drop(store);
     fs::remove_dir_all(repo).unwrap();
 }

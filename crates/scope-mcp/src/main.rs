@@ -2773,6 +2773,24 @@ mod tests {
     #[test]
     fn dispatch_audit_returns_scope_json_envelope() {
         let repo = prepare_fixture_copy("capability_audit");
+        // The fixture's .scope/ directory is gitignored, so create arch.toml
+        // programmatically to ensure the test works in CI.
+        write_arch_config(
+            &repo,
+            r#"
+[[capability]]
+name = "network"
+pattern = "src/http/**"
+symbols = ["fetch"]
+expected_callers = ["src/workers/**"]
+
+[[entry_point]]
+pattern = "src/workers/**"
+
+[[entry_point]]
+pattern = "src/cli/**"
+"#,
+        );
         let _ = dispatch_tool(
             "index",
             &json!({ "repo_root": repo.display().to_string(), "no_git": true }),
