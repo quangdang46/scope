@@ -13,8 +13,9 @@ use chrono::Local;
 
 use clap::Parser;
 use cli::{
-    ArchCommand, ChangeType, Cli, CochangeSortArg, Commands, CycleSeverityArg, RiskSortArg,
-    SimulateCommand, SnapshotCommand, StabilitySortArg, SurfaceCommand, TestMapCommand,
+    ArchCommand, BenchmarkWorkloadArg, ChangeType, Cli, CochangeSortArg, Commands,
+    CycleSeverityArg, RiskSortArg, SimulateCommand, SnapshotCommand, StabilitySortArg,
+    SurfaceCommand, TestMapCommand,
 };
 use rustyline::{
     completion::{Completer, Pair},
@@ -28,9 +29,9 @@ use rustyline::{
 };
 use scope_core::config::ensure_scope_dir;
 use scope_core::{
-    adapter_for_language, arch_check, arch_explain, arch_init, load_arch_config, scan_repo,
-    validate_cochange_args, BootstrapOptions, CochangeSort, CycleSeverity, DatabaseInfo, RiskSort,
-    ScanConfig, SymbolKind, Verbosity,
+    adapter_for_language, arch_check, arch_explain, arch_init, execute_query, load_arch_config,
+    scan_repo, validate_cochange_args, BootstrapOptions, CochangeSort, CycleSeverity, DatabaseInfo,
+    QuerySession, RiskSort, ScanConfig, SymbolKind, Verbosity,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -721,25 +722,39 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let iterations = args.iterations.unwrap_or(1);
-            let summary = run_benchmark(
+            let mut summary = run_benchmark(
                 &context.paths.repo_root,
                 args.fixture.as_deref(),
                 iterations,
+                args.workload,
             )?;
-            if args.write_report {
-                let command = benchmark_command_string(args.fixture.as_deref(), iterations, true);
+            if !args.compare.is_empty() {
+                summary.artifact_comparison = Some(compare_benchmark_artifacts(
+                    &args.compare,
+                    args.fixture.as_deref(),
+                    &summary,
+                )?);
+            }
+            let envelope = scope_core::stub::benchmark(args.fixture.clone(), args.iterations, summary);
+            if args.write_report || args.write_json {
+                let command = benchmark_command_string(
+                    args.fixture.as_deref(),
+                    iterations,
+                    args.workload,
+                    args.write_report,
+                    args.write_json,
+                );
                 write_benchmark_reports(
                     &context.paths.repo_root,
                     args.fixture.as_deref(),
                     iterations,
-                    &summary,
+                    &envelope,
                     &command,
+                    args.write_report,
+                    args.write_json,
                 )?;
             }
-            serialize_output(
-                &scope_core::stub::benchmark(args.fixture, args.iterations, summary),
-                compact,
-            )
+            serialize_output(&envelope, compact)
         }
     }
     .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
@@ -748,7 +763,13 @@ fn run() -> Result<i32, scope_core::ScopeError> {
     Ok(exit_code)
 }
 
-fn benchmark_command_string(fixture: Option<&str>, iterations: u32, write_report: bool) -> String {
+fn benchmark_command_string(
+    fixture: Option<&str>,
+    iterations: u32,
+    workload: BenchmarkWorkloadArg,
+    write_report: bool,
+    write_json: bool,
+) -> String {
     let mut parts = vec!["scope".to_string(), "benchmark".to_string()];
     if let Some(fixture) = fixture {
         parts.push("--fixture".to_string());
@@ -756,8 +777,13 @@ fn benchmark_command_string(fixture: Option<&str>, iterations: u32, write_report
     }
     parts.push("--iterations".to_string());
     parts.push(iterations.to_string());
+    parts.push("--workload".to_string());
+    parts.push(benchmark_workload_name(workload).to_string());
     if write_report {
         parts.push("--write-report".to_string());
+    }
+    if write_json {
+        parts.push("--write-json".to_string());
     }
     parts.join(" ")
 }
@@ -766,28 +792,60 @@ fn write_benchmark_reports(
     repo_root: &Path,
     fixture: Option<&str>,
     iterations: u32,
-    summary: &scope_core::stub::BenchmarkSummary,
+    envelope: &scope_core::JsonEnvelope<scope_core::stub::BenchmarkData>,
     command: &str,
+    write_report: bool,
+    write_json: bool,
 ) -> Result<(), scope_core::ScopeError> {
     let report_dir = repo_root.join("bench-results");
     fs::create_dir_all(&report_dir)
         .map_err(|error| scope_core::ScopeError::io(&report_dir, error))?;
     let now = Local::now();
     let generated_at = now.format("%Y-%m-%d %H:%M:%S").to_string();
-    let snapshot_name = format!("bench-{}.md", now.format("%Y-%m-%d-%H-%M-%S"));
-    let report = scope_core::render_markdown_benchmark_report(
-        fixture,
-        iterations,
-        summary,
-        &generated_at,
-        &git_commit_short(repo_root),
-        command,
-    );
-    let latest_path = report_dir.join("benchmark.md");
+    let timestamp = now.format("%Y-%m-%d-%H-%M-%S").to_string();
+    let commit = git_commit_short(repo_root);
+
+    if write_report {
+        let report = scope_core::render_markdown_benchmark_report(
+            fixture,
+            iterations,
+            &envelope.data.summary,
+            &generated_at,
+            &commit,
+            command,
+        );
+        write_benchmark_artifact_pair(
+            &report_dir,
+            "benchmark.md",
+            &format!("bench-{timestamp}.md"),
+            &report,
+        )?;
+    }
+
+    if write_json {
+        let json = serde_json::to_string_pretty(envelope)
+            .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
+        write_benchmark_artifact_pair(
+            &report_dir,
+            "benchmark.json",
+            &format!("bench-{timestamp}.json"),
+            &json,
+        )?;
+    }
+    Ok(())
+}
+
+fn write_benchmark_artifact_pair(
+    report_dir: &Path,
+    latest_name: &str,
+    snapshot_name: &str,
+    content: &str,
+) -> Result<(), scope_core::ScopeError> {
+    let latest_path = report_dir.join(latest_name);
     let snapshot_path = report_dir.join(snapshot_name);
-    fs::write(&latest_path, format!("{report}\n"))
+    fs::write(&latest_path, format!("{content}\n"))
         .map_err(|error| scope_core::ScopeError::io(&latest_path, error))?;
-    fs::write(&snapshot_path, format!("{report}\n"))
+    fs::write(&snapshot_path, format!("{content}\n"))
         .map_err(|error| scope_core::ScopeError::io(&snapshot_path, error))?;
     Ok(())
 }
@@ -1492,18 +1550,29 @@ struct IndexRunStats {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkIterationResult {
+    iteration: u32,
     indexed_files: usize,
     mutation_target: RepoPath,
     full_ms: u128,
     incremental_ms: u128,
     full_stats: IndexRunStats,
     incremental_stats: IndexRunStats,
+    query_checks: Vec<scope_core::stub::BenchmarkQueryCheck>,
+}
+
+fn benchmark_workload_name(workload: BenchmarkWorkloadArg) -> &'static str {
+    match workload {
+        BenchmarkWorkloadArg::IndexIncremental => "index-incremental",
+        BenchmarkWorkloadArg::QuerySmoke => "query-smoke",
+        BenchmarkWorkloadArg::TaskMatrix => "task-matrix",
+    }
 }
 
 fn run_benchmark(
     repo_root: &Path,
     fixture: Option<&str>,
     iterations: u32,
+    workload: BenchmarkWorkloadArg,
 ) -> Result<scope_core::stub::BenchmarkSummary, scope_core::ScopeError> {
     let iterations = iterations.max(1);
     let source_root = fixture
@@ -1516,7 +1585,7 @@ fn run_benchmark(
     for iteration in 0..iterations {
         let benchmark_root =
             prepare_benchmark_copy(&source_root, &format!("benchmark-{iteration}"))?;
-        let summary = benchmark_iteration(&benchmark_root, fixture)?;
+        let summary = benchmark_iteration(&benchmark_root, fixture, iteration, workload)?;
         runs.push(summary);
         fs::remove_dir_all(&benchmark_root)
             .map_err(|error| scope_core::ScopeError::io(&benchmark_root, error))?;
@@ -1546,17 +1615,35 @@ fn run_benchmark(
     };
 
     Ok(scope_core::stub::BenchmarkSummary {
+        workload: benchmark_workload_name(workload),
         indexed_files,
         mutation,
         full,
         incremental,
         comparison,
+        runs: runs
+            .iter()
+            .map(|run| scope_core::stub::BenchmarkRunRecord {
+                iteration: run.iteration,
+                indexed_files: run.indexed_files,
+                mutation: scope_core::stub::BenchmarkMutationSummary {
+                    target_file: run.mutation_target.clone(),
+                    change_kind: "append_comment",
+                },
+                full: benchmark_phase_record(run.full_ms, &run.full_stats),
+                incremental: benchmark_phase_record(run.incremental_ms, &run.incremental_stats),
+                query_checks: run.query_checks.clone(),
+            })
+            .collect(),
+        artifact_comparison: None,
     })
 }
 
 fn benchmark_iteration(
     benchmark_root: &Path,
     fixture: Option<&str>,
+    iteration: u32,
+    workload: BenchmarkWorkloadArg,
 ) -> Result<BenchmarkIterationResult, scope_core::ScopeError> {
     let db_path = benchmark_root.join(".scope/index.db");
     let store = scope_core::Store::open(&db_path)?;
@@ -1565,6 +1652,14 @@ fn benchmark_iteration(
     let full_stats = index_repo(benchmark_root, &store)?;
     let full_ms = started.elapsed().as_millis();
 
+    let mut query_checks = Vec::new();
+    if matches!(workload, BenchmarkWorkloadArg::QuerySmoke | BenchmarkWorkloadArg::TaskMatrix) {
+        query_checks.extend(run_query_smoke_checks(&store, fixture, "before_mutation")?);
+    }
+    if matches!(workload, BenchmarkWorkloadArg::TaskMatrix) {
+        query_checks.extend(run_task_matrix_checks(&store, fixture, "before_mutation")?);
+    }
+
     let target = select_benchmark_mutation_target(benchmark_root, fixture)?;
     apply_benchmark_edit(&target)?;
 
@@ -1572,13 +1667,306 @@ fn benchmark_iteration(
     let incremental_stats = index_repo(benchmark_root, &store)?;
     let incremental_ms = started.elapsed().as_millis();
 
+    if matches!(workload, BenchmarkWorkloadArg::QuerySmoke | BenchmarkWorkloadArg::TaskMatrix) {
+        query_checks.extend(run_query_smoke_checks(&store, fixture, "after_mutation")?);
+    }
+    if matches!(workload, BenchmarkWorkloadArg::TaskMatrix) {
+        query_checks.extend(run_task_matrix_checks(&store, fixture, "after_mutation")?);
+    }
+
     Ok(BenchmarkIterationResult {
+        iteration,
         indexed_files: full_stats.indexed_files,
         mutation_target: repo_relative_path(benchmark_root, &target),
         full_ms,
         incremental_ms,
         full_stats,
         incremental_stats,
+        query_checks,
+    })
+}
+
+fn benchmark_phase_record(
+    duration_ms: u128,
+    stats: &IndexRunStats,
+) -> scope_core::stub::BenchmarkPhaseRecord {
+    scope_core::stub::BenchmarkPhaseRecord {
+        duration_ms,
+        files_processed: stats.indexed_files,
+        changed_files: stats.changed_files,
+        deleted_files: stats.deleted_files,
+        affected_files: stats.affected_files,
+    }
+}
+
+struct QuerySmokeCase {
+    name: &'static str,
+    expr: &'static str,
+    expected_json: &'static str,
+}
+
+fn query_smoke_cases(fixture: Option<&str>) -> &'static [QuerySmokeCase] {
+    match fixture {
+        Some("ts_small") => &[
+            QuerySmokeCase {
+                name: "deps_count",
+                expr: "file \"src/index.ts\" | .deps | unique | count",
+                expected_json: "{\"number\":2}",
+            },
+            QuerySmokeCase {
+                name: "let_roots",
+                expr: "let roots = file \"src/index.ts\" | .deps | unique",
+                expected_json: "{\"files\":[\"src/auth/index.ts\",\"src/utils/formatter.ts\"]}",
+            },
+            QuerySmokeCase {
+                name: "roots_count",
+                expr: "$roots | count",
+                expected_json: "{\"number\":2}",
+            },
+        ],
+        Some("ts_with_paths") => &[
+            QuerySmokeCase {
+                name: "deps_count",
+                expr: "file \"src/index.ts\" | .deps | unique | count",
+                expected_json: "{\"number\":2}",
+            },
+            QuerySmokeCase {
+                name: "let_roots",
+                expr: "let roots = file \"src/index.ts\" | .deps | unique",
+                expected_json: "{\"files\":[\"src/components/Button.ts\",\"src/utils/logger.ts\"]}",
+            },
+            QuerySmokeCase {
+                name: "roots_count",
+                expr: "$roots | count",
+                expected_json: "{\"number\":2}",
+            },
+        ],
+        Some("dynamic_limits") => &[
+            QuerySmokeCase {
+                name: "deps_count",
+                expr: "file \"src/index.js\" | .deps | unique | count",
+                expected_json: "{\"number\":2}",
+            },
+            QuerySmokeCase {
+                name: "let_roots",
+                expr: "let roots = file \"src/index.js\" | .deps | unique",
+                expected_json: "{\"files\":[\"src/computed_import.ts\",\"src/dynamic_require.js\"]}",
+            },
+            QuerySmokeCase {
+                name: "roots_count",
+                expr: "$roots | count",
+                expected_json: "{\"number\":2}",
+            },
+        ],
+        Some("mixed_repo") => &[
+            QuerySmokeCase {
+                name: "deps_count",
+                expr: "file \"src/lib.rs\" | .deps | unique | count",
+                expected_json: "{\"number\":1}",
+            },
+            QuerySmokeCase {
+                name: "let_roots",
+                expr: "let roots = file \"src/lib.rs\" | .deps | unique",
+                expected_json: "{\"files\":[\"src/parser.rs\"]}",
+            },
+            QuerySmokeCase {
+                name: "roots_count",
+                expr: "$roots | count",
+                expected_json: "{\"number\":1}",
+            },
+        ],
+        _ => &[
+            QuerySmokeCase {
+                name: "deps_count",
+                expr: "file \"src/lib.rs\" | .deps | unique | count",
+                expected_json: "{\"number\":3}",
+            },
+            QuerySmokeCase {
+                name: "let_roots",
+                expr: "let roots = file \"src/lib.rs\" | .deps | unique",
+                expected_json: "{\"files\":[\"src/parser.rs\",\"src/resolver.rs\",\"src/utils.rs\"]}",
+            },
+            QuerySmokeCase {
+                name: "roots_count",
+                expr: "$roots | count",
+                expected_json: "{\"number\":3}",
+            },
+        ],
+    }
+}
+
+fn run_query_smoke_checks(
+    store: &scope_core::Store,
+    fixture: Option<&str>,
+    phase: &'static str,
+) -> Result<Vec<scope_core::stub::BenchmarkQueryCheck>, scope_core::ScopeError> {
+    let cases = query_smoke_cases(fixture);
+    let mut session = QuerySession::default();
+    let mut checks = Vec::with_capacity(cases.len());
+    for case in cases {
+        let started = Instant::now();
+        let result = execute_query(case.expr, store, &mut session)?;
+        let duration_ms = started.elapsed().as_millis();
+        let actual_json = benchmark_query_value_json(&result)?;
+        checks.push(scope_core::stub::BenchmarkQueryCheck {
+            phase,
+            name: case.name,
+            expr: case.expr,
+            duration_ms,
+            passed: actual_json == case.expected_json,
+            detail: format!("expected {}, got {}", case.expected_json, actual_json),
+        });
+    }
+    Ok(checks)
+}
+
+fn benchmark_query_value_json(value: &scope_core::QueryValue) -> Result<String, scope_core::ScopeError> {
+    serde_json::to_string(value).map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))
+}
+
+fn run_task_matrix_checks(
+    store: &scope_core::Store,
+    fixture: Option<&str>,
+    phase: &'static str,
+) -> Result<Vec<scope_core::stub::BenchmarkQueryCheck>, scope_core::ScopeError> {
+    let mut checks = Vec::new();
+    let cases: &[(&str, &str, &str)] = match fixture {
+        Some("rust_small") | Some("mixed_repo") => &[
+            ("matrix_deps", "file \"src/lib.rs\" | .deps | unique | count", "{\"number\":3}"),
+            ("matrix_symbols", "file \"src/lib.rs\" | .symbols | count", "{\"number\":1}"),
+        ],
+        Some("ts_small") | Some("ts_with_paths") => &[
+            ("matrix_deps", "file \"src/index.ts\" | .deps | unique | count", "{\"number\":2}"),
+            ("matrix_symbols", "file \"src/index.ts\" | .symbols | count", "{\"number\":2}"),
+        ],
+        Some("dynamic_limits") => &[
+            ("matrix_deps", "file \"src/index.js\" | .deps | unique | count", "{\"number\":2}"),
+            ("matrix_symbols", "file \"src/index.js\" | .symbols | count", "{\"number\":1}"),
+        ],
+        _ => &[("matrix_deps", "file \"src/lib.rs\" | .deps | unique | count", "{\"number\":3}")],
+    };
+    let mut session = QuerySession::default();
+    for (name, expr, expected_json) in cases {
+        let started = Instant::now();
+        let result = execute_query(expr, store, &mut session)?;
+        let duration_ms = started.elapsed().as_millis();
+        let actual_json = benchmark_query_value_json(&result)?;
+        checks.push(scope_core::stub::BenchmarkQueryCheck {
+            phase,
+            name,
+            expr,
+            duration_ms,
+            passed: actual_json == *expected_json,
+            detail: format!("expected {}, got {}", expected_json, actual_json),
+        });
+    }
+    Ok(checks)
+}
+
+#[derive(serde::Deserialize)]
+struct BenchmarkArtifactEnvelope {
+    data: BenchmarkArtifactData,
+}
+
+#[derive(serde::Deserialize)]
+struct BenchmarkArtifactData {
+    fixture: Option<String>,
+    summary: BenchmarkArtifactSummary,
+}
+
+#[derive(serde::Deserialize)]
+struct BenchmarkArtifactSummary {
+    workload: String,
+    full: BenchmarkArtifactPhaseSummary,
+    incremental: BenchmarkArtifactPhaseSummary,
+    comparison: BenchmarkArtifactComparisonSummary,
+    runs: Vec<BenchmarkArtifactRunRecord>,
+}
+
+#[derive(serde::Deserialize)]
+struct BenchmarkArtifactPhaseSummary {
+    avg_ms: u128,
+    median_ms: u128,
+    min_ms: u128,
+    max_ms: u128,
+    files_processed_avg: usize,
+    changed_files_avg: usize,
+    affected_files_avg: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct BenchmarkArtifactComparisonSummary {
+    saved_ms: i128,
+}
+
+#[derive(serde::Deserialize)]
+struct BenchmarkArtifactRunRecord {
+    query_checks: Vec<BenchmarkArtifactQueryCheck>,
+}
+
+#[derive(serde::Deserialize)]
+struct BenchmarkArtifactQueryCheck {
+    passed: bool,
+}
+
+fn compare_benchmark_artifacts(
+    compare_paths: &[PathBuf],
+    current_fixture: Option<&str>,
+    current: &scope_core::stub::BenchmarkSummary,
+) -> Result<scope_core::stub::BenchmarkArtifactComparison, scope_core::ScopeError> {
+    let last_path = compare_paths
+        .last()
+        .ok_or_else(|| scope_core::ScopeError::InvalidInput("compare path list cannot be empty".to_string()))?;
+    let contents = fs::read_to_string(last_path)
+        .map_err(|error| scope_core::ScopeError::io(last_path, error))?;
+    let baseline: BenchmarkArtifactEnvelope = serde_json::from_str(&contents)
+        .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
+
+    let baseline_fixture = baseline.data.fixture.as_deref();
+    let summary = baseline.data.summary;
+    let baseline_total_checks = summary
+        .runs
+        .iter()
+        .flat_map(|run| run.query_checks.iter())
+        .count() as i128;
+    let baseline_passed_checks = summary
+        .runs
+        .iter()
+        .flat_map(|run| run.query_checks.iter())
+        .filter(|check| check.passed)
+        .count() as i128;
+    let current_total_checks = current
+        .runs
+        .iter()
+        .flat_map(|run| run.query_checks.iter())
+        .count() as i128;
+    let current_passed_checks = current
+        .runs
+        .iter()
+        .flat_map(|run| run.query_checks.iter())
+        .filter(|check| check.passed)
+        .count() as i128;
+
+    Ok(scope_core::stub::BenchmarkArtifactComparison {
+        baseline_path: format!("{} artifacts (latest `{}`)", compare_paths.len(), last_path.display()),
+        baseline_workload: summary.workload.to_string(),
+        current_workload: current.workload.to_string(),
+        fixture_compatible: baseline_fixture == current_fixture,
+        full_avg_ms_delta: current.full.avg_ms as i128 - summary.full.avg_ms as i128,
+        full_median_ms_delta: current.full.median_ms as i128 - summary.full.median_ms as i128,
+        full_min_ms_delta: current.full.min_ms as i128 - summary.full.min_ms as i128,
+        full_max_ms_delta: current.full.max_ms as i128 - summary.full.max_ms as i128,
+        incremental_avg_ms_delta: current.incremental.avg_ms as i128 - summary.incremental.avg_ms as i128,
+        incremental_median_ms_delta: current.incremental.median_ms as i128 - summary.incremental.median_ms as i128,
+        incremental_min_ms_delta: current.incremental.min_ms as i128 - summary.incremental.min_ms as i128,
+        incremental_max_ms_delta: current.incremental.max_ms as i128 - summary.incremental.max_ms as i128,
+        files_processed_delta: current.incremental.files_processed_avg as i128 - summary.incremental.files_processed_avg as i128,
+        changed_files_delta: current.incremental.changed_files_avg as i128 - summary.incremental.changed_files_avg as i128,
+        affected_files_delta: current.incremental.affected_files_avg as i128 - summary.incremental.affected_files_avg as i128,
+        saved_ms_delta: current.comparison.saved_ms - summary.comparison.saved_ms,
+        total_query_checks_delta: current_total_checks - baseline_total_checks,
+        passed_query_checks_delta: current_passed_checks - baseline_passed_checks,
+        query_checks_delta: current_passed_checks - baseline_passed_checks,
     })
 }
 
@@ -1591,7 +1979,7 @@ fn summarize_phase(
     let files_processed_avg = average_usize(
         &runs
             .iter()
-            .map(|run| stats(run).affected_files)
+            .map(|run| stats(run).indexed_files)
             .collect::<Vec<_>>(),
     );
     let changed_files_avg = average_usize(
@@ -1615,6 +2003,7 @@ fn summarize_phase(
 
     scope_core::stub::BenchmarkPhaseSummary {
         avg_ms: average_duration_ms(&durations),
+        median_ms: median_duration_ms(&durations),
         min_ms: durations.iter().copied().min().unwrap_or(0),
         max_ms: durations.iter().copied().max().unwrap_or(0),
         files_processed_avg,
@@ -1629,6 +2018,20 @@ fn average_duration_ms(values: &[u128]) -> u128 {
         return 0;
     }
     values.iter().sum::<u128>() / values.len() as u128
+}
+
+fn median_duration_ms(values: &[u128]) -> u128 {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[middle - 1] + sorted[middle]) / 2
+    } else {
+        sorted[middle]
+    }
 }
 
 fn average_usize(values: &[usize]) -> usize {
@@ -2878,7 +3281,13 @@ mod tests {
     #[test]
     fn benchmark_helper_reports_real_full_and_incremental_timings() {
         let repo = repo_root();
-        let summary = run_benchmark(&repo, Some("rust_small"), 1).unwrap();
+        let summary = run_benchmark(
+            &repo,
+            Some("rust_small"),
+            1,
+            crate::cli::BenchmarkWorkloadArg::IndexIncremental,
+        )
+        .unwrap();
 
         assert!(summary.indexed_files > 0);
         assert_eq!(

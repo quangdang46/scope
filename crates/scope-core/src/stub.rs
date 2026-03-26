@@ -28,6 +28,7 @@ pub struct BenchmarkMutationSummary {
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct BenchmarkPhaseSummary {
     pub avg_ms: u128,
+    pub median_ms: u128,
     pub min_ms: u128,
     pub max_ms: u128,
     pub files_processed_avg: usize,
@@ -37,18 +38,73 @@ pub struct BenchmarkPhaseSummary {
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct BenchmarkPhaseRecord {
+    pub duration_ms: u128,
+    pub files_processed: usize,
+    pub changed_files: usize,
+    pub deleted_files: usize,
+    pub affected_files: usize,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct BenchmarkQueryCheck {
+    pub phase: &'static str,
+    pub name: &'static str,
+    pub expr: &'static str,
+    pub duration_ms: u128,
+    pub passed: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct BenchmarkRunRecord {
+    pub iteration: u32,
+    pub indexed_files: usize,
+    pub mutation: BenchmarkMutationSummary,
+    pub full: BenchmarkPhaseRecord,
+    pub incremental: BenchmarkPhaseRecord,
+    pub query_checks: Vec<BenchmarkQueryCheck>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct BenchmarkComparisonSummary {
     pub saved_ms: i128,
     pub incremental_pct_of_full: u32,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct BenchmarkArtifactComparison {
+    pub baseline_path: String,
+    pub baseline_workload: String,
+    pub current_workload: String,
+    pub fixture_compatible: bool,
+    pub full_avg_ms_delta: i128,
+    pub full_median_ms_delta: i128,
+    pub full_min_ms_delta: i128,
+    pub full_max_ms_delta: i128,
+    pub incremental_avg_ms_delta: i128,
+    pub incremental_median_ms_delta: i128,
+    pub incremental_min_ms_delta: i128,
+    pub incremental_max_ms_delta: i128,
+    pub files_processed_delta: i128,
+    pub changed_files_delta: i128,
+    pub affected_files_delta: i128,
+    pub saved_ms_delta: i128,
+    pub total_query_checks_delta: i128,
+    pub passed_query_checks_delta: i128,
+    pub query_checks_delta: i128,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct BenchmarkSummary {
+    pub workload: &'static str,
     pub indexed_files: usize,
     pub mutation: BenchmarkMutationSummary,
     pub full: BenchmarkPhaseSummary,
     pub incremental: BenchmarkPhaseSummary,
     pub comparison: BenchmarkComparisonSummary,
+    pub runs: Vec<BenchmarkRunRecord>,
+    pub artifact_comparison: Option<BenchmarkArtifactComparison>,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +209,7 @@ pub struct DoctorCheck {
 pub struct BenchmarkData {
     pub fixture: Option<String>,
     pub iterations: Option<u32>,
+    pub workload: &'static str,
     pub summary: BenchmarkSummary,
 }
 
@@ -683,6 +740,7 @@ pub fn benchmark(
         BenchmarkData {
             fixture,
             iterations,
+            workload: summary.workload,
             summary,
         },
     )
@@ -705,6 +763,7 @@ pub fn render_markdown_benchmark_report(
     let _ = writeln!(output, "Command: `{command}`");
     let _ = writeln!(output, "Fixture: `{}`", fixture.unwrap_or("repo_root"));
     let _ = writeln!(output, "Iterations: {iterations}");
+    let _ = writeln!(output, "Workload: `{}`", summary.workload);
     let _ = writeln!(output);
     let _ = writeln!(output, "## Current performance state");
     let _ = writeln!(output);
@@ -722,8 +781,8 @@ pub fn render_markdown_benchmark_report(
     );
     let _ = writeln!(output);
     let _ = writeln!(output, "### Phase summary");
-    let _ = writeln!(output, "| Phase | Avg ms | Min ms | Max ms | Files processed | Changed files | Deleted files | Affected files |");
-    let _ = writeln!(output, "|-------|--------|--------|--------|-----------------|---------------|---------------|----------------|");
+    let _ = writeln!(output, "| Phase | Avg ms | Median ms | Min ms | Max ms | Files processed | Changed files | Deleted files | Affected files |");
+    let _ = writeln!(output, "|-------|--------|-----------|--------|--------|-----------------|---------------|---------------|----------------|");
     markdown_benchmark_phase_row(&mut output, "Full re-index", &summary.full);
     markdown_benchmark_phase_row(&mut output, "Incremental re-index", &summary.incremental);
     let _ = writeln!(output);
@@ -740,7 +799,66 @@ pub fn render_markdown_benchmark_report(
         summary.comparison.incremental_pct_of_full
     );
     let _ = writeln!(output, "- The benchmark uses an isolated repo copy and appends a small comment mutation before re-indexing.");
+    let _ = writeln!(output, "- Raw per-run records are available in the JSON benchmark output for later comparison.");
+    if summary.runs.iter().any(|run| !run.query_checks.is_empty()) {
+        let total_checks = summary
+            .runs
+            .iter()
+            .flat_map(|run| run.query_checks.iter())
+            .count();
+        let passed_checks = summary
+            .runs
+            .iter()
+            .flat_map(|run| run.query_checks.iter())
+            .filter(|check| check.passed)
+            .count();
+        let _ = writeln!(output, "- Query smoke checks passed {passed_checks}/{total_checks} recorded invariants.");
+    }
     let _ = writeln!(output);
+    if summary.runs.iter().any(|run| !run.query_checks.is_empty()) {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Query smoke checks");
+        let _ = writeln!(output);
+        let _ = writeln!(output, "| Phase | Query | Passed | Duration ms | Detail |");
+        let _ = writeln!(output, "|-------|-------|--------|-------------|--------|");
+        for run in &summary.runs {
+            for check in &run.query_checks {
+                let status = if check.passed { "yes" } else { "no" };
+                let _ = writeln!(
+                    output,
+                    "| {} | {} | {} | {} | {} |",
+                    check.phase,
+                    check.name,
+                    status,
+                    check.duration_ms,
+                    check.detail.replace('|', "\\|")
+                );
+            }
+        }
+    }
+    if let Some(compare) = &summary.artifact_comparison {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Comparison vs baseline");
+        let _ = writeln!(output);
+        let _ = writeln!(output, "| Metric | Value |");
+        let _ = writeln!(output, "|--------|-------|");
+        let _ = writeln!(output, "| Baseline | `{}` |", compare.baseline_path);
+        let _ = writeln!(output, "| Workload | `{}` → `{}` |", compare.baseline_workload, compare.current_workload);
+        let _ = writeln!(output, "| Fixture compatible | {} |", compare.fixture_compatible);
+        let _ = writeln!(output, "| Full avg delta | {} ms |", compare.full_avg_ms_delta);
+        let _ = writeln!(output, "| Full median delta | {} ms |", compare.full_median_ms_delta);
+        let _ = writeln!(output, "| Full min/max delta | {} / {} ms |", compare.full_min_ms_delta, compare.full_max_ms_delta);
+        let _ = writeln!(output, "| Incremental avg delta | {} ms |", compare.incremental_avg_ms_delta);
+        let _ = writeln!(output, "| Incremental median delta | {} ms |", compare.incremental_median_ms_delta);
+        let _ = writeln!(output, "| Incremental min/max delta | {} / {} ms |", compare.incremental_min_ms_delta, compare.incremental_max_ms_delta);
+        let _ = writeln!(output, "| Files processed delta | {} |", compare.files_processed_delta);
+        let _ = writeln!(output, "| Changed files delta | {} |", compare.changed_files_delta);
+        let _ = writeln!(output, "| Affected files delta | {} |", compare.affected_files_delta);
+        let _ = writeln!(output, "| Saved-ms delta | {} |", compare.saved_ms_delta);
+        let _ = writeln!(output, "| Total query checks delta | {} |", compare.total_query_checks_delta);
+        let _ = writeln!(output, "| Passed query checks delta | {} |", compare.passed_query_checks_delta);
+        let _ = writeln!(output, "| Query-check pass delta | {} |", compare.query_checks_delta);
+    }
     let _ = writeln!(output, "## Update instructions");
     let _ = writeln!(output);
     let _ = writeln!(output, "1. Re-run `{command}`.");
@@ -749,6 +867,7 @@ pub fn render_markdown_benchmark_report(
         "2. Review the diff in `bench-results/benchmark.md`."
     );
     let _ = writeln!(output, "3. Keep the generated `bench-results/bench-YYYY-MM-DD-HH-MM-SS.md` snapshot if you want a dated artifact.");
+    let _ = writeln!(output, "4. Use `bench-results/benchmark.json` and timestamped JSON snapshots for machine-readable comparisons.");
     output
 }
 
@@ -853,13 +972,16 @@ pub fn render_markdown_report(result: &HealthReportResult) -> String {
             "{:.1}% resolved ({:.1}% unresolved)",
             result.metrics.imports_resolved_pct, result.metrics.imports_unresolved_pct
         ),
-        None,
+        result
+            .compare
+            .as_ref()
+            .map(|compare| compare.unresolved_imports_delta),
     );
     markdown_metric_row(
         &mut output,
         "Parse errors",
         result.metrics.parse_errors.to_string(),
-        None,
+        result.compare.as_ref().map(|compare| compare.parse_errors_delta),
     );
     markdown_metric_row(
         &mut output,
@@ -889,7 +1011,7 @@ pub fn render_markdown_report(result: &HealthReportResult) -> String {
         &mut output,
         "Unused exports",
         result.metrics.unused_exports.to_string(),
-        None,
+        result.compare.as_ref().map(|compare| compare.unused_exports_delta),
     );
     markdown_metric_row(
         &mut output,
@@ -904,13 +1026,16 @@ pub fn render_markdown_report(result: &HealthReportResult) -> String {
         &mut output,
         "Max file fan-in",
         result.metrics.max_file_fan_in.to_string(),
-        None,
+        result.compare.as_ref().map(|compare| compare.max_file_fan_in_delta),
     );
     markdown_metric_row(
         &mut output,
         "Average instability",
         format!("{:.2}", result.metrics.avg_instability),
-        None,
+        result
+            .compare
+            .as_ref()
+            .map(|compare| compare.avg_instability_delta.round() as isize),
     );
 
     if let Some(compare) = &result.compare {
@@ -1056,8 +1181,9 @@ fn markdown_metric_row(output: &mut String, metric: &str, value: String, delta: 
 fn markdown_benchmark_phase_row(output: &mut String, phase: &str, summary: &BenchmarkPhaseSummary) {
     let _ = writeln!(
         output,
-        "| {phase} | {} | {} | {} | {} | {} | {} | {} |",
+        "| {phase} | {} | {} | {} | {} | {} | {} | {} | {} |",
         summary.avg_ms,
+        summary.median_ms,
         summary.min_ms,
         summary.max_ms,
         summary.files_processed_avg,
@@ -1090,6 +1216,16 @@ pub fn scaffolded_report(compare: Option<String>) -> JsonEnvelope<ReportData> {
             unreachable_files_delta: 0,
             baseline_public_surface_removed: 0,
             public_surface_removed_delta: 0,
+            baseline_parse_errors: 0,
+            parse_errors_delta: 0,
+            baseline_unresolved_imports: 0,
+            unresolved_imports_delta: 0,
+            baseline_unused_exports: 0,
+            unused_exports_delta: 0,
+            baseline_max_file_fan_in: 0,
+            max_file_fan_in_delta: 0,
+            baseline_avg_instability: 0.0,
+            avg_instability_delta: 0.0,
         }),
         metrics: HealthReportMetrics {
             total_files: 0,
@@ -1411,6 +1547,16 @@ mod tests {
                 unreachable_files_delta: -2,
                 baseline_public_surface_removed: 1,
                 public_surface_removed_delta: -1,
+                baseline_parse_errors: 1,
+                parse_errors_delta: -1,
+                baseline_unresolved_imports: 2,
+                unresolved_imports_delta: -1,
+                baseline_unused_exports: 3,
+                unused_exports_delta: -1,
+                baseline_max_file_fan_in: 4,
+                max_file_fan_in_delta: 1,
+                baseline_avg_instability: 0.40,
+                avg_instability_delta: 0.05,
             }),
             metrics: HealthReportMetrics {
                 total_files: 5,
@@ -1496,6 +1642,7 @@ mod tests {
             Some("rust_small"),
             3,
             &BenchmarkSummary {
+                workload: "index-incremental",
                 indexed_files: 5,
                 mutation: BenchmarkMutationSummary {
                     target_file: RepoPath::from("src/parser.rs"),
@@ -1503,6 +1650,7 @@ mod tests {
                 },
                 full: BenchmarkPhaseSummary {
                     avg_ms: 42,
+                    median_ms: 42,
                     min_ms: 40,
                     max_ms: 45,
                     files_processed_avg: 5,
@@ -1512,6 +1660,7 @@ mod tests {
                 },
                 incremental: BenchmarkPhaseSummary {
                     avg_ms: 7,
+                    median_ms: 7,
                     min_ms: 6,
                     max_ms: 9,
                     files_processed_avg: 2,
@@ -1523,20 +1672,117 @@ mod tests {
                     saved_ms: 35,
                     incremental_pct_of_full: 16,
                 },
+                runs: vec![BenchmarkRunRecord {
+                    iteration: 0,
+                    indexed_files: 5,
+                    mutation: BenchmarkMutationSummary {
+                        target_file: RepoPath::from("src/parser.rs"),
+                        change_kind: "append_comment",
+                    },
+                    full: BenchmarkPhaseRecord {
+                        duration_ms: 42,
+                        files_processed: 5,
+                        changed_files: 5,
+                        deleted_files: 0,
+                        affected_files: 5,
+                    },
+                    incremental: BenchmarkPhaseRecord {
+                        duration_ms: 7,
+                        files_processed: 2,
+                        changed_files: 1,
+                        deleted_files: 0,
+                        affected_files: 2,
+                    },
+                    query_checks: vec![],
+                }],
+                artifact_comparison: None,
             },
             "2026-03-17 06:00:00",
             "abc1234",
-            "scope benchmark --fixture rust_small --iterations 3 --write-report",
+            "scope benchmark --fixture rust_small --iterations 3 --workload index-incremental --write-report --write-json",
         );
         assert!(markdown.contains("# scope benchmark results"));
         assert!(markdown.contains("Fixture: `rust_small`"));
         assert!(markdown.contains("Iterations: 3"));
+        assert!(markdown.contains("Workload: `index-incremental`"));
         assert!(markdown.contains("Mutation target: `src/parser.rs`"));
-        assert!(markdown.contains("| Full re-index | 42 | 40 | 45 | 5 | 5 | 0 | 5 |"));
-        assert!(markdown.contains("| Incremental re-index | 7 | 6 | 9 | 2 | 1 | 0 | 2 |"));
+        assert!(markdown.contains("| Full re-index | 42 | 42 | 40 | 45 | 5 | 5 | 0 | 5 |"));
+        assert!(markdown.contains("| Incremental re-index | 7 | 7 | 6 | 9 | 2 | 1 | 0 | 2 |"));
         assert!(markdown.contains("Incremental indexing saved 35 ms"));
         assert!(markdown.contains("bench-results/benchmark.md"));
         assert!(markdown.contains("bench-results/bench-YYYY-MM-DD-HH-MM-SS.md"));
+        assert!(markdown.contains("bench-results/benchmark.json"));
+        assert!(!markdown.contains("## Query smoke checks"));
+    }
+
+    #[test]
+    fn render_markdown_benchmark_report_includes_compare_table() {
+        let markdown = render_markdown_benchmark_report(
+            Some("rust_small"),
+            1,
+            &BenchmarkSummary {
+                workload: "query-smoke",
+                indexed_files: 5,
+                mutation: BenchmarkMutationSummary {
+                    target_file: RepoPath::from("src/parser.rs"),
+                    change_kind: "append_comment",
+                },
+                full: BenchmarkPhaseSummary {
+                    avg_ms: 10,
+                    median_ms: 10,
+                    min_ms: 9,
+                    max_ms: 11,
+                    files_processed_avg: 5,
+                    changed_files_avg: 5,
+                    deleted_files_avg: 0,
+                    affected_files_avg: 5,
+                },
+                incremental: BenchmarkPhaseSummary {
+                    avg_ms: 4,
+                    median_ms: 4,
+                    min_ms: 3,
+                    max_ms: 5,
+                    files_processed_avg: 5,
+                    changed_files_avg: 1,
+                    deleted_files_avg: 0,
+                    affected_files_avg: 3,
+                },
+                comparison: BenchmarkComparisonSummary {
+                    saved_ms: 6,
+                    incremental_pct_of_full: 40,
+                },
+                runs: vec![],
+                artifact_comparison: Some(BenchmarkArtifactComparison {
+                    baseline_path: "bench-results/benchmark.json".to_string(),
+                    baseline_workload: "query-smoke".to_string(),
+                    current_workload: "query-smoke".to_string(),
+                    fixture_compatible: true,
+                    full_avg_ms_delta: -1,
+                    full_median_ms_delta: -1,
+                    full_min_ms_delta: 0,
+                    full_max_ms_delta: 0,
+                    incremental_avg_ms_delta: -1,
+                    incremental_median_ms_delta: -1,
+                    incremental_min_ms_delta: 0,
+                    incremental_max_ms_delta: 0,
+                    files_processed_delta: 0,
+                    changed_files_delta: 0,
+                    affected_files_delta: 0,
+                    saved_ms_delta: 1,
+                    total_query_checks_delta: 0,
+                    passed_query_checks_delta: 0,
+                    query_checks_delta: 0,
+                }),
+            },
+            "2026-03-17 06:00:00",
+            "abc1234",
+            "scope benchmark --fixture rust_small --iterations 1 --workload query-smoke --compare bench-results/benchmark.json --write-report",
+        );
+        assert!(markdown.contains("## Comparison vs baseline"));
+        assert!(markdown.contains("| Metric | Value |"));
+        assert!(markdown.contains("| Baseline | `bench-results/benchmark.json` |"));
+        assert!(markdown.contains("| Workload | `query-smoke` → `query-smoke` |"));
+        assert!(markdown.contains("| Full avg delta | -1 ms |"));
     }
 
     #[test]

@@ -1760,7 +1760,10 @@ fn benchmark_command_returns_live_json_envelope_for_fixture_repo() {
     assert_eq!(value["status"], "ok");
     assert_eq!(value["data"]["fixture"], "rust_small");
     assert_eq!(value["data"]["iterations"], 1);
+    assert_eq!(value["data"]["workload"], "index-incremental");
+    assert_eq!(value["data"]["summary"]["workload"], "index-incremental");
     assert_eq!(value["data"]["summary"]["indexed_files"], 5);
+    assert!(value["data"]["summary"]["runs"].as_array().is_some_and(|runs| runs.len() == 1));
     assert!(value["data"]["summary"]["full"]["avg_ms"].as_f64().unwrap() >= 0.0);
     assert!(
         value["data"]["summary"]["incremental"]["avg_ms"]
@@ -1768,6 +1771,118 @@ fn benchmark_command_returns_live_json_envelope_for_fixture_repo() {
             .unwrap()
             >= 0.0
     );
+    assert!(
+        value["data"]["summary"]["full"]["median_ms"]
+            .as_f64()
+            .unwrap()
+            >= 0.0
+    );
+}
+
+#[test]
+fn benchmark_command_returns_query_smoke_results_for_fixture_repo() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .current_dir(workspace_root())
+        .args([
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--workload",
+            "query-smoke",
+        ])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["data"]["workload"], "query-smoke");
+    let runs = value["data"]["summary"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    let checks = runs[0]["query_checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 6);
+    assert!(checks.iter().all(|check| check["passed"] == true));
+}
+
+#[test]
+fn benchmark_command_returns_query_smoke_results_for_ts_fixture_repo() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .current_dir(workspace_root())
+        .args([
+            "benchmark",
+            "--fixture",
+            "ts_small",
+            "--iterations",
+            "1",
+            "--workload",
+            "query-smoke",
+        ])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["data"]["workload"], "query-smoke");
+    let runs = value["data"]["summary"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    let checks = runs[0]["query_checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 6);
+    assert!(checks.iter().all(|check| check["passed"] == true));
+}
+
+#[test]
+fn benchmark_command_returns_query_smoke_results_for_extra_fixtures() {
+    for fixture in ["mixed_repo", "ts_with_paths", "dynamic_limits"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+            .current_dir(workspace_root())
+            .args([
+                "benchmark",
+                "--fixture",
+                fixture,
+                "--iterations",
+                "1",
+                "--workload",
+                "query-smoke",
+            ])
+            .output()
+            .expect("scope binary should run");
+
+        assert_eq!(output.status.code(), Some(0), "fixture {fixture}");
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+        let runs = value["data"]["summary"]["runs"].as_array().unwrap();
+        let checks = runs[0]["query_checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6, "fixture {fixture}");
+        assert!(checks.iter().all(|check| check["passed"] == true), "fixture {fixture}");
+    }
+}
+
+#[test]
+fn benchmark_command_returns_task_matrix_results() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scope"))
+        .current_dir(workspace_root())
+        .args([
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--workload",
+            "task-matrix",
+        ])
+        .output()
+        .expect("scope binary should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["data"]["workload"], "task-matrix");
+    let runs = value["data"]["summary"]["runs"].as_array().unwrap();
+    let checks = runs[0]["query_checks"].as_array().unwrap();
+    assert!(checks.len() >= 8);
 }
 
 #[test]
@@ -1798,7 +1913,9 @@ fn benchmark_command_writes_latest_and_snapshot_reports() {
     assert!(latest_contents.contains("# scope benchmark results"));
     assert!(latest_contents.contains("Fixture: `rust_small`"));
     assert!(latest_contents.contains("Iterations: 1"));
+    assert!(latest_contents.contains("Workload: `index-incremental`"));
     assert!(latest_contents.contains("Mutation target: `src/parser.rs`"));
+    assert!(latest_contents.contains("Median ms"));
     assert!(latest_contents.contains("bench-results/benchmark.md"));
 
     let snapshot_count = fs::read_dir(&report_dir)
@@ -1812,6 +1929,159 @@ fn benchmark_command_writes_latest_and_snapshot_reports() {
         })
         .count();
     assert_eq!(snapshot_count, 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+#[ignore = "flaky on macOS"]
+fn benchmark_command_writes_latest_and_snapshot_json_reports() {
+    let repo = prepare_fixture_copy("rust_small");
+    let report_dir = repo.join("bench-results");
+    let output = run_scope(
+        &repo,
+        &[
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--write-json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let latest = report_dir.join("benchmark.json");
+    assert!(latest.exists());
+    let latest_contents = fs::read_to_string(&latest).expect("latest json report should exist");
+    let value: serde_json::Value =
+        serde_json::from_str(&latest_contents).expect("latest json should parse");
+    assert_eq!(value["command"], "benchmark");
+    assert_eq!(value["data"]["workload"], "index-incremental");
+    assert!(value["data"]["summary"]["runs"].as_array().is_some_and(|runs| runs.len() == 1));
+
+    let snapshot_count = fs::read_dir(&report_dir)
+        .expect("report dir should exist")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("bench-") && name.ends_with(".json"))
+        })
+        .count();
+    assert_eq!(snapshot_count, 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+#[ignore = "flaky on macOS"]
+fn benchmark_command_compares_against_saved_json_artifact() {
+    let repo = prepare_fixture_copy("rust_small");
+    let report_dir = repo.join("bench-results");
+
+    let baseline = run_scope(
+        &repo,
+        &[
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--write-json",
+        ],
+    );
+    assert_eq!(baseline.status.code(), Some(0));
+
+    let compare_path = report_dir.join("benchmark.json");
+    let compare_arg = compare_path.to_string_lossy().to_string();
+    let output = run_scope(
+        &repo,
+        &[
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--compare",
+            &compare_arg,
+            "--write-report",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    let baseline_path = value["data"]["summary"]["artifact_comparison"]["baseline_path"]
+        .as_str()
+        .unwrap();
+    assert!(baseline_path.contains(&compare_arg));
+    let markdown = fs::read_to_string(report_dir.join("benchmark.md"))
+        .expect("benchmark markdown should exist");
+    assert!(markdown.contains("## Comparison vs baseline"));
+    assert!(markdown.contains("| Metric | Value |"));
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+#[ignore = "flaky on macOS"]
+fn benchmark_command_compares_against_multiple_saved_json_artifacts() {
+    let repo = prepare_fixture_copy("rust_small");
+    let report_dir = repo.join("bench-results");
+
+    let baseline1 = run_scope(
+        &repo,
+        &[
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--write-json",
+        ],
+    );
+    assert_eq!(baseline1.status.code(), Some(0));
+    let compare1 = report_dir.join("benchmark.json").to_string_lossy().to_string();
+
+    let baseline2 = run_scope(
+        &repo,
+        &[
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--workload",
+            "query-smoke",
+            "--write-json",
+        ],
+    );
+    assert_eq!(baseline2.status.code(), Some(0));
+    let compare2 = report_dir.join("benchmark.json").to_string_lossy().to_string();
+
+    let output = run_scope(
+        &repo,
+        &[
+            "benchmark",
+            "--fixture",
+            "rust_small",
+            "--iterations",
+            "1",
+            "--compare",
+            &compare1,
+            "--compare",
+            &compare2,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    let baseline_path = value["data"]["summary"]["artifact_comparison"]["baseline_path"]
+        .as_str()
+        .unwrap();
+    assert!(baseline_path.contains("2 artifacts"));
 
     fs::remove_dir_all(repo).unwrap();
 }

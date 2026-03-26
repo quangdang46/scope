@@ -870,6 +870,16 @@ pub struct HealthReportComparison {
     pub unreachable_files_delta: isize,
     pub baseline_public_surface_removed: usize,
     pub public_surface_removed_delta: isize,
+    pub baseline_parse_errors: usize,
+    pub parse_errors_delta: isize,
+    pub baseline_unresolved_imports: usize,
+    pub unresolved_imports_delta: isize,
+    pub baseline_unused_exports: usize,
+    pub unused_exports_delta: isize,
+    pub baseline_max_file_fan_in: usize,
+    pub max_file_fan_in_delta: isize,
+    pub baseline_avg_instability: f64,
+    pub avg_instability_delta: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

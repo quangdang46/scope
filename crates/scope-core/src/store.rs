@@ -1191,12 +1191,17 @@ impl Store {
             let baseline_cycles = baseline_cycles(&baseline.graph);
             let baseline_unreachable_files = baseline_unreachable_files(&baseline.graph, config)?;
             let baseline_public_surface_removed = 0usize;
+            let baseline_parse_errors = 0usize;
+            let baseline_unresolved_imports = baseline_unresolved_imports(&baseline.graph);
+            let baseline_unused_exports = baseline_unused_exports(&baseline.graph);
+            let baseline_max_file_fan_in = max_file_fan_in(snapshot_file_edges(&baseline.graph));
+            let baseline_avg_instability = baseline_avg_instability(&baseline.graph);
             let baseline_health_score = compute_health_score(
-                0,
+                baseline_parse_errors,
                 baseline_layer_violations,
                 baseline_cycles,
                 baseline_unreachable_files,
-                baseline_unused_exports(&baseline.graph),
+                baseline_unused_exports,
                 baseline_imports_unresolved_pct(&baseline.graph),
                 baseline_public_surface_removed,
             );
@@ -1215,6 +1220,18 @@ impl Store {
                 baseline_public_surface_removed,
                 public_surface_removed_delta: metrics.public_surface_removed as isize
                     - baseline_public_surface_removed as isize,
+                baseline_parse_errors,
+                parse_errors_delta: metrics.parse_errors as isize - baseline_parse_errors as isize,
+                baseline_unresolved_imports,
+                unresolved_imports_delta: metrics.unresolved_imports as isize
+                    - baseline_unresolved_imports as isize,
+                baseline_unused_exports,
+                unused_exports_delta: metrics.unused_exports as isize - baseline_unused_exports as isize,
+                baseline_max_file_fan_in,
+                max_file_fan_in_delta: metrics.max_file_fan_in as isize
+                    - baseline_max_file_fan_in as isize,
+                baseline_avg_instability,
+                avg_instability_delta: metrics.avg_instability - baseline_avg_instability,
             })
         } else {
             None
@@ -6475,12 +6492,16 @@ fn report_recommendations(
     recommendations
 }
 
-fn baseline_imports_unresolved_pct(graph: &SnapshotGraph) -> f64 {
-    let unresolved = graph
+fn baseline_unresolved_imports(graph: &SnapshotGraph) -> usize {
+    graph
         .file_edges
         .iter()
         .filter(|edge| edge.kind == EdgeKind::Import && edge.certainty != Certainty::Exact)
-        .count();
+        .count()
+}
+
+fn baseline_imports_unresolved_pct(graph: &SnapshotGraph) -> f64 {
+    let unresolved = baseline_unresolved_imports(graph);
     let imports = graph
         .file_edges
         .iter()
@@ -6542,6 +6563,42 @@ fn baseline_unreachable_files(graph: &SnapshotGraph, config: &ArchConfig) -> Sco
         .iter()
         .filter(|file| !reachable.contains(*file))
         .count())
+}
+
+fn baseline_avg_instability(graph: &SnapshotGraph) -> f64 {
+    let files = graph
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let edges = snapshot_file_edges(graph);
+    let mut fan_in = HashMap::new();
+    let mut fan_out = HashMap::new();
+    for file in &files {
+        fan_in.insert(file.clone(), 0usize);
+        fan_out.insert(file.clone(), 0usize);
+    }
+    for edge in &edges {
+        *fan_out.entry(edge.from_file.clone()).or_insert(0) += 1;
+        *fan_in.entry(edge.to_file.clone()).or_insert(0) += 1;
+    }
+    let instabilities = files
+        .iter()
+        .map(|file| {
+            let incoming = fan_in.get(file).copied().unwrap_or(0) as f64;
+            let outgoing = fan_out.get(file).copied().unwrap_or(0) as f64;
+            if (incoming + outgoing).abs() < f64::EPSILON {
+                0.0
+            } else {
+                outgoing / (incoming + outgoing)
+            }
+        })
+        .collect::<Vec<_>>();
+    if instabilities.is_empty() {
+        0.0
+    } else {
+        instabilities.iter().sum::<f64>() / instabilities.len() as f64
+    }
 }
 
 fn baseline_unused_exports(graph: &SnapshotGraph) -> usize {

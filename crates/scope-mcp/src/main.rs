@@ -2100,12 +2100,44 @@ struct IndexRunStats {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkIterationResult {
+    iteration: u32,
     indexed_files: usize,
     mutation_target: RepoPath,
     full_ms: u128,
     incremental_ms: u128,
     full_stats: IndexRunStats,
     incremental_stats: IndexRunStats,
+}
+
+fn benchmark_workload_name() -> &'static str {
+    "index-incremental"
+}
+
+fn benchmark_phase_record(
+    duration_ms: u128,
+    stats: &IndexRunStats,
+) -> scope_core::stub::BenchmarkPhaseRecord {
+    scope_core::stub::BenchmarkPhaseRecord {
+        duration_ms,
+        files_processed: stats.indexed_files,
+        changed_files: stats.changed_files,
+        deleted_files: stats.deleted_files,
+        affected_files: stats.affected_files,
+    }
+}
+
+fn median_duration_ms(values: &[u128]) -> u128 {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[middle - 1] + sorted[middle]) / 2
+    } else {
+        sorted[middle]
+    }
 }
 
 fn index_repo(repo_root: &Path, store: &Store) -> Result<IndexRunStats, scope_core::ScopeError> {
@@ -2216,7 +2248,7 @@ fn run_benchmark(
     for iteration in 0..iterations {
         let benchmark_root =
             prepare_benchmark_copy(&source_root, &format!("benchmark-{iteration}"))?;
-        let summary = benchmark_iteration(&benchmark_root, fixture)?;
+        let summary = benchmark_iteration(&benchmark_root, fixture, iteration)?;
         runs.push(summary);
         fs::remove_dir_all(&benchmark_root)
             .map_err(|error| scope_core::ScopeError::io(&benchmark_root, error))?;
@@ -2246,17 +2278,34 @@ fn run_benchmark(
     };
 
     Ok(scope_core::stub::BenchmarkSummary {
+        workload: benchmark_workload_name(),
         indexed_files,
         mutation,
         full,
         incremental,
         comparison,
+        runs: runs
+            .iter()
+            .map(|run| scope_core::stub::BenchmarkRunRecord {
+                iteration: run.iteration,
+                indexed_files: run.indexed_files,
+                mutation: scope_core::stub::BenchmarkMutationSummary {
+                    target_file: run.mutation_target.clone(),
+                    change_kind: "append_comment",
+                },
+                full: benchmark_phase_record(run.full_ms, &run.full_stats),
+                incremental: benchmark_phase_record(run.incremental_ms, &run.incremental_stats),
+                query_checks: Vec::new(),
+            })
+            .collect(),
+        artifact_comparison: None,
     })
 }
 
 fn benchmark_iteration(
     benchmark_root: &Path,
     fixture: Option<&str>,
+    iteration: u32,
 ) -> Result<BenchmarkIterationResult, scope_core::ScopeError> {
     let db_path = benchmark_root.join(".scope/index.db");
     let store = scope_core::Store::open(&db_path)?;
@@ -2273,6 +2322,7 @@ fn benchmark_iteration(
     let incremental_ms = started.elapsed().as_millis();
 
     Ok(BenchmarkIterationResult {
+        iteration,
         indexed_files: full_stats.indexed_files,
         mutation_target: repo_relative_path(benchmark_root, &target),
         full_ms,
@@ -2287,12 +2337,13 @@ fn summarize_phase(
     duration: impl Fn(&BenchmarkIterationResult) -> u128,
     stats: impl Fn(&BenchmarkIterationResult) -> &IndexRunStats,
 ) -> scope_core::stub::BenchmarkPhaseSummary {
-    let min_ms = runs.iter().map(&duration).min().unwrap_or(0);
-    let max_ms = runs.iter().map(&duration).max().unwrap_or(0);
-    let avg_ms = if runs.is_empty() {
+    let durations: Vec<_> = runs.iter().map(&duration).collect();
+    let min_ms = durations.iter().copied().min().unwrap_or(0);
+    let max_ms = durations.iter().copied().max().unwrap_or(0);
+    let avg_ms = if durations.is_empty() {
         0
     } else {
-        runs.iter().map(&duration).sum::<u128>() / runs.len() as u128
+        durations.iter().sum::<u128>() / durations.len() as u128
     };
 
     let avg_indexed = if runs.is_empty() {
@@ -2330,6 +2381,7 @@ fn summarize_phase(
 
     scope_core::stub::BenchmarkPhaseSummary {
         avg_ms,
+        median_ms: median_duration_ms(&durations),
         min_ms,
         max_ms,
         files_processed_avg: avg_indexed,

@@ -523,13 +523,27 @@ pub struct DoctorArgs {
     pub fix: bool,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum BenchmarkWorkloadArg {
+    IndexIncremental,
+    QuerySmoke,
+    TaskMatrix,
+}
+
 #[derive(Debug, clap::Args)]
 pub struct BenchmarkArgs {
     #[arg(long)]
     pub fixture: Option<String>,
     #[arg(long)]
     pub iterations: Option<u32>,
+    #[arg(long, value_enum, default_value_t = BenchmarkWorkloadArg::IndexIncremental)]
+    pub workload: BenchmarkWorkloadArg,
+    #[arg(long)]
+    pub compare: Vec<PathBuf>,
     /// Write benchmark Markdown reports into bench-results/
     #[arg(long)]
     pub write_report: bool,
+    /// Write benchmark JSON reports into bench-results/
+    #[arg(long)]
+    pub write_json: bool,
 }

@@ -1060,6 +1060,7 @@ fn benchmark_output_reports_full_and_incremental_timing_summary() {
         Some("ts_small".to_string()),
         Some(3),
         stub::BenchmarkSummary {
+            workload: "index-incremental",
             indexed_files: stats.files,
             mutation: stub::BenchmarkMutationSummary {
                 target_file: RepoPath::from("src/auth/jwt.ts"),
@@ -1067,6 +1068,7 @@ fn benchmark_output_reports_full_and_incremental_timing_summary() {
             },
             full: stub::BenchmarkPhaseSummary {
                 avg_ms: 42,
+                median_ms: 42,
                 min_ms: 40,
                 max_ms: 45,
                 files_processed_avg: stats.files,
@@ -1076,6 +1078,7 @@ fn benchmark_output_reports_full_and_incremental_timing_summary() {
             },
             incremental: stub::BenchmarkPhaseSummary {
                 avg_ms: 7,
+                median_ms: 7,
                 min_ms: 6,
                 max_ms: 9,
                 files_processed_avg: 2,
@@ -1087,20 +1090,69 @@ fn benchmark_output_reports_full_and_incremental_timing_summary() {
                 saved_ms: 35,
                 incremental_pct_of_full: 16,
             },
+            runs: vec![stub::BenchmarkRunRecord {
+                iteration: 0,
+                indexed_files: stats.files,
+                mutation: stub::BenchmarkMutationSummary {
+                    target_file: RepoPath::from("src/auth/jwt.ts"),
+                    change_kind: "append_comment",
+                },
+                full: stub::BenchmarkPhaseRecord {
+                    duration_ms: 42,
+                    files_processed: stats.files,
+                    changed_files: stats.files,
+                    deleted_files: 0,
+                    affected_files: stats.files,
+                },
+                incremental: stub::BenchmarkPhaseRecord {
+                    duration_ms: 7,
+                    files_processed: 2,
+                    changed_files: 1,
+                    deleted_files: 0,
+                    affected_files: 2,
+                },
+                query_checks: vec![],
+            }],
+            artifact_comparison: Some(stub::BenchmarkArtifactComparison {
+                baseline_path: "bench-results/benchmark.json".to_string(),
+                baseline_workload: "index-incremental".to_string(),
+                current_workload: "index-incremental".to_string(),
+                fixture_compatible: true,
+                full_avg_ms_delta: 0,
+                full_median_ms_delta: 0,
+                full_min_ms_delta: 0,
+                full_max_ms_delta: 0,
+                incremental_avg_ms_delta: 0,
+                incremental_median_ms_delta: 0,
+                incremental_min_ms_delta: 0,
+                incremental_max_ms_delta: 0,
+                files_processed_delta: 0,
+                changed_files_delta: 0,
+                affected_files_delta: 0,
+                saved_ms_delta: 0,
+                total_query_checks_delta: 0,
+                passed_query_checks_delta: 0,
+                query_checks_delta: 0,
+            }),
         },
     );
 
     assert!(matches!(envelope.status, scope_core::JsonStatus::Ok));
     assert_eq!(envelope.data.fixture.as_deref(), Some("ts_small"));
     assert_eq!(envelope.data.iterations, Some(3));
+    assert_eq!(envelope.data.workload, "index-incremental");
     assert_eq!(envelope.data.summary.indexed_files, stats.files);
     assert_eq!(
         envelope.data.summary.mutation.target_file,
         RepoPath::from("src/auth/jwt.ts")
     );
     assert_eq!(envelope.data.summary.full.avg_ms, 42);
+    assert_eq!(envelope.data.summary.full.median_ms, 42);
     assert_eq!(envelope.data.summary.incremental.avg_ms, 7);
+    assert_eq!(envelope.data.summary.incremental.median_ms, 7);
     assert_eq!(envelope.data.summary.comparison.saved_ms, 35);
+    assert_eq!(envelope.data.summary.runs.len(), 1);
+    assert!(envelope.data.summary.artifact_comparison.is_some());
 
     drop(store);
     fs::remove_dir_all(repo).unwrap();
