@@ -1763,7 +1763,9 @@ fn benchmark_command_returns_live_json_envelope_for_fixture_repo() {
     assert_eq!(value["data"]["workload"], "index-incremental");
     assert_eq!(value["data"]["summary"]["workload"], "index-incremental");
     assert_eq!(value["data"]["summary"]["indexed_files"], 5);
-    assert!(value["data"]["summary"]["runs"].as_array().is_some_and(|runs| runs.len() == 1));
+    assert!(value["data"]["summary"]["runs"]
+        .as_array()
+        .is_some_and(|runs| runs.len() == 1));
     assert!(value["data"]["summary"]["full"]["avg_ms"].as_f64().unwrap() >= 0.0);
     assert!(
         value["data"]["summary"]["incremental"]["avg_ms"]
@@ -1856,7 +1858,10 @@ fn benchmark_command_returns_query_smoke_results_for_extra_fixtures() {
         let runs = value["data"]["summary"]["runs"].as_array().unwrap();
         let checks = runs[0]["query_checks"].as_array().unwrap();
         assert_eq!(checks.len(), 6, "fixture {fixture}");
-        assert!(checks.iter().all(|check| check["passed"] == true), "fixture {fixture}");
+        assert!(
+            checks.iter().all(|check| check["passed"] == true),
+            "fixture {fixture}"
+        );
     }
 }
 
@@ -1958,7 +1963,9 @@ fn benchmark_command_writes_latest_and_snapshot_json_reports() {
         serde_json::from_str(&latest_contents).expect("latest json should parse");
     assert_eq!(value["command"], "benchmark");
     assert_eq!(value["data"]["workload"], "index-incremental");
-    assert!(value["data"]["summary"]["runs"].as_array().is_some_and(|runs| runs.len() == 1));
+    assert!(value["data"]["summary"]["runs"]
+        .as_array()
+        .is_some_and(|runs| runs.len() == 1));
 
     let snapshot_count = fs::read_dir(&report_dir)
         .expect("report dir should exist")
@@ -2043,7 +2050,10 @@ fn benchmark_command_compares_against_multiple_saved_json_artifacts() {
         ],
     );
     assert_eq!(baseline1.status.code(), Some(0));
-    let compare1 = report_dir.join("benchmark.json").to_string_lossy().to_string();
+    let compare1 = report_dir
+        .join("benchmark.json")
+        .to_string_lossy()
+        .to_string();
 
     let baseline2 = run_scope(
         &repo,
@@ -2059,7 +2069,10 @@ fn benchmark_command_compares_against_multiple_saved_json_artifacts() {
         ],
     );
     assert_eq!(baseline2.status.code(), Some(0));
-    let compare2 = report_dir.join("benchmark.json").to_string_lossy().to_string();
+    let compare2 = report_dir
+        .join("benchmark.json")
+        .to_string_lossy()
+        .to_string();
 
     let output = run_scope(
         &repo,
