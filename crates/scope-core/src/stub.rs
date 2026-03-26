@@ -799,10 +799,7 @@ pub fn render_markdown_benchmark_report(
         summary.comparison.incremental_pct_of_full
     );
     let _ = writeln!(output, "- The benchmark uses an isolated repo copy and appends a small comment mutation before re-indexing.");
-    let _ = writeln!(
-        output,
-        "- Raw per-run records are available in the JSON benchmark output for later comparison."
-    );
+    let _ = writeln!(output, "- Raw per-run records are available in the JSON benchmark output for later comparison.");
     if summary.runs.iter().any(|run| !run.query_checks.is_empty()) {
         let total_checks = summary
             .runs
@@ -815,10 +812,7 @@ pub fn render_markdown_benchmark_report(
             .flat_map(|run| run.query_checks.iter())
             .filter(|check| check.passed)
             .count();
-        let _ = writeln!(
-            output,
-            "- Query smoke checks passed {passed_checks}/{total_checks} recorded invariants."
-        );
+        let _ = writeln!(output, "- Query smoke checks passed {passed_checks}/{total_checks} recorded invariants.");
     }
     let _ = writeln!(output);
     if summary.runs.iter().any(|run| !run.query_checks.is_empty()) {
@@ -849,77 +843,21 @@ pub fn render_markdown_benchmark_report(
         let _ = writeln!(output, "| Metric | Value |");
         let _ = writeln!(output, "|--------|-------|");
         let _ = writeln!(output, "| Baseline | `{}` |", compare.baseline_path);
-        let _ = writeln!(
-            output,
-            "| Workload | `{}` → `{}` |",
-            compare.baseline_workload, compare.current_workload
-        );
-        let _ = writeln!(
-            output,
-            "| Fixture compatible | {} |",
-            compare.fixture_compatible
-        );
-        let _ = writeln!(
-            output,
-            "| Full avg delta | {} ms |",
-            compare.full_avg_ms_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Full median delta | {} ms |",
-            compare.full_median_ms_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Full min/max delta | {} / {} ms |",
-            compare.full_min_ms_delta, compare.full_max_ms_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Incremental avg delta | {} ms |",
-            compare.incremental_avg_ms_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Incremental median delta | {} ms |",
-            compare.incremental_median_ms_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Incremental min/max delta | {} / {} ms |",
-            compare.incremental_min_ms_delta, compare.incremental_max_ms_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Files processed delta | {} |",
-            compare.files_processed_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Changed files delta | {} |",
-            compare.changed_files_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Affected files delta | {} |",
-            compare.affected_files_delta
-        );
+        let _ = writeln!(output, "| Workload | `{}` → `{}` |", compare.baseline_workload, compare.current_workload);
+        let _ = writeln!(output, "| Fixture compatible | {} |", compare.fixture_compatible);
+        let _ = writeln!(output, "| Full avg delta | {} ms |", compare.full_avg_ms_delta);
+        let _ = writeln!(output, "| Full median delta | {} ms |", compare.full_median_ms_delta);
+        let _ = writeln!(output, "| Full min/max delta | {} / {} ms |", compare.full_min_ms_delta, compare.full_max_ms_delta);
+        let _ = writeln!(output, "| Incremental avg delta | {} ms |", compare.incremental_avg_ms_delta);
+        let _ = writeln!(output, "| Incremental median delta | {} ms |", compare.incremental_median_ms_delta);
+        let _ = writeln!(output, "| Incremental min/max delta | {} / {} ms |", compare.incremental_min_ms_delta, compare.incremental_max_ms_delta);
+        let _ = writeln!(output, "| Files processed delta | {} |", compare.files_processed_delta);
+        let _ = writeln!(output, "| Changed files delta | {} |", compare.changed_files_delta);
+        let _ = writeln!(output, "| Affected files delta | {} |", compare.affected_files_delta);
         let _ = writeln!(output, "| Saved-ms delta | {} |", compare.saved_ms_delta);
-        let _ = writeln!(
-            output,
-            "| Total query checks delta | {} |",
-            compare.total_query_checks_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Passed query checks delta | {} |",
-            compare.passed_query_checks_delta
-        );
-        let _ = writeln!(
-            output,
-            "| Query-check pass delta | {} |",
-            compare.query_checks_delta
-        );
+        let _ = writeln!(output, "| Total query checks delta | {} |", compare.total_query_checks_delta);
+        let _ = writeln!(output, "| Passed query checks delta | {} |", compare.passed_query_checks_delta);
+        let _ = writeln!(output, "| Query-check pass delta | {} |", compare.query_checks_delta);
     }
     let _ = writeln!(output, "## Update instructions");
     let _ = writeln!(output);
@@ -1043,10 +981,7 @@ pub fn render_markdown_report(result: &HealthReportResult) -> String {
         &mut output,
         "Parse errors",
         result.metrics.parse_errors.to_string(),
-        result
-            .compare
-            .as_ref()
-            .map(|compare| compare.parse_errors_delta),
+        result.compare.as_ref().map(|compare| compare.parse_errors_delta),
     );
     markdown_metric_row(
         &mut output,
@@ -1076,10 +1011,7 @@ pub fn render_markdown_report(result: &HealthReportResult) -> String {
         &mut output,
         "Unused exports",
         result.metrics.unused_exports.to_string(),
-        result
-            .compare
-            .as_ref()
-            .map(|compare| compare.unused_exports_delta),
+        result.compare.as_ref().map(|compare| compare.unused_exports_delta),
     );
     markdown_metric_row(
         &mut output,
@@ -1094,10 +1026,7 @@ pub fn render_markdown_report(result: &HealthReportResult) -> String {
         &mut output,
         "Max file fan-in",
         result.metrics.max_file_fan_in.to_string(),
-        result
-            .compare
-            .as_ref()
-            .map(|compare| compare.max_file_fan_in_delta),
+        result.compare.as_ref().map(|compare| compare.max_file_fan_in_delta),
     );
     markdown_metric_row(
         &mut output,

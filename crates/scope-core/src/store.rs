@@ -1226,8 +1226,7 @@ impl Store {
                 unresolved_imports_delta: metrics.unresolved_imports as isize
                     - baseline_unresolved_imports as isize,
                 baseline_unused_exports,
-                unused_exports_delta: metrics.unused_exports as isize
-                    - baseline_unused_exports as isize,
+                unused_exports_delta: metrics.unused_exports as isize - baseline_unused_exports as isize,
                 baseline_max_file_fan_in,
                 max_file_fan_in_delta: metrics.max_file_fan_in as isize
                     - baseline_max_file_fan_in as isize,

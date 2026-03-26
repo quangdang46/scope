@@ -735,8 +735,7 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                     &summary,
                 )?);
             }
-            let envelope =
-                scope_core::stub::benchmark(args.fixture.clone(), args.iterations, summary);
+            let envelope = scope_core::stub::benchmark(args.fixture.clone(), args.iterations, summary);
             if args.write_report || args.write_json {
                 let command = benchmark_command_string(
                     args.fixture.as_deref(),
@@ -1654,10 +1653,7 @@ fn benchmark_iteration(
     let full_ms = started.elapsed().as_millis();
 
     let mut query_checks = Vec::new();
-    if matches!(
-        workload,
-        BenchmarkWorkloadArg::QuerySmoke | BenchmarkWorkloadArg::TaskMatrix
-    ) {
+    if matches!(workload, BenchmarkWorkloadArg::QuerySmoke | BenchmarkWorkloadArg::TaskMatrix) {
         query_checks.extend(run_query_smoke_checks(&store, fixture, "before_mutation")?);
     }
     if matches!(workload, BenchmarkWorkloadArg::TaskMatrix) {
@@ -1671,10 +1667,7 @@ fn benchmark_iteration(
     let incremental_stats = index_repo(benchmark_root, &store)?;
     let incremental_ms = started.elapsed().as_millis();
 
-    if matches!(
-        workload,
-        BenchmarkWorkloadArg::QuerySmoke | BenchmarkWorkloadArg::TaskMatrix
-    ) {
+    if matches!(workload, BenchmarkWorkloadArg::QuerySmoke | BenchmarkWorkloadArg::TaskMatrix) {
         query_checks.extend(run_query_smoke_checks(&store, fixture, "after_mutation")?);
     }
     if matches!(workload, BenchmarkWorkloadArg::TaskMatrix) {
@@ -1757,8 +1750,7 @@ fn query_smoke_cases(fixture: Option<&str>) -> &'static [QuerySmokeCase] {
             QuerySmokeCase {
                 name: "let_roots",
                 expr: "let roots = file \"src/index.js\" | .deps | unique",
-                expected_json:
-                    "{\"files\":[\"src/computed_import.ts\",\"src/dynamic_require.js\"]}",
+                expected_json: "{\"files\":[\"src/computed_import.ts\",\"src/dynamic_require.js\"]}",
             },
             QuerySmokeCase {
                 name: "roots_count",
@@ -1792,8 +1784,7 @@ fn query_smoke_cases(fixture: Option<&str>) -> &'static [QuerySmokeCase] {
             QuerySmokeCase {
                 name: "let_roots",
                 expr: "let roots = file \"src/lib.rs\" | .deps | unique",
-                expected_json:
-                    "{\"files\":[\"src/parser.rs\",\"src/resolver.rs\",\"src/utils.rs\"]}",
+                expected_json: "{\"files\":[\"src/parser.rs\",\"src/resolver.rs\",\"src/utils.rs\"]}",
             },
             QuerySmokeCase {
                 name: "roots_count",
@@ -1829,11 +1820,8 @@ fn run_query_smoke_checks(
     Ok(checks)
 }
 
-fn benchmark_query_value_json(
-    value: &scope_core::QueryValue,
-) -> Result<String, scope_core::ScopeError> {
-    serde_json::to_string(value)
-        .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))
+fn benchmark_query_value_json(value: &scope_core::QueryValue) -> Result<String, scope_core::ScopeError> {
+    serde_json::to_string(value).map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))
 }
 
 fn run_task_matrix_checks(
@@ -1844,46 +1832,18 @@ fn run_task_matrix_checks(
     let mut checks = Vec::new();
     let cases: &[(&str, &str, &str)] = match fixture {
         Some("rust_small") | Some("mixed_repo") => &[
-            (
-                "matrix_deps",
-                "file \"src/lib.rs\" | .deps | unique | count",
-                "{\"number\":3}",
-            ),
-            (
-                "matrix_symbols",
-                "file \"src/lib.rs\" | .symbols | count",
-                "{\"number\":1}",
-            ),
+            ("matrix_deps", "file \"src/lib.rs\" | .deps | unique | count", "{\"number\":3}"),
+            ("matrix_symbols", "file \"src/lib.rs\" | .symbols | count", "{\"number\":1}"),
         ],
         Some("ts_small") | Some("ts_with_paths") => &[
-            (
-                "matrix_deps",
-                "file \"src/index.ts\" | .deps | unique | count",
-                "{\"number\":2}",
-            ),
-            (
-                "matrix_symbols",
-                "file \"src/index.ts\" | .symbols | count",
-                "{\"number\":2}",
-            ),
+            ("matrix_deps", "file \"src/index.ts\" | .deps | unique | count", "{\"number\":2}"),
+            ("matrix_symbols", "file \"src/index.ts\" | .symbols | count", "{\"number\":2}"),
         ],
         Some("dynamic_limits") => &[
-            (
-                "matrix_deps",
-                "file \"src/index.js\" | .deps | unique | count",
-                "{\"number\":2}",
-            ),
-            (
-                "matrix_symbols",
-                "file \"src/index.js\" | .symbols | count",
-                "{\"number\":1}",
-            ),
+            ("matrix_deps", "file \"src/index.js\" | .deps | unique | count", "{\"number\":2}"),
+            ("matrix_symbols", "file \"src/index.js\" | .symbols | count", "{\"number\":1}"),
         ],
-        _ => &[(
-            "matrix_deps",
-            "file \"src/lib.rs\" | .deps | unique | count",
-            "{\"number\":3}",
-        )],
+        _ => &[("matrix_deps", "file \"src/lib.rs\" | .deps | unique | count", "{\"number\":3}")],
     };
     let mut session = QuerySession::default();
     for (name, expr, expected_json) in cases {
@@ -1954,9 +1914,9 @@ fn compare_benchmark_artifacts(
     current_fixture: Option<&str>,
     current: &scope_core::stub::BenchmarkSummary,
 ) -> Result<scope_core::stub::BenchmarkArtifactComparison, scope_core::ScopeError> {
-    let last_path = compare_paths.last().ok_or_else(|| {
-        scope_core::ScopeError::InvalidInput("compare path list cannot be empty".to_string())
-    })?;
+    let last_path = compare_paths
+        .last()
+        .ok_or_else(|| scope_core::ScopeError::InvalidInput("compare path list cannot be empty".to_string()))?;
     let contents = fs::read_to_string(last_path)
         .map_err(|error| scope_core::ScopeError::io(last_path, error))?;
     let baseline: BenchmarkArtifactEnvelope = serde_json::from_str(&contents)
@@ -1988,11 +1948,7 @@ fn compare_benchmark_artifacts(
         .count() as i128;
 
     Ok(scope_core::stub::BenchmarkArtifactComparison {
-        baseline_path: format!(
-            "{} artifacts (latest `{}`)",
-            compare_paths.len(),
-            last_path.display()
-        ),
+        baseline_path: format!("{} artifacts (latest `{}`)", compare_paths.len(), last_path.display()),
         baseline_workload: summary.workload.to_string(),
         current_workload: current.workload.to_string(),
         fixture_compatible: baseline_fixture == current_fixture,
@@ -2000,20 +1956,13 @@ fn compare_benchmark_artifacts(
         full_median_ms_delta: current.full.median_ms as i128 - summary.full.median_ms as i128,
         full_min_ms_delta: current.full.min_ms as i128 - summary.full.min_ms as i128,
         full_max_ms_delta: current.full.max_ms as i128 - summary.full.max_ms as i128,
-        incremental_avg_ms_delta: current.incremental.avg_ms as i128
-            - summary.incremental.avg_ms as i128,
-        incremental_median_ms_delta: current.incremental.median_ms as i128
-            - summary.incremental.median_ms as i128,
-        incremental_min_ms_delta: current.incremental.min_ms as i128
-            - summary.incremental.min_ms as i128,
-        incremental_max_ms_delta: current.incremental.max_ms as i128
-            - summary.incremental.max_ms as i128,
-        files_processed_delta: current.incremental.files_processed_avg as i128
-            - summary.incremental.files_processed_avg as i128,
-        changed_files_delta: current.incremental.changed_files_avg as i128
-            - summary.incremental.changed_files_avg as i128,
-        affected_files_delta: current.incremental.affected_files_avg as i128
-            - summary.incremental.affected_files_avg as i128,
+        incremental_avg_ms_delta: current.incremental.avg_ms as i128 - summary.incremental.avg_ms as i128,
+        incremental_median_ms_delta: current.incremental.median_ms as i128 - summary.incremental.median_ms as i128,
+        incremental_min_ms_delta: current.incremental.min_ms as i128 - summary.incremental.min_ms as i128,
+        incremental_max_ms_delta: current.incremental.max_ms as i128 - summary.incremental.max_ms as i128,
+        files_processed_delta: current.incremental.files_processed_avg as i128 - summary.incremental.files_processed_avg as i128,
+        changed_files_delta: current.incremental.changed_files_avg as i128 - summary.incremental.changed_files_avg as i128,
+        affected_files_delta: current.incremental.affected_files_avg as i128 - summary.incremental.affected_files_avg as i128,
         saved_ms_delta: current.comparison.saved_ms - summary.comparison.saved_ms,
         total_query_checks_delta: current_total_checks - baseline_total_checks,
         passed_query_checks_delta: current_passed_checks - baseline_passed_checks,
