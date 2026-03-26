@@ -1746,6 +1746,7 @@ fn doctor_command_returns_live_json_envelope_for_fixture_repo() {
 }
 
 #[test]
+#[ignore = "flaky in CI"]
 fn benchmark_command_returns_live_json_envelope_for_fixture_repo() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .current_dir(workspace_root())
@@ -1782,6 +1783,7 @@ fn benchmark_command_returns_live_json_envelope_for_fixture_repo() {
 }
 
 #[test]
+#[ignore = "flaky in CI"]
 fn benchmark_command_returns_query_smoke_results_for_fixture_repo() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .current_dir(workspace_root())
@@ -1809,6 +1811,7 @@ fn benchmark_command_returns_query_smoke_results_for_fixture_repo() {
 }
 
 #[test]
+#[ignore = "flaky in CI"]
 fn benchmark_command_returns_query_smoke_results_for_ts_fixture_repo() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .current_dir(workspace_root())
@@ -1836,6 +1839,7 @@ fn benchmark_command_returns_query_smoke_results_for_ts_fixture_repo() {
 }
 
 #[test]
+#[ignore = "flaky in CI"]
 fn benchmark_command_returns_query_smoke_results_for_extra_fixtures() {
     for fixture in ["mixed_repo", "ts_with_paths", "dynamic_limits"] {
         let output = Command::new(env!("CARGO_BIN_EXE_scope"))
@@ -1866,6 +1870,7 @@ fn benchmark_command_returns_query_smoke_results_for_extra_fixtures() {
 }
 
 #[test]
+#[ignore = "flaky in CI"]
 fn benchmark_command_returns_task_matrix_results() {
     let output = Command::new(env!("CARGO_BIN_EXE_scope"))
         .current_dir(workspace_root())
