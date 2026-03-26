@@ -4,7 +4,7 @@
   "status": "ok",
   "data": {
     "result": {
-      "generated_at": 1773411287,
+      "generated_at": 0,
       "compare": {
         "target": "baseline",
         "baseline_health_score": 94.0,
@@ -16,7 +16,17 @@
         "baseline_unreachable_files": 0,
         "unreachable_files_delta": 3,
         "baseline_public_surface_removed": 0,
-        "public_surface_removed_delta": 1
+        "public_surface_removed_delta": 1,
+        "baseline_avg_instability": 0.3,
+        "avg_instability_delta": -0.09999999999999998,
+        "baseline_max_file_fan_in": 1,
+        "max_file_fan_in_delta": 0,
+        "baseline_parse_errors": 0,
+        "parse_errors_delta": 0,
+        "baseline_unresolved_imports": 0,
+        "unresolved_imports_delta": 0,
+        "baseline_unused_exports": 6,
+        "unused_exports_delta": 1
       },
       "metrics": {
         "total_files": 5,
