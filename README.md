@@ -15,6 +15,13 @@ This project is still under active development, but the fastest way to install t
 curl -fsSL "https://raw.githubusercontent.com/quangdang46/scope/main/install.sh?$(date +%s)" | bash
 ```
 
+The installer now places both `scope` and `scope-mcp` in your user bin directory, then auto-configures detected user-scope MCP clients such as Codex, Claude Code, Gemini, Cursor, Windsurf, Amp, and Factory Droid. To re-run that step manually:
+
+```bash
+scope install-mcp --auto-user
+scope install-mcp --host codex --host claude-code
+```
+
 ### Local Development
 For local development, you can run directly via cargo:
 

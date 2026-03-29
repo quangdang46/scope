@@ -90,6 +90,8 @@ pub enum Commands {
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
     Benchmark(BenchmarkArgs),
+    /// Install scope-mcp into detected user-scope MCP client configs
+    InstallMcp(InstallMcpArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -546,4 +548,14 @@ pub struct BenchmarkArgs {
     /// Write benchmark JSON reports into bench-results/
     #[arg(long)]
     pub write_json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct InstallMcpArgs {
+    /// Install into one or more explicit user-scope MCP hosts
+    #[arg(long = "host")]
+    pub hosts: Vec<String>,
+    /// Detect supported user-scope MCP clients on this machine and install automatically
+    #[arg(long)]
+    pub auto_user: bool,
 }

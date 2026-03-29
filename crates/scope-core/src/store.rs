@@ -311,14 +311,20 @@ impl Store {
     }
 
     pub fn persist_extract_results(&self, results: &[ExtractResult]) -> ScopeResult<()> {
+        let mut file_ids = HashMap::with_capacity(results.len());
         for result in results {
-            self.upsert_file(&result.file)?;
+            let file_id = self.upsert_file(&result.file)?;
+            file_ids.insert(result.file.path.clone(), file_id);
         }
         for result in results {
-            self.persist_extract_result(result)?;
+            if let Some(file_id) = file_ids.get(&result.file.path).copied() {
+                self.persist_extract_result_with_file_id(file_id, result, false)?;
+            }
         }
         for result in results {
-            self.refresh_call_edges(result)?;
+            if let Some(file_id) = file_ids.get(&result.file.path).copied() {
+                self.refresh_call_edges_with_file_id(file_id, result)?;
+            }
         }
         Ok(())
     }
@@ -339,6 +345,29 @@ impl Store {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn list_file_states(&self) -> ScopeResult<HashMap<RepoPath, StoredFileState>> {
+        let mut statement = self.connection.prepare(
+            "SELECT path, content_hash, mtime_unix_seconds, size_bytes
+             FROM files
+             ORDER BY path ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(StoredFileState {
+                path: RepoPath(row.get::<_, String>(0)?),
+                content_hash: row.get(1)?,
+                mtime_unix_seconds: row.get(2)?,
+                size_bytes: row.get(3)?,
+            })
+        })?;
+
+        let mut states = HashMap::new();
+        for row in rows {
+            let state = row?;
+            states.insert(state.path.clone(), state);
+        }
+        Ok(states)
     }
 
     pub fn classify_file_change(&self, current: &FileRecord) -> ScopeResult<Option<bool>> {
@@ -376,13 +405,22 @@ impl Store {
 
     pub fn persist_extract_result(&self, result: &ExtractResult) -> ScopeResult<()> {
         let file_id = self.upsert_file(&result.file)?;
-        self.delete_symbol_edges_for_file(file_id)?;
+        self.persist_extract_result_with_file_id(file_id, result, true)
+    }
+
+    fn persist_extract_result_with_file_id(
+        &self,
+        file_id: i64,
+        result: &ExtractResult,
+        include_call_edges: bool,
+    ) -> ScopeResult<()> {
         self.connection
             .execute("DELETE FROM imports WHERE file_id = ?1", [file_id])?;
         self.connection
             .execute("DELETE FROM file_edges WHERE from_file_id = ?1", [file_id])?;
         self.connection
             .execute("DELETE FROM symbols WHERE file_id = ?1", [file_id])?;
+        self.delete_symbol_edges_for_file(file_id)?;
 
         for import in &result.imports {
             self.insert_import(file_id, import)?;
@@ -405,7 +443,9 @@ impl Store {
             }
         }
 
-        self.insert_resolved_call_edges(file_id, result)?;
+        if include_call_edges {
+            self.insert_resolved_call_edges(file_id, result)?;
+        }
 
         Ok(())
     }
@@ -414,6 +454,14 @@ impl Store {
         let Some(file_id) = self.file_id(&result.file.path)? else {
             return Ok(());
         };
+        self.refresh_call_edges_with_file_id(file_id, result)
+    }
+
+    fn refresh_call_edges_with_file_id(
+        &self,
+        file_id: i64,
+        result: &ExtractResult,
+    ) -> ScopeResult<()> {
         self.delete_symbol_edges_for_file(file_id)?;
         self.insert_resolved_call_edges(file_id, result)
     }
@@ -3219,6 +3267,14 @@ impl Store {
     pub fn reverse_dependency_closure(&self, paths: &[RepoPath]) -> ScopeResult<Vec<RepoPath>> {
         let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT importer_files.id, importer_files.path
+             FROM file_edges
+             JOIN files AS importer_files ON importer_files.id = file_edges.from_file_id
+             WHERE file_edges.to_file_id = ?1
+               AND file_edges.kind IN ('import', 'module')
+             ORDER BY importer_files.path ASC",
+        )?;
 
         for path in paths {
             let Some(file_id) = self.file_id(path)? else {
@@ -3231,14 +3287,6 @@ impl Store {
         let mut dependents = Vec::new();
 
         while let Some(file_id) = queue.pop_front() {
-            let mut statement = self.connection.prepare(
-                "SELECT DISTINCT importer_files.id, importer_files.path
-                 FROM file_edges
-                 JOIN files AS importer_files ON importer_files.id = file_edges.from_file_id
-                 WHERE file_edges.to_file_id = ?1
-                   AND file_edges.kind IN ('import', 'module')
-                 ORDER BY importer_files.path ASC",
-            )?;
             let rows = statement.query_map([file_id], |row| {
                 Ok((row.get::<_, i64>(0)?, RepoPath(row.get::<_, String>(1)?)))
             })?;

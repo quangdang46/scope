@@ -1,150 +1,32 @@
 ## why — Git History Archaeology CLI
 
-`why` is a code-archaeology CLI that answers "why does this code exist?" by analyzing git history and synthesizing explanations via LLM. It provides risk assessment, ownership signals, and change context before you modify unfamiliar code.
+`why` is the repo archaeology tool. Use it when a piece of code looks deletable,
+odd, security-sensitive, or tightly coupled and you need to know the real reason it
+exists before touching it.
 
-### Why It's Useful
+### When To Use It
 
-- **Prevents accidental deletions:** Understand why code was written before removing "dead-looking" functions
-- **Risk-aware changes:** Get HIGH/MEDIUM/LOW risk signals based on commit history and keywords
-- **Ownership discovery:** Find who knows the code and bus-factor risks with `--team`
-- **Co-change awareness:** See coupled files before broad refactors with `--coupled`
-- **Incident context:** Link code to past hotfixes, security patches, and incidents
-- **LLM-powered synthesis:** One LLM call per query with structured git data as input
+- before deleting unfamiliar code
+- before broad refactors
+- before renaming exported symbols
+- before preparing a risky diff for review
 
-### Quick Start
+### Short Command Set
 
 ```bash
-# Basic query
-why src/auth.rs:verify_token
-
-# Validate config and test LLM connectivity
+why src/file.rs:SomeType::method
+why src/file.rs:42 --no-llm
+why src/file.rs:symbol --coupled --team
+why diff-review --no-llm
 why doctor
 ```
 
-### Query Syntax
+### Working Rules
 
-| Form | Example | Description |
-|------|---------|-------------|
-| `<file>:<line>` | `why src/auth.rs:42` | Query specific line |
-| `<file>:<symbol>` | `why src/auth.rs:verify_token` | Query function/method |
-| `<file>:<Type::method>` | `why src/auth.rs:AuthService::login` | Qualified Rust method |
-| `<file> --lines <start:end>` | `why src/auth.rs --lines 40:45` | Query line range |
-
-### Command Reference
-
-**Core Queries:**
-| Command | Purpose |
-|---------|---------|
-| `why <target>` | Basic archaeology query with LLM synthesis |
-| `why <target> --no-llm` | Heuristic-only mode (no LLM call) |
-| `why <target> --json` | Machine-readable output |
-| `why <target> --since 30` | Limit to recent 30 days |
-
-**Risk & History:**
-| Command | Purpose |
-|---------|---------|
-| `why <target> --blame-chain` | Walk past mechanical edits to true origin |
-| `why <target> --evolution` | Rename-aware target history timeline |
-| `why <target> --team` | Show ownership and bus-factor signals |
-| `why <target> --coupled` | Show file-level co-change coupling |
-
-**Code Actions:**
-| Command | Purpose |
-|---------|---------|
-| `why <target> --annotate` | Write evidence-backed doc annotation |
-| `why <target> --split` | Show archaeology-guided split suggestions |
-| `why <target> --rename-safe` | Assess whether Rust symbol rename is safe |
-| `why <target> --watch` | Refresh report when file changes |
-
-**Repo-Wide Commands:**
-| Command | Purpose |
-|---------|---------|
-| `why hotspots --limit 10` | Top churn × risk files |
-| `why health` | Repo health dashboard |
-| `why health --ci 80` | CI gate with threshold |
-| `why time-bombs` | Aged TODOs and expired markers |
-| `why ghost --limit 10` | Uncalled high-risk functions |
-| `why onboard --limit 10` | Top symbols for new engineers |
-| `why diff-review --no-llm` | Review staged diff |
-| `why pr-template` | Generate PR template from staged diff |
-
-**Config & Diagnostics:**
-| Command | Purpose |
-|---------|---------|
-| `why config init` | Interactive setup (main entry point) |
-| `why config init --local` | Create repo-local config |
-| `why config get` | Show current effective config |
-| `why doctor` | Validate config and test LLM |
-| `why doctor --json` | Machine-readable diagnostics |
-
-### Typical Agent Workflow
-
-1. **Before deleting or refactoring unfamiliar code:**
-   ```bash
-   why src/legacy.rs:old_function --no-llm
-   ```
-   Check risk level and history before touching.
-
-2. **For broader refactors:**
-   ```bash
-   why src/auth.rs:verify_token --coupled --team
-   ```
-   See coupled files and ownership before planning scope.
-
-3. **For rename operations:**
-   ```bash
-   why src/auth.rs:verify_token --rename-safe
-   ```
-   Check caller risk to assess rename safety.
-
-4. **Before PR:**
-   ```bash
-   why diff-review --no-llm
-   why pr-template
-   ```
-   Review staged changes and generate template.
-
-5. **Health check:**
-   ```bash
-   why health --json
-   why hotspots --limit 5
-   ```
-   Understand repo-wide debt signals.
-
-### Risk Levels
-
-| Level | Meaning |
-|-------|---------|
-| **HIGH** | Stop and investigate. Likely security, incident, or critical business logic. |
-| **MEDIUM** | Review carefully. Migration, integration, or compatibility-sensitive code. |
-| **LOW** | Routine code. Standard review practices apply. |
-
-### Supported Languages
-
-Symbol resolution works for: Rust (`.rs`), Go (`.go`), JavaScript (`.js`), TypeScript (`.ts`, `.tsx`), Java (`.java`), Python (`.py`)
-
-### Cache Behavior
-
-- Query results cached in `.why/cache.jsonl`
-- Health snapshots stored in `.why/health.jsonl`
-- Use `--no-cache` to bypass cache
-- Cache keys include `HEAD` hash prefix for natural invalidation
-
-### Common Pitfalls
-
-- **"could not find repository"**: Run from inside a git repo, or use repo-wide commands like `why doctor` from anywhere
-- **Ambiguous symbol**: Use qualified name like `Module::function` instead of just `function`
-- **No LLM synthesis**: Check `why doctor` for config/auth issues; fallback to `--no-llm` for heuristic-only
-- **Missing credentials**: Run `why config init` or set `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`ZAI_API_KEY`
-
-### Rules for Agents
-
-- **Always run `why` before deleting unfamiliar code** — it may be a security fix or incident response
-- Treat `HIGH` risk output as a stop-and-investigate signal
-- Use `--blame-chain` to find true origin, not just last mechanical edit
-- Use `--coupled` and `--team` before broader refactors
-- Use `--no-llm` in CI or when LLM is unavailable
-- Use `why doctor` to diagnose config/auth issues
+- Treat `HIGH` risk as a stop-and-investigate signal.
+- Use `--coupled` and `--team` before cross-cutting refactors.
+- Use `--no-llm` when you only need heuristics or CI-safe output.
+- If the target is ambiguous, use a qualified symbol name.
 
 ---
 ## linehash — Hash-Anchored File Editing
@@ -323,99 +205,34 @@ linehash edit src/main.rs 42:a3f2 "new" --json
 
 ## scope — Static Analysis Dependency & Architecture Engine
 
-`scope` is a local static-analysis workspace that answers "what depends on what?" by maintaining a SQLite-backed dependency/symbol graph. It provides dependency queries, impact analysis, architecture enforcement, capability auditing, and health reporting — all from a persistent local index.
+`scope` is the local dependency and symbol graph tool. Use it when you need to know
+what imports what, what a change will break, whether a refactor crosses the repo
+boundary, or whether a file split / rename is safe.
 
-### Why It's Useful
-
-- **Dependency awareness:** Know what a file imports and what imports it before editing
-- **Impact analysis:** Estimate blast radius of body/signature/rename/delete changes
-- **Architecture enforcement:** Layer rules, capability auditing, entry-point reachability
-- **Symbol graph:** Track exports, calls, callers, and public surface across files
-- **Health reporting:** Aggregate metrics, gate checks, snapshot diffs, and risk hotspots
-- **MCP integration:** Same queries available as stdio MCP tools for external clients
-
-### Quick Start
+### Short Command Set
 
 ```bash
-# Index the repository
 scope index .
-
-# Query dependencies
-scope deps src/lib.rs
 scope deps src/lib.rs --reverse
-
-# Check health
-scope report
+scope impact src/services/compose.rs --change-type signature
+scope symbols src/services/compose.rs --public-only
+scope cycles
 scope doctor
 ```
 
-### Command Reference
+### Best Uses In This Repo
 
-**Indexing:**
-| Command | Purpose |
-|---------|---------|
-| `scope index [PATH]` | Scan and index all supported files into `.scope/index.db` |
-| `scope doctor [--fix]` | Validate index health and diagnostics |
-| `scope benchmark [--fixture ...] [--iterations N]` | Performance benchmark with report |
+- checking whether transport layers leak business logic
+- validating `cli/api/mcp -> services -> domain/storage` layering
+- estimating blast radius of changing compose contracts
+- finding cycles introduced by adaptation, storage, or template code
 
-**Dependency Queries:**
-| Command | Purpose |
-|---------|---------|
-| `scope deps <file>` | Forward dependencies of a file |
-| `scope deps <file> --reverse` | Reverse dependencies (what imports this) |
-| `scope deps <file> --transitive [--depth N]` | Transitive closure with optional depth limit |
-| `scope symbols <file> [--public-only] [--kind ...]` | Symbols defined in a file |
-| `scope calls <symbol> [--transitive]` | What a symbol calls |
-| `scope callers <symbol> [--transitive]` | What calls a symbol |
+### Working Rules
 
-**Impact & Traversal:**
-| Command | Purpose |
-|---------|---------|
-| `scope impact <target> --change-type <type>` | Estimate blast radius (body/signature/rename/delete/visibility/side-effect) |
-| `scope explain <target> [--to ...] [--depth N]` | Explain dependency path |
-| `scope why <from> <to> [--depth N]` | Find shortest path between two nodes |
-| `scope context --target <...> --change-type <...> [--budget N]` | Structured change-planning context |
-| `scope pack <target> --change-type <...> --budget <N>` | Lean plain-text context handoff |
-
-**Architecture & Audit:**
-| Command | Purpose |
-|---------|---------|
-| `scope arch check` | Check layer rule violations |
-| `scope audit --capability <name>` | Capability reach analysis (e.g., network access) |
-| `scope surface [<file>]` | Public surface of a file |
-| `scope surface_diff <before> <after>` | Diff public surface between two files |
-| `scope entry_list / entry_cone / entry_reaches / entry_unreachable` | Entry point analysis |
-
-**Graph Analysis:**
-| Command | Purpose |
-|---------|---------|
-| `scope unused` | Find unused exported symbols |
-| `scope cycles [--severity ...]` | Detect dependency cycles |
-| `scope tree <target> [--reverse] [--depth N]` | Dependency tree view |
-| `scope split <target> --clusters <N>` | Suggest file split clusters |
-| `scope mirror <target> --other <file>` | Similarity analysis between files |
-| `scope stability [--file ...] [--sort ...]` | File instability metrics |
-| `scope risk [--file ...] [--days N] [--top N]` | Risk hotspot analysis |
-| `scope cochange [--file ...] [--min-commits N]` | Co-change coupling from git history |
-
-**Reporting & Gating:**
-| Command | Purpose |
-|---------|---------|
-| `scope report [--compare <snapshot>]` | Full health report with metrics |
-| `scope gate [--compare <snapshot>] [--strict]` | CI gate check against thresholds |
-| `scope diff --branch <ref>` | Changed/affected files relative to branch |
-| `scope snapshot_save --name <name>` | Save current graph state |
-| `scope snapshot_list / snapshot_delete` | Manage snapshots |
-| `scope diff_snapshot` | Compare two snapshots |
-
-**Other:**
-| Command | Purpose |
-|---------|---------|
-| `scope query --expr "<pipe-expr>"` | Ad-hoc query language |
-| `scope simulate extract ...` | Simulate file extraction impact |
-| `scope rename_plan <target> --to <new_name>` | Plan symbol rename with edit steps |
-| `scope test_map_covers <file>` | Which tests cover a source file |
-| `scope serve [--port 7777]` | Local HTTP API + embedded UI |
+- Re-index after large file moves or major refactors.
+- Use `scope impact` before changing public structs or request/response contracts.
+- Use `scope cycles` and `scope arch check` before accepting structural refactors.
+- Prefer `scope` for dependency questions, `why` for history questions.
 
 ### MCP Tool Surface (scope-mcp)
 
@@ -838,12 +655,13 @@ UBS stands for "Ultimate Bug Scanner": **The AI Coding Agent's Secret Weapon: Fl
 
 **Install:** `curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash`
 
-**Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
+**Golden Rule:** `ubs --diff .` during iteration and `ubs --staged .` before every commit. In this repo, those modes respect `.ubsignore`, which trims test-only panic/assert inventory while keeping runtime Rust changes scanned.
 
 **Commands:**
 ```bash
-ubs file.ts file2.py                    # Specific files (< 1s) — USE THIS
-ubs $(git diff --name-only --cached)    # Staged files — before commit
+ubs --diff .                            # Changed files in working tree (preferred here)
+ubs --staged .                          # Staged files — before commit
+ubs file.ts file2.py                    # Direct file scan when you need a one-off deep dive
 ubs --only=js,python src/               # Language filter (3-5x faster)
 ubs --ci --fail-on-warning .            # CI mode — before PR
 ubs --help                              # Full command reference
@@ -865,10 +683,10 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 2. Navigate `file:line:col` → view context
 3. Verify real issue (not false positive)
 4. Fix root cause (not symptom)
-5. Re-run `ubs <file>` → exit 0
+5. Re-run `ubs --diff .` or `ubs --staged .` → exit 0
 6. Commit
 
-**Speed Critical:** Scope to changed files. `ubs src/file.ts` (< 1s) vs `ubs .` (30s). Never full scan for small edits.
+**Speed Critical:** Scope to changed files. Prefer `ubs --diff .` or `ubs --staged .` in this repo so `.ubsignore` stays active; use direct file scans only for deliberate spot checks.
 
 **Bug Severity:**
 - **Critical** (always fix): Null safety, XSS/injection, async/await, memory leaks

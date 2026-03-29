@@ -4,6 +4,7 @@ umask 022
 
 # === Config ===
 BINARY_NAME="scope"
+MCP_BINARY_NAME="scope-mcp"
 OWNER="quangdang46"
 REPO="scope"
 DEST="${DEST:-$HOME/.local/bin}"
@@ -47,6 +48,7 @@ done
 # === Uninstall ===
 if [ "$UNINSTALL" -eq 1 ]; then
     rm -f "$DEST/$BINARY_NAME"
+    rm -f "$DEST/$MCP_BINARY_NAME"
     for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
         [ -f "$rc" ] && sed -i "/${BINARY_NAME} installer/d" "$rc" 2>/dev/null || true
     done
@@ -129,8 +131,50 @@ maybe_add_path() {
 build_from_source() {
     command -v cargo >/dev/null || die "cargo not found — install Rust: https://rustup.rs"
     git clone --depth 1 "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
-    (cd "$TMP/src" && CARGO_TARGET_DIR="$TMP/target" cargo build --release --package scope-cli)
+    (cd "$TMP/src" && CARGO_TARGET_DIR="$TMP/target" cargo build --release --package scope-cli --package scope-mcp)
     install_binary_atomic "$TMP/target/release/$BINARY_NAME" "$DEST/$BINARY_NAME"
+    install_binary_atomic "$TMP/target/release/$MCP_BINARY_NAME" "$DEST/$MCP_BINARY_NAME"
+}
+
+install_release_binary() {
+    local bin_name="$1" platform="$2" ext="$3"
+    local archive="${bin_name}-${VERSION}-${platform}.${ext}"
+    local url="https://github.com/${OWNER}/${REPO}/releases/download/${FULL_TAG}/${archive}"
+
+    download_file "$url" "$TMP/$archive" || return 1
+
+    if download_file "${url}.sha256" "$TMP/${bin_name}.sha256" 2>/dev/null; then
+        local expected actual
+        expected=$(awk '{print $1}' "$TMP/${bin_name}.sha256")
+        actual=$(sha256sum "$TMP/$archive" 2>/dev/null | awk '{print $1}' \
+              || shasum -a 256 "$TMP/$archive" | awk '{print $1}')
+        [ "$expected" = "$actual" ] || die "Checksum mismatch for ${bin_name}"
+        log_info "Checksum verified for ${bin_name}"
+    fi
+
+    case "$archive" in
+        *.tar.gz) tar -xzf "$TMP/$archive" -C "$TMP";;
+        *.zip)    unzip -q "$TMP/$archive" -d "$TMP";;
+    esac
+
+    local bin
+    if [[ "$platform" == windows* ]]; then
+        bin=$(find "$TMP" -type f -name "${bin_name}.exe" 2>/dev/null | head -1)
+    else
+        bin=$(find "$TMP" -type f -name "${bin_name}" 2>/dev/null | head -1)
+    fi
+    [ -n "$bin" ] || die "Binary ${bin_name} not found after extract"
+    install_binary_atomic "$bin" "$DEST/$bin_name"
+}
+
+auto_install_mcp() {
+    [ -x "$DEST/$BINARY_NAME" ] || return 0
+    [ -x "$DEST/$MCP_BINARY_NAME" ] || return 0
+
+    log_info "Auto-installing MCP config for detected user tools"
+    if ! "$DEST/$BINARY_NAME" install-mcp --auto-user; then
+        log_warn "MCP auto-install reported a problem; you can retry with: $DEST/$BINARY_NAME install-mcp --auto-user"
+    fi
 }
 
 # === Main ===
@@ -155,28 +199,9 @@ main() {
         fi
 
         local ext="tar.gz"; [[ "$platform" == windows* ]] && ext="zip"
-        local archive="${BINARY_NAME}-${VERSION}-${platform}.${ext}"
-        local url="https://github.com/${OWNER}/${REPO}/releases/download/${FULL_TAG}/${archive}"
 
-        if download_file "$url" "$TMP/$archive"; then
-            # Verify checksum if sidecar exists
-            if download_file "${url}.sha256" "$TMP/checksum.sha256" 2>/dev/null; then
-                local expected actual
-                expected=$(awk '{print $1}' "$TMP/checksum.sha256")
-                actual=$(sha256sum "$TMP/$archive" 2>/dev/null | awk '{print $1}' \
-                      || shasum -a 256 "$TMP/$archive" | awk '{print $1}')
-                [ "$expected" = "$actual" ] || die "Checksum mismatch"
-                log_info "Checksum verified"
-            fi
-            # Extract
-            case "$archive" in
-                *.tar.gz) tar -xzf "$TMP/$archive" -C "$TMP";;
-                *.zip)    unzip -q "$TMP/$archive" -d "$TMP";;
-            esac
-            local bin; bin=$(find "$TMP" -name "$BINARY_NAME*" -type f 2>/dev/null | head -1)
-            [ -n "$bin" ] || die "Binary not found after extract"
-            install_binary_atomic "$bin" "$DEST/$BINARY_NAME"
-        else
+        if ! install_release_binary "$BINARY_NAME" "$platform" "$ext" \
+            || ! install_release_binary "$MCP_BINARY_NAME" "$platform" "$ext"; then
             log_warn "Binary download failed — building from source..."
             build_from_source
         fi
@@ -185,12 +210,14 @@ main() {
     fi
 
     maybe_add_path
+    auto_install_mcp
 
     [ "$VERIFY" -eq 1 ] && "$DEST/$BINARY_NAME" --version
 
     echo ""
     echo "✓ $BINARY_NAME installed → $DEST/$BINARY_NAME"
     echo "  $("$DEST/$BINARY_NAME" --version 2>/dev/null || true)"
+    echo "✓ $MCP_BINARY_NAME installed → $DEST/$MCP_BINARY_NAME"
     echo ""
     echo "  Usage: $BINARY_NAME --help"
 }

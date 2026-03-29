@@ -3,6 +3,8 @@ pub mod arch;
 pub mod bootstrap;
 pub mod config;
 pub mod error;
+pub mod indexer;
+pub mod install;
 pub mod json;
 pub mod model;
 pub mod query_lang;
@@ -20,6 +22,11 @@ pub use arch::{
 pub use bootstrap::{bootstrap, AppContext};
 pub use config::{load_tsconfig, BootstrapOptions, RuntimePaths};
 pub use error::{ScopeError, ScopeResult};
+pub use indexer::{index_repo, IndexRunStats};
+pub use install::{
+    auto_install_user_mcp, install_mcp_for_hosts, supported_install_hosts, McpInstallHostResult,
+    McpInstallReport, McpInstallStatus,
+};
 pub use json::{JsonEnvelope, JsonStatus, SCHEMA_VERSION};
 pub use model::{
     ArchCheckResult, ArchConfig, ArchExplainResult, ArchFileEdge, ArchInitResult, ArchLayer,

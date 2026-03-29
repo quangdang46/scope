@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     env, fs,
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -7,11 +6,21 @@ use std::{
 };
 
 use scope_core::{
-    adapter_for_language, arch_check, execute_query, load_arch_config, scan_repo, BootstrapOptions,
-    CochangeSort, DatabaseInfo, QuerySession, RepoPath, RiskSort, ScanConfig, Store, SymbolKind,
+    arch_check, execute_query, index_repo, load_arch_config, scan_repo, BootstrapOptions,
+    CochangeSort, DatabaseInfo, QuerySession, RepoPath, RiskSort, ScanConfig, SymbolKind,
     Verbosity,
 };
 use serde_json::{json, Value};
+
+const MCP_INSTRUCTIONS: &str = concat!(
+    "scope is a local static-analysis MCP server for dependency, impact, and architecture queries.\n",
+    "\n",
+    "Use `index` before dependency-sensitive analysis if the repository may have changed.\n",
+    "Use `deps` or `symbols` to inspect one file, `impact` before signature or rename changes,\n",
+    "and `context` or `pack` when you need a compact read set before editing.\n",
+    "\n",
+    "Treat results as static evidence, not proof. Verify risky changes with tests/builds.\n",
+);
 
 fn main() {
     if let Err(error) = run() {
@@ -69,7 +78,8 @@ fn handle_message(request: &Value) -> Option<Value> {
                                     "type": "text",
                                     "text": output
                                 }
-                            ]
+                            ],
+                            "structuredContent": parse_structured_content(&output),
                         }),
                     )),
                     Err(DispatchError::Transport(message)) => {
@@ -98,7 +108,8 @@ fn initialize_response(id: Value) -> Value {
                 "tools": {
                     "listChanged": false
                 }
-            }
+            },
+            "instructions": MCP_INSTRUCTIONS
         }),
     )
 }
@@ -120,6 +131,10 @@ fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
             "message": message,
         }
     })
+}
+
+fn parse_structured_content(output: &str) -> Value {
+    serde_json::from_str(output).unwrap_or_else(|_| json!({ "text": output }))
 }
 
 fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
@@ -2091,22 +2106,14 @@ fn context_role_label(role: &scope_core::ContextFileRole) -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct IndexRunStats {
-    indexed_files: usize,
-    changed_files: usize,
-    deleted_files: usize,
-    affected_files: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkIterationResult {
     iteration: u32,
     indexed_files: usize,
     mutation_target: RepoPath,
     full_ms: u128,
     incremental_ms: u128,
-    full_stats: IndexRunStats,
-    incremental_stats: IndexRunStats,
+    full_stats: scope_core::IndexRunStats,
+    incremental_stats: scope_core::IndexRunStats,
 }
 
 fn benchmark_workload_name() -> &'static str {
@@ -2115,7 +2122,7 @@ fn benchmark_workload_name() -> &'static str {
 
 fn benchmark_phase_record(
     duration_ms: u128,
-    stats: &IndexRunStats,
+    stats: &scope_core::IndexRunStats,
 ) -> scope_core::stub::BenchmarkPhaseRecord {
     scope_core::stub::BenchmarkPhaseRecord {
         duration_ms,
@@ -2138,98 +2145,6 @@ fn median_duration_ms(values: &[u128]) -> u128 {
     } else {
         sorted[middle]
     }
-}
-
-fn index_repo(repo_root: &Path, store: &Store) -> Result<IndexRunStats, scope_core::ScopeError> {
-    let entries = scan_repo(repo_root, &ScanConfig::default())?;
-    let extracts: Vec<_> = entries
-        .into_iter()
-        .filter_map(|entry| {
-            let adapter = adapter_for_language(entry.language)?;
-            if !scope_core::adapters::supports_path(adapter, &entry.absolute_path) {
-                return None;
-            }
-            let source = fs::read_to_string(&entry.absolute_path).ok()?;
-            let mut extract = adapter.extract(&entry, &source);
-            let metadata = fs::metadata(&entry.absolute_path).ok()?;
-            let modified = metadata.modified().ok()?;
-            let modified_seconds = modified
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .map(|duration| duration.as_secs() as i64);
-            extract.file.content_hash = Some(blake3::hash(source.as_bytes()).to_hex().to_string());
-            extract.file.mtime_unix_seconds = modified_seconds;
-            extract.file.size_bytes = Some(metadata.len() as i64);
-            Some(extract)
-        })
-        .collect();
-
-    let extract_map: HashMap<RepoPath, scope_core::ExtractResult> = extracts
-        .into_iter()
-        .map(|extract| (extract.file.path.clone(), extract))
-        .collect();
-    let scanned_paths: HashSet<_> = extract_map.keys().cloned().collect();
-    let indexed_paths = store.list_indexed_files()?;
-    if indexed_paths.is_empty() {
-        let mut all_extracts: Vec<_> = extract_map.into_values().collect();
-        all_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
-        let indexed_files = all_extracts.len();
-        store.persist_extract_results(&all_extracts)?;
-        return Ok(IndexRunStats {
-            indexed_files,
-            changed_files: indexed_files,
-            deleted_files: 0,
-            affected_files: indexed_files,
-        });
-    }
-
-    let mut changed_or_new = Vec::new();
-    for extract in extract_map.values() {
-        match store.classify_file_change(&extract.file)? {
-            None | Some(true) => changed_or_new.push(extract.file.path.clone()),
-            Some(false) => {}
-        }
-    }
-
-    let deleted_paths: Vec<_> = indexed_paths
-        .into_iter()
-        .filter(|path| !scanned_paths.contains(path))
-        .collect();
-
-    let mut affected_paths: HashSet<_> = changed_or_new.iter().cloned().collect();
-    let mut closure_seeds = changed_or_new;
-    closure_seeds.extend(deleted_paths.iter().cloned());
-
-    for dependent in store.reverse_dependency_closure(&closure_seeds)? {
-        affected_paths.insert(dependent);
-    }
-
-    for path in &deleted_paths {
-        let _ = store.delete_file(path)?;
-    }
-
-    let mut affected_extracts: Vec<_> = affected_paths
-        .into_iter()
-        .filter_map(|path| extract_map.get(&path).cloned())
-        .collect();
-    affected_extracts.sort_by(|left, right| left.file.path.cmp(&right.file.path));
-
-    for extract in &affected_extracts {
-        store.upsert_file(&extract.file)?;
-    }
-    for extract in &affected_extracts {
-        store.persist_extract_result(extract)?;
-    }
-    for extract in &affected_extracts {
-        store.refresh_call_edges(extract)?;
-    }
-
-    Ok(IndexRunStats {
-        indexed_files: extract_map.len(),
-        changed_files: closure_seeds.len().saturating_sub(deleted_paths.len()),
-        deleted_files: deleted_paths.len(),
-        affected_files: affected_extracts.len(),
-    })
 }
 
 fn run_benchmark(
@@ -2335,7 +2250,7 @@ fn benchmark_iteration(
 fn summarize_phase(
     runs: &[BenchmarkIterationResult],
     duration: impl Fn(&BenchmarkIterationResult) -> u128,
-    stats: impl Fn(&BenchmarkIterationResult) -> &IndexRunStats,
+    stats: impl Fn(&BenchmarkIterationResult) -> &scope_core::IndexRunStats,
 ) -> scope_core::stub::BenchmarkPhaseSummary {
     let durations: Vec<_> = runs.iter().map(&duration).collect();
     let min_ms = durations.iter().copied().min().unwrap_or(0);
@@ -2487,6 +2402,7 @@ fn copy_dir_recursive_skip_index(
 mod tests {
     use super::*;
     use std::{
+        collections::HashMap,
         fs,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -2645,6 +2561,16 @@ mod tests {
     }
 
     #[test]
+    fn initialize_advertises_server_instructions() {
+        let response = initialize_response(json!(1));
+        assert_eq!(response["result"]["serverInfo"]["name"], "scope-mcp");
+        assert!(response["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Use `index` before dependency-sensitive analysis"));
+    }
+
+    #[test]
     fn dispatch_deps_returns_scope_json_envelope() {
         let repo = prepare_fixture_copy("rust_small");
         let index_output = dispatch_tool(
@@ -2742,6 +2668,7 @@ mod tests {
             .as_str()
             .expect("content text should be a string");
         let payload: Value = serde_json::from_str(text).expect("wrapped content should be JSON");
+        assert_eq!(response["result"]["structuredContent"], payload);
         assert_eq!(payload["command"], "query");
         assert_eq!(payload["status"], "ok");
         assert_eq!(
@@ -2784,6 +2711,7 @@ mod tests {
             .as_str()
             .expect("content text should be a string");
         let payload: Value = serde_json::from_str(text).expect("wrapped content should be JSON");
+        assert_eq!(response["result"]["structuredContent"], payload);
         assert_eq!(payload["command"], "query");
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["data"]["input"], "$roots | count");
