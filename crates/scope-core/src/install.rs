@@ -254,11 +254,21 @@ fn scope_server_entry() -> Value {
 }
 
 fn scope_mcp_command_and_args() -> (String, Vec<String>) {
-    let command = env::current_exe()
-        .ok()
-        .and_then(|path| scope_cli_command_path(&path))
-        .unwrap_or_else(|| scope_binary_name().to_string());
-    (command, vec!["mcp".to_string()])
+    if let Ok(path) = env::current_exe() {
+        if let Some(command) = scope_direct_mcp_command_path(&path) {
+            return (command, Vec::new());
+        }
+
+        if let Some(command) = scope_cli_command_path(&path) {
+            return (command, vec!["mcp".to_string()]);
+        }
+    }
+
+    if let Some(command) = scope_direct_mcp_command_path(Path::new(scope_binary_name())) {
+        return (command, Vec::new());
+    }
+
+    (scope_binary_name().to_string(), vec!["mcp".to_string()])
 }
 
 fn scope_cli_command_path(path: &Path) -> Option<String> {
@@ -272,6 +282,22 @@ fn scope_cli_command_path(path: &Path) -> Option<String> {
 
     let sibling = path.with_file_name(scope_binary_name());
     if (file_name == scope_mcp_name || !file_name.starts_with("scope")) && sibling.exists() {
+        return Some(sibling.to_string_lossy().to_string());
+    }
+
+    None
+}
+
+fn scope_direct_mcp_command_path(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let scope_mcp_name = scope_mcp_binary_name().to_ascii_lowercase();
+
+    if file_name == scope_mcp_name {
+        return Some(path.to_string_lossy().to_string());
+    }
+
+    let sibling = path.with_file_name(scope_mcp_binary_name());
+    if sibling.exists() {
         return Some(sibling.to_string_lossy().to_string());
     }
 
@@ -627,6 +653,29 @@ mod tests {
         assert!(updated.contains("args = [\"mcp\"]"));
         assert!(updated.contains("[other]\nvalue = 1"));
         assert!(!updated.contains("--old"));
+    }
+
+    #[test]
+    fn scope_direct_mcp_command_path_prefers_sibling_binary() {
+        let unique = format!(
+            "scope-install-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&dir).unwrap();
+
+        let scope_path = dir.join(scope_binary_name());
+        let scope_mcp_path = dir.join(scope_mcp_binary_name());
+        fs::write(&scope_path, b"").unwrap();
+        fs::write(&scope_mcp_path, b"").unwrap();
+
+        let command = scope_direct_mcp_command_path(&scope_path).unwrap();
+        assert_eq!(command, scope_mcp_path.to_string_lossy());
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

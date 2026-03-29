@@ -147,7 +147,7 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
         if read == 0 {
             return Ok(None);
         }
-        if line == "\r\n" {
+        if line.trim_end_matches(['\r', '\n']).is_empty() {
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
@@ -2570,6 +2570,25 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Use `index` before dependency-sensitive analysis"));
+    }
+
+    #[test]
+    fn read_message_accepts_lf_only_headers() {
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .unwrap();
+        let mut raw = Vec::new();
+        raw.extend_from_slice(format!("Content-Length: {}\n\n", body.len()).as_bytes());
+        raw.extend_from_slice(&body);
+
+        let mut cursor = io::Cursor::new(raw);
+        let message = read_message(&mut cursor).unwrap().unwrap();
+        assert_eq!(message["method"], "initialize");
+        assert_eq!(message["id"], 1);
     }
 
     #[test]
