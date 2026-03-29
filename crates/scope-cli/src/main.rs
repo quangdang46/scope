@@ -1,7 +1,9 @@
 mod cli;
 
 use std::{
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -31,7 +33,8 @@ use scope_core::{
     adapter_for_language, arch_check, arch_explain, arch_init, auto_install_user_mcp,
     execute_query, index_repo, install_mcp_for_hosts, load_arch_config, scan_repo,
     supported_install_hosts, validate_cochange_args, BootstrapOptions, CochangeSort, CycleSeverity,
-    DatabaseInfo, QuerySession, RiskSort, ScanConfig, SymbolKind, Verbosity,
+    DatabaseInfo, McpInstallReport, McpInstallStatus, QuerySession, RiskSort, ScanConfig,
+    SymbolKind, Verbosity,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -96,11 +99,87 @@ fn should_prune_compact_value(value: &serde_json::Value) -> bool {
         || matches!(value, serde_json::Value::Object(map) if map.is_empty())
 }
 
+fn should_render_install_report_text(compact: bool) -> bool {
+    !compact && io::stdout().is_terminal()
+}
+
+fn render_install_report_text(report: &McpInstallReport) -> String {
+    let mut output = String::new();
+    let command = if report.args.is_empty() {
+        report.command.clone()
+    } else {
+        format!("{} {}", report.command, report.args.join(" "))
+    };
+    let installed = report
+        .results
+        .iter()
+        .filter(|result| matches!(result.status, McpInstallStatus::Installed))
+        .count();
+    let updated = report
+        .results
+        .iter()
+        .filter(|result| matches!(result.status, McpInstallStatus::Updated))
+        .count();
+    let unchanged = report
+        .results
+        .iter()
+        .filter(|result| {
+            matches!(result.status, McpInstallStatus::Skipped)
+                && result.reason.as_deref() == Some("already configured")
+        })
+        .count();
+    let other_skipped = report
+        .results
+        .iter()
+        .filter(|result| {
+            matches!(result.status, McpInstallStatus::Skipped)
+                && result.reason.as_deref() != Some("already configured")
+        })
+        .count();
+
+    let _ = writeln!(output, "scope MCP install");
+    let _ = writeln!(output, "mode: {}", report.mode);
+    let _ = writeln!(output, "server: {}", report.server_name);
+    let _ = writeln!(output, "command: {command}");
+    let _ = writeln!(
+        output,
+        "summary: {} configured, {} installed, {} updated, {} unchanged, {} skipped, {} failed",
+        report.configured_count, installed, updated, unchanged, other_skipped, report.failed_count
+    );
+
+    for result in &report.results {
+        let status = match result.status {
+            McpInstallStatus::Installed => "installed",
+            McpInstallStatus::Updated => "updated",
+            McpInstallStatus::Skipped => "skipped",
+            McpInstallStatus::Failed => "failed",
+        };
+        let path = if result.path.is_empty() {
+            "-"
+        } else {
+            result.path.as_str()
+        };
+        let _ = write!(output, "{status:9} {:14} {path}", result.host);
+        if let Some(reason) = &result.reason {
+            let _ = write!(output, " ({reason})");
+        }
+        let _ = writeln!(output);
+    }
+
+    output.trim_end().to_string()
+}
+
 fn run() -> Result<i32, scope_core::ScopeError> {
     let cli = Cli::parse();
+    if let Commands::Mcp(_) = &cli.command {
+        scope_mcp::run().map_err(|error| scope_core::ScopeError::Internal(error.to_string()))?;
+        return Ok(0);
+    }
+
     let cwd = env::current_dir().map_err(|error| scope_core::ScopeError::io(".", error))?;
     let verbosity = verbosity(&cli);
     let compact = cli.compact;
+    let install_report_as_text = should_render_install_report_text(compact);
     let mut exit_code = 0;
 
     let output = match cli.command {
@@ -781,11 +860,16 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 exit_code = 1;
             }
 
-            serialize_output(
-                &scope_core::JsonEnvelope::success("install_mcp", report),
-                compact,
-            )
+            if install_report_as_text {
+                Ok(render_install_report_text(&report))
+            } else {
+                serialize_output(
+                    &scope_core::JsonEnvelope::success("install_mcp", report),
+                    compact,
+                )
+            }
         }
+        Commands::Mcp(_) => unreachable!("mcp mode is handled before command dispatch"),
     }
     .map_err(|error| scope_core::ScopeError::Serialization(error.to_string()))?;
 
@@ -2239,16 +2323,17 @@ mod tests {
     use super::{
         binding_completion_target, build_context_pack, complete_matches, complete_prefixed_matches,
         complete_step_matches, format_public_surface, index_repo, query_history_path_for_scope_dir,
-        quoted_completion_target, render_cli_error, run_benchmark, serialize_output, token_start,
-        QueryReplHelper,
+        quoted_completion_target, render_cli_error, render_install_report_text, run_benchmark,
+        serialize_output, token_start, QueryReplHelper,
     };
     use scope_core::{
         BranchDiffAffectedFile, BranchDiffChangedFile, BranchDiffResult, BranchDiffSummary,
         Certainty, CochangeRecord, CochangeResult, CycleRecord, CycleSeverity, CyclesResult,
-        PublicSurface, PublicSurfaceDiff, PublicSurfaceDiffSummary, PublicSurfaceSymbol,
-        RenameEdit, RenameEditKind, RenamePlan, RenamePlanStep, RenamePlanSummary, RepoPath,
-        RiskRecord, RiskResult, StabilityRecord, StabilityResult, SymbolKind, TreeNode, TreeResult,
-        TreeSummary, UnusedRecord, UnusedResult, UnusedSummary, Visibility,
+        McpInstallReport, McpInstallStatus, PublicSurface, PublicSurfaceDiff,
+        PublicSurfaceDiffSummary, PublicSurfaceSymbol, RenameEdit, RenameEditKind, RenamePlan,
+        RenamePlanStep, RenamePlanSummary, RepoPath, RiskRecord, RiskResult, StabilityRecord,
+        StabilityResult, SymbolKind, TreeNode, TreeResult, TreeSummary, UnusedRecord, UnusedResult,
+        UnusedSummary, Visibility,
     };
     use std::{
         fs,
@@ -2556,6 +2641,48 @@ mod tests {
         assert_eq!(compact_value["command"], "why");
         assert!(compact_value["data"].get("depth").is_none());
         assert!(compact_value["data"].get("path").is_none());
+    }
+
+    #[test]
+    fn render_install_report_text_summarizes_results_for_humans() {
+        let report = McpInstallReport {
+            mode: "auto_user".to_string(),
+            server_name: "scope".to_string(),
+            command: "/home/test/.local/bin/scope".to_string(),
+            args: vec!["mcp".to_string()],
+            configured_count: 2,
+            failed_count: 1,
+            results: vec![
+                scope_core::McpInstallHostResult {
+                    host: "codex".to_string(),
+                    path: "/home/test/.codex/config.toml".to_string(),
+                    status: McpInstallStatus::Skipped,
+                    reason: Some("already configured".to_string()),
+                },
+                scope_core::McpInstallHostResult {
+                    host: "claude-code".to_string(),
+                    path: "/home/test/.claude.json".to_string(),
+                    status: McpInstallStatus::Installed,
+                    reason: None,
+                },
+                scope_core::McpInstallHostResult {
+                    host: "cursor".to_string(),
+                    path: "/home/test/.cursor/mcp.json".to_string(),
+                    status: McpInstallStatus::Failed,
+                    reason: Some("permission denied".to_string()),
+                },
+            ],
+        };
+
+        let rendered = render_install_report_text(&report);
+
+        assert!(rendered.contains("scope MCP install"));
+        assert!(rendered.contains(
+            "summary: 2 configured, 1 installed, 0 updated, 1 unchanged, 0 skipped, 1 failed"
+        ));
+        assert!(rendered.contains("skipped   codex"));
+        assert!(rendered.contains("(already configured)"));
+        assert!(rendered.contains("failed    cursor"));
     }
 
     #[test]

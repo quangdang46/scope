@@ -15,7 +15,7 @@ This project is still under active development, but the fastest way to install t
 curl -fsSL "https://raw.githubusercontent.com/quangdang46/scope/main/install.sh?$(date +%s)" | bash
 ```
 
-The installer now places both `scope` and `scope-mcp` in your user bin directory, then auto-configures detected user-scope MCP clients such as Codex, Claude Code, Gemini, Cursor, Windsurf, Amp, and Factory Droid. To re-run that step manually:
+The installer auto-configures detected user-scope MCP clients such as Codex, Claude Code, Gemini, Cursor, Windsurf, Amp, and Factory Droid to launch `scope mcp`. A compatibility `scope-mcp` wrapper is still shipped for older setups. To re-run that step manually:
 
 ```bash
 scope install-mcp --auto-user
@@ -31,7 +31,13 @@ cargo run -p scope-cli -- index .
 cargo run -p scope-cli -- --compact deps src/lib.rs
 cargo run -p scope-cli -- report
 cargo run -p scope-cli -- serve --port 7777
-cargo run -p scope-mcp
+cargo run -p scope-cli -- mcp
+```
+
+To install from source with Cargo from the repo root:
+
+```bash
+cargo install --path . --locked
 ```
 
 ---
@@ -120,7 +126,7 @@ scope/
 ├── crates/
 │   ├── scope-cli/    # CLI entrypoint
 │   ├── scope-core/   # shared models, bootstrap, storage, query/report/serve logic
-│   └── scope-mcp/    # stdio MCP/JSON-RPC wrapper over scope-core
+│   └── scope-mcp/    # compatibility wrapper for the shared stdio MCP server
 └── .scope/
     └── index.db      # local SQLite index database
 ```
@@ -144,6 +150,7 @@ scope arch check | scope audit --capability <name> | scope surface [diff]
 scope stability | risk | cochange | test-map | rename-plan | snapshot | diff-snapshot
 scope simulate extract ... | report | gate | unused | cycles | diff | tree | split | mirror | entry
 scope serve [--port 7777] [--no-ui]
+scope mcp
 scope query [--expr ...]
 scope doctor [--fix] | benchmark [--fixture ...] [--iterations N] [--write-report]
 ```
@@ -155,7 +162,7 @@ Right now:
 - architecture, audit, surface, risk/stability/cochange, test-map, snapshot/diff, simulation, report/gate, unused/cycles, entry, tree/split/mirror, doctor, and benchmark commands are all wired through the CLI today
 - `scope serve` exposes the same core analyses through `/api/*` endpoints with a bundled embedded UI
 - `scope query` supports both single-expression execution and a basic interactive REPL over the query language
-- `scope-mcp` exposes core operations as stdio MCP tools backed by the same store/query layer
+- `scope mcp` exposes core operations as stdio MCP tools backed by the same store/query layer
 - `scope benchmark` now writes both Markdown and JSON artifacts by default into `bench-results/`, including `benchmark.md`, `benchmark.json`, and timestamped snapshots; `--write-report` or `--write-json` can still narrow output to a single artifact type
 
 ## Agent Usage Patterns
@@ -216,7 +223,7 @@ Compact mode is intended for agent loops and transport efficiency, not for human
 - TypeScript module resolution is conservative and does not yet cover `tsconfig` path mapping
 - the query REPL exists, but it does not yet implement the planned history/completion/save-load ergonomics
 - results are static approximations and may omit dynamic behavior
-- `scope-mcp` is functional today, but the CLI remains the most mature integration surface
+- the primary MCP entrypoint is now `scope mcp`; the standalone `scope-mcp` binary remains as a compatibility wrapper
 
 ## Example Current Output
 

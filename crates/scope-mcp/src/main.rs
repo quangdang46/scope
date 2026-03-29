@@ -29,21 +29,29 @@ fn main() {
     }
 }
 
-fn run() -> io::Result<()> {
+pub fn run() -> io::Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = stdout.lock();
 
     while let Some(request) = read_message(&mut reader)? {
+        let should_exit = is_exit_notification(&request);
         let response = handle_message(&request);
         if let Some(response) = response {
             write_message(&mut writer, &response)?;
             writer.flush()?;
         }
+        if should_exit {
+            break;
+        }
     }
 
     Ok(())
+}
+
+fn is_exit_notification(request: &Value) -> bool {
+    request.get("method").and_then(Value::as_str) == Some("exit")
 }
 
 fn handle_message(request: &Value) -> Option<Value> {
@@ -60,6 +68,7 @@ fn handle_message(request: &Value) -> Option<Value> {
     match method {
         "initialize" => id.map(initialize_response),
         "ping" => id.map(|id| jsonrpc_result(id, json!({}))),
+        "shutdown" => id.map(|id| jsonrpc_result(id, json!({}))),
         "tools/list" => id.map(|id| jsonrpc_result(id, json!({ "tools": tool_registry() }))),
         "tools/call" => {
             let id = id?;
@@ -2568,6 +2577,31 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Use `index` before dependency-sensitive analysis"));
+    }
+
+    #[test]
+    fn handle_message_answers_shutdown_requests() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "shutdown"
+        });
+
+        let response = handle_message(&request).expect("shutdown should return a response");
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 3);
+        assert_eq!(response["result"], json!({}));
+    }
+
+    #[test]
+    fn exit_notifications_mark_the_server_for_shutdown() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": "exit"
+        });
+
+        assert!(is_exit_notification(&request));
+        assert!(handle_message(&request).is_none());
     }
 
     #[test]

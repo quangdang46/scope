@@ -169,7 +169,6 @@ install_release_binary() {
 
 auto_install_mcp() {
     [ -x "$DEST/$BINARY_NAME" ] || return 0
-    [ -x "$DEST/$MCP_BINARY_NAME" ] || return 0
 
     log_info "Auto-installing MCP config for detected user tools"
     if ! "$DEST/$BINARY_NAME" install-mcp --auto-user; then
@@ -220,6 +219,7 @@ main() {
     echo "✓ $MCP_BINARY_NAME installed → $DEST/$MCP_BINARY_NAME"
     echo ""
     echo "  Usage: $BINARY_NAME --help"
+    echo "  MCP:   $BINARY_NAME mcp"
 }
 
 # curl|bash safety: buffer entire script before executing

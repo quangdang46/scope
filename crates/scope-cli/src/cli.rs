@@ -90,8 +90,10 @@ pub enum Commands {
     Doctor(DoctorArgs),
     /// Benchmark full versus incremental indexing on an isolated repo copy
     Benchmark(BenchmarkArgs),
-    /// Install scope-mcp into detected user-scope MCP client configs
+    /// Install the scope MCP server into detected user-scope MCP client configs
     InstallMcp(InstallMcpArgs),
+    /// Run the scope MCP server over stdio
+    Mcp(McpArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -559,3 +561,6 @@ pub struct InstallMcpArgs {
     #[arg(long)]
     pub auto_user: bool,
 }
+
+#[derive(Debug, clap::Args)]
+pub struct McpArgs {}

@@ -1476,14 +1476,14 @@ pub fn surface_diff(
 
 pub fn mcp_stub_message() -> JsonEnvelope<TraversalRecord> {
     JsonEnvelope::stub(
-        "scope-mcp",
+        "mcp",
         TraversalRecord {
             kind: NodeKind::Symbol,
             path: None,
-            qualname: Some("scope-mcp".to_string()),
+            qualname: Some("scope mcp".to_string()),
             edge_kind: EdgeKind::Dynamic,
             certainty: Certainty::Dynamic,
-            reason: "scope-mcp exposes an early MCP/stdIO wrapper over scope-core and should be treated as an evolving integration surface".to_string(),
+            reason: "scope mcp exposes the stdio MCP server over the same scope-core query surface and should be treated as an evolving integration surface".to_string(),
             distance: 0,
         },
     )

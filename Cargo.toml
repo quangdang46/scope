@@ -1,3 +1,19 @@
+[package]
+name = "scope"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+
+[[bin]]
+name = "scope"
+path = "crates/scope-cli/src/main.rs"
+
+[[bin]]
+name = "scope-mcp"
+path = "crates/scope-mcp/src/main.rs"
+
 [workspace]
 members = [
   "crates/scope-core",
@@ -32,3 +48,14 @@ tokio = { version = "1.44.1", features = ["macros", "rt-multi-thread", "net"] }
 rustyline = { version = "13", features = ["derive"] }
 open = "5.3.2"
 tower = { version = "0.5.2", features = ["util"] }
+
+[dependencies]
+blake3.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+scope-core = { path = "crates/scope-core" }
+scope-mcp = { path = "crates/scope-mcp" }
+tokio.workspace = true
+rustyline.workspace = true

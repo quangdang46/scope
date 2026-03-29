@@ -975,6 +975,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "scope"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "clap",
+ "rustyline",
+ "scope-core",
+ "scope-mcp",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "scope-cli"
 version = "0.1.0"
 dependencies = [
@@ -983,6 +998,7 @@ dependencies = [
  "clap",
  "rustyline",
  "scope-core",
+ "scope-mcp",
  "serde",
  "serde_json",
  "tokio",

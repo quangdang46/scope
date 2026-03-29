@@ -54,6 +54,13 @@ enum ConfigFormat {
     Toml,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallWriteStatus {
+    Installed,
+    Updated,
+    Unchanged,
+}
+
 #[derive(Debug)]
 struct HostInfo {
     name: &'static str,
@@ -78,12 +85,12 @@ pub fn install_mcp_for_hosts(hosts: &[String]) -> ScopeResult<McpInstallReport> 
 
     for host in hosts {
         let info = resolve_host(host)?;
-        let status = install_host(&info)?;
+        let (status, reason) = install_host(&info)?;
         results.push(McpInstallHostResult {
             host: info.name.to_string(),
             path: info.path.display().to_string(),
             status,
-            reason: None,
+            reason,
         });
     }
 
@@ -110,11 +117,11 @@ pub fn auto_install_user_mcp() -> ScopeResult<McpInstallReport> {
         let path_display = info.path.display().to_string();
         match detect_host(&info)? {
             Some(_) => match install_host(&info) {
-                Ok(status) => results.push(McpInstallHostResult {
+                Ok((status, reason)) => results.push(McpInstallHostResult {
                     host: info.name.to_string(),
                     path: path_display,
                     status,
-                    reason: None,
+                    reason,
                 }),
                 Err(error) => results.push(McpInstallHostResult {
                     host: info.name.to_string(),
@@ -146,6 +153,9 @@ fn build_report(
             matches!(
                 result.status,
                 McpInstallStatus::Installed | McpInstallStatus::Updated
+            ) || matches!(
+                (result.status.clone(), result.reason.as_deref()),
+                (McpInstallStatus::Skipped, Some("already configured"))
             )
         })
         .count();
@@ -165,26 +175,29 @@ fn build_report(
     }
 }
 
-fn install_host(host: &HostInfo) -> ScopeResult<McpInstallStatus> {
+fn install_host(host: &HostInfo) -> ScopeResult<(McpInstallStatus, Option<String>)> {
     if let Some(parent) = host.path.parent() {
         fs::create_dir_all(parent).map_err(|error| ScopeError::io(parent, error))?;
     }
 
-    let existed = host.path.exists();
-    match host.format {
+    let status = match host.format {
         ConfigFormat::Json { servers_key } => write_json_config(host, servers_key)?,
         ConfigFormat::Toml => write_toml_config(host)?,
-    }
+    };
 
-    Ok(if existed {
-        McpInstallStatus::Updated
-    } else {
-        McpInstallStatus::Installed
+    Ok(match status {
+        InstallWriteStatus::Installed => (McpInstallStatus::Installed, None),
+        InstallWriteStatus::Updated => (McpInstallStatus::Updated, None),
+        InstallWriteStatus::Unchanged => (
+            McpInstallStatus::Skipped,
+            Some("already configured".to_string()),
+        ),
     })
 }
 
-fn write_json_config(host: &HostInfo, servers_key: &str) -> ScopeResult<()> {
-    let mut config: Value = if host.path.exists() {
+fn write_json_config(host: &HostInfo, servers_key: &str) -> ScopeResult<InstallWriteStatus> {
+    let existed = host.path.exists();
+    let mut config: Value = if existed {
         let raw =
             fs::read_to_string(&host.path).map_err(|error| ScopeError::io(&host.path, error))?;
         serde_json::from_str(&raw).map_err(|error| {
@@ -194,24 +207,42 @@ fn write_json_config(host: &HostInfo, servers_key: &str) -> ScopeResult<()> {
         json!({})
     };
 
-    upsert_json_server(&mut config, servers_key, scope_server_entry())?;
+    let entry = scope_server_entry();
+    if json_scope_server_matches(&config, servers_key, &entry) {
+        return Ok(InstallWriteStatus::Unchanged);
+    }
+
+    upsert_json_server(&mut config, servers_key, entry)?;
     let output = serde_json::to_string_pretty(&config)
         .map_err(|error| ScopeError::Serialization(error.to_string()))?;
     fs::write(&host.path, output).map_err(|error| ScopeError::io(&host.path, error))?;
-    Ok(())
+    Ok(if existed {
+        InstallWriteStatus::Updated
+    } else {
+        InstallWriteStatus::Installed
+    })
 }
 
-fn write_toml_config(host: &HostInfo) -> ScopeResult<()> {
+fn write_toml_config(host: &HostInfo) -> ScopeResult<InstallWriteStatus> {
+    let existed = host.path.exists();
     let (command, args) = scope_mcp_command_and_args();
-    let section = render_toml_server_section(&command, &args);
-    let existing = if host.path.exists() {
+    let existing = if existed {
         fs::read_to_string(&host.path).map_err(|error| ScopeError::io(&host.path, error))?
     } else {
         String::new()
     };
+    if toml_scope_server_matches(&existing, &command, &args)? {
+        return Ok(InstallWriteStatus::Unchanged);
+    }
+
+    let section = render_toml_server_section(&command, &args);
     let updated = upsert_toml_server_section(&existing, &section);
     fs::write(&host.path, updated).map_err(|error| ScopeError::io(&host.path, error))?;
-    Ok(())
+    Ok(if existed {
+        InstallWriteStatus::Updated
+    } else {
+        InstallWriteStatus::Installed
+    })
 }
 
 fn scope_server_entry() -> Value {
@@ -225,16 +256,38 @@ fn scope_server_entry() -> Value {
 fn scope_mcp_command_and_args() -> (String, Vec<String>) {
     let command = env::current_exe()
         .ok()
-        .map(|path| {
-            let sibling = path.with_file_name(scope_mcp_binary_name());
-            if sibling.exists() {
-                sibling.to_string_lossy().to_string()
-            } else {
-                scope_mcp_binary_name().to_string()
-            }
-        })
-        .unwrap_or_else(|| scope_mcp_binary_name().to_string());
-    (command, Vec::new())
+        .and_then(|path| scope_cli_command_path(&path))
+        .unwrap_or_else(|| scope_binary_name().to_string());
+    (command, vec!["mcp".to_string()])
+}
+
+fn scope_cli_command_path(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let scope_name = scope_binary_name().to_ascii_lowercase();
+    let scope_mcp_name = scope_mcp_binary_name().to_ascii_lowercase();
+
+    if file_name == scope_name {
+        return Some(path.to_string_lossy().to_string());
+    }
+
+    let sibling = path.with_file_name(scope_binary_name());
+    if (file_name == scope_mcp_name || !file_name.starts_with("scope")) && sibling.exists() {
+        return Some(sibling.to_string_lossy().to_string());
+    }
+
+    None
+}
+
+fn scope_binary_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "scope.exe"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        "scope"
+    }
 }
 
 fn scope_mcp_binary_name() -> &'static str {
@@ -424,6 +477,15 @@ fn upsert_json_server(config: &mut Value, servers_key: &str, entry: Value) -> Sc
     Ok(())
 }
 
+fn json_scope_server_matches(config: &Value, servers_key: &str, entry: &Value) -> bool {
+    config
+        .as_object()
+        .and_then(|root| root.get(servers_key))
+        .and_then(Value::as_object)
+        .and_then(|servers| servers.get("scope"))
+        == Some(entry)
+}
+
 fn render_toml_server_section(command: &str, args: &[String]) -> String {
     let command_escaped = command.replace('\\', "\\\\");
     let args_toml: Vec<String> = args
@@ -434,6 +496,38 @@ fn render_toml_server_section(command: &str, args: &[String]) -> String {
         "[mcp_servers.scope]\ncommand = \"{command_escaped}\"\nargs = [{}]\n",
         args_toml.join(", ")
     )
+}
+
+fn toml_scope_server_matches(existing: &str, command: &str, args: &[String]) -> ScopeResult<bool> {
+    if existing.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let parsed: toml::Value = toml::from_str(existing).map_err(|error| {
+        ScopeError::InvalidInput(format!("invalid TOML in existing MCP config: {error}"))
+    })?;
+    let Some(scope) = parsed
+        .get("mcp_servers")
+        .and_then(toml::Value::as_table)
+        .and_then(|servers| servers.get("scope"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(false);
+    };
+
+    let command_matches = scope.get("command").and_then(toml::Value::as_str) == Some(command);
+    let args_matches = scope
+        .get("args")
+        .and_then(toml::Value::as_array)
+        .and_then(|values| {
+            values
+                .iter()
+                .map(|value| value.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+        })
+        .is_some_and(|existing_args| existing_args == args);
+
+    Ok(command_matches && args_matches)
 }
 
 fn upsert_toml_server_section(existing: &str, section: &str) -> String {
@@ -460,15 +554,13 @@ mod tests {
     #[test]
     fn amp_dotted_key_is_literal_not_nested() {
         let mut config = json!({});
-        let entry = json!({"command": "scope-mcp", "args": []});
+        let entry = json!({"command": "scope", "args": ["mcp"]});
         upsert_json_server(&mut config, "amp.mcpServers", entry).unwrap();
 
         assert!(config.get("amp.mcpServers").is_some());
         assert!(config.get("amp").is_none());
-        assert_eq!(
-            config["amp.mcpServers"]["scope"]["command"],
-            json!("scope-mcp")
-        );
+        assert_eq!(config["amp.mcpServers"]["scope"]["command"], json!("scope"));
+        assert_eq!(config["amp.mcpServers"]["scope"]["args"], json!(["mcp"]));
     }
 
     #[test]
@@ -478,11 +570,44 @@ mod tests {
                 "playwright": {"command": "npx", "args": ["-y", "@playwright/mcp@latest"]}
             }
         });
-        let entry = json!({"command": "scope-mcp", "args": []});
+        let entry = json!({"command": "scope", "args": ["mcp"]});
         upsert_json_server(&mut config, "mcpServers", entry).unwrap();
 
         assert_eq!(config["mcpServers"]["playwright"]["command"], json!("npx"));
-        assert_eq!(config["mcpServers"]["scope"]["command"], json!("scope-mcp"));
+        assert_eq!(config["mcpServers"]["scope"]["command"], json!("scope"));
+        assert_eq!(config["mcpServers"]["scope"]["args"], json!(["mcp"]));
+    }
+
+    #[test]
+    fn json_scope_server_matches_only_when_entry_is_identical() {
+        let entry = json!({"command": "scope", "args": ["mcp"]});
+        let config = json!({
+            "mcpServers": {
+                "scope": {"command": "scope", "args": ["mcp"]}
+            }
+        });
+        assert!(json_scope_server_matches(&config, "mcpServers", &entry));
+
+        let different = json!({
+            "mcpServers": {
+                "scope": {"command": "other", "args": []}
+            }
+        });
+        assert!(!json_scope_server_matches(&different, "mcpServers", &entry));
+    }
+
+    #[test]
+    fn toml_scope_server_matches_only_when_command_and_args_match() {
+        let existing = concat!(
+            "[mcp_servers.scope]\n",
+            "command = \"/tmp/scope\"\n",
+            "args = [\"mcp\"]\n",
+        );
+        assert!(toml_scope_server_matches(existing, "/tmp/scope", &[String::from("mcp")]).unwrap());
+        assert!(
+            !toml_scope_server_matches(existing, "/tmp/other", &[String::from("mcp")]).unwrap()
+        );
+        assert!(!toml_scope_server_matches(existing, "/tmp/scope", &[]).unwrap());
     }
 
     #[test]
@@ -495,12 +620,44 @@ mod tests {
             "[other]\n",
             "value = 1\n"
         );
-        let replacement = render_toml_server_section("/tmp/scope-mcp", &[]);
+        let replacement = render_toml_server_section("/tmp/scope", &[String::from("mcp")]);
         let updated = upsert_toml_server_section(existing, &replacement);
 
-        assert!(updated.contains("command = \"/tmp/scope-mcp\""));
+        assert!(updated.contains("command = \"/tmp/scope\""));
+        assert!(updated.contains("args = [\"mcp\"]"));
         assert!(updated.contains("[other]\nvalue = 1"));
         assert!(!updated.contains("--old"));
+    }
+
+    #[test]
+    fn build_report_counts_already_configured_hosts_as_configured() {
+        let report = build_report(
+            "auto_user",
+            ("scope".to_string(), vec!["mcp".to_string()]),
+            vec![
+                McpInstallHostResult {
+                    host: "codex".to_string(),
+                    path: "/tmp/codex.toml".to_string(),
+                    status: McpInstallStatus::Skipped,
+                    reason: Some("already configured".to_string()),
+                },
+                McpInstallHostResult {
+                    host: "cursor".to_string(),
+                    path: "/tmp/cursor.json".to_string(),
+                    status: McpInstallStatus::Skipped,
+                    reason: Some("host not detected on this machine".to_string()),
+                },
+                McpInstallHostResult {
+                    host: "claude-code".to_string(),
+                    path: "/tmp/claude.json".to_string(),
+                    status: McpInstallStatus::Installed,
+                    reason: None,
+                },
+            ],
+        );
+
+        assert_eq!(report.configured_count, 2);
+        assert_eq!(report.failed_count, 0);
     }
 
     #[test]
