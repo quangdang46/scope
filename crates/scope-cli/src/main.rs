@@ -722,6 +722,9 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             let iterations = args.iterations.unwrap_or(1);
+            let explicit_artifact_selection = args.write_report || args.write_json;
+            let write_report = args.write_report || !explicit_artifact_selection;
+            let write_json = args.write_json || !explicit_artifact_selection;
             let mut summary = run_benchmark(
                 &context.paths.repo_root,
                 args.fixture.as_deref(),
@@ -737,24 +740,22 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             }
             let envelope =
                 scope_core::stub::benchmark(args.fixture.clone(), args.iterations, summary);
-            if args.write_report || args.write_json {
-                let command = benchmark_command_string(
-                    args.fixture.as_deref(),
-                    iterations,
-                    args.workload,
-                    args.write_report,
-                    args.write_json,
-                );
-                write_benchmark_reports(
-                    &context.paths.repo_root,
-                    args.fixture.as_deref(),
-                    iterations,
-                    &envelope,
-                    &command,
-                    args.write_report,
-                    args.write_json,
-                )?;
-            }
+            let command = benchmark_command_string(
+                args.fixture.as_deref(),
+                iterations,
+                args.workload,
+                args.write_report,
+                args.write_json,
+            );
+            write_benchmark_reports(
+                &context.paths.repo_root,
+                args.fixture.as_deref(),
+                iterations,
+                &envelope,
+                &command,
+                write_report,
+                write_json,
+            )?;
             serialize_output(&envelope, compact)
         }
         Commands::InstallMcp(args) => {

@@ -156,7 +156,7 @@ Right now:
 - `scope serve` exposes the same core analyses through `/api/*` endpoints with a bundled embedded UI
 - `scope query` supports both single-expression execution and a basic interactive REPL over the query language
 - `scope-mcp` exposes core operations as stdio MCP tools backed by the same store/query layer
-- `scope benchmark --write-report` writes a linehash-style Markdown summary to `bench-results/benchmark.md` plus a timestamped `bench-results/bench-YYYY-MM-DD-HH-MM-SS.md` snapshot
+- `scope benchmark` now writes both Markdown and JSON artifacts by default into `bench-results/`, including `benchmark.md`, `benchmark.json`, and timestamped snapshots; `--write-report` or `--write-json` can still narrow output to a single artifact type
 
 ## Agent Usage Patterns
 

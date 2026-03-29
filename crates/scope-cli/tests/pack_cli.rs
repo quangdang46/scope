@@ -1897,6 +1897,46 @@ fn benchmark_command_returns_task_matrix_results() {
 
 #[test]
 #[ignore = "flaky on macOS"]
+fn benchmark_command_writes_reports_by_default() {
+    let repo = prepare_fixture_copy("rust_small");
+    let report_dir = repo.join("bench-results");
+    let output = run_scope(
+        &repo,
+        &["benchmark", "--fixture", "rust_small", "--iterations", "1"],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(report_dir.join("benchmark.md").exists());
+    assert!(report_dir.join("benchmark.json").exists());
+
+    let markdown_snapshot_count = fs::read_dir(&report_dir)
+        .expect("report dir should exist")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("bench-") && name.ends_with(".md"))
+        })
+        .count();
+    let json_snapshot_count = fs::read_dir(&report_dir)
+        .expect("report dir should exist")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("bench-") && name.ends_with(".json"))
+        })
+        .count();
+    assert_eq!(markdown_snapshot_count, 1);
+    assert_eq!(json_snapshot_count, 1);
+
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[test]
+#[ignore = "flaky on macOS"]
 fn benchmark_command_writes_latest_and_snapshot_reports() {
     let repo = prepare_fixture_copy("rust_small");
     let report_dir = repo.join("bench-results");

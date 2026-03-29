@@ -542,10 +542,10 @@ pub struct BenchmarkArgs {
     pub workload: BenchmarkWorkloadArg,
     #[arg(long)]
     pub compare: Vec<PathBuf>,
-    /// Write benchmark Markdown reports into bench-results/
+    /// Write benchmark Markdown reports into bench-results/; enabled by default unless only --write-json is set
     #[arg(long)]
     pub write_report: bool,
-    /// Write benchmark JSON reports into bench-results/
+    /// Write benchmark JSON reports into bench-results/; enabled by default unless only --write-report is set
     #[arg(long)]
     pub write_json: bool,
 }
