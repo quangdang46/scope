@@ -9,10 +9,12 @@ description.workspace = true
 [[bin]]
 name = "scope"
 path = "crates/scope-cli/src/main.rs"
+test = false
 
 [[bin]]
 name = "scope-mcp"
 path = "crates/scope-mcp/src/main.rs"
+test = false
 
 [workspace]
 members = [
