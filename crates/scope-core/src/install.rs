@@ -391,10 +391,10 @@ fn home_dir() -> ScopeResult<PathBuf> {
     }
 }
 
-fn claude_desktop_path(home: &Path) -> ScopeResult<PathBuf> {
+fn claude_desktop_path(_home: &Path) -> ScopeResult<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        Ok(home.join("Library/Application Support/Claude/claude_desktop_config.json"))
+        Ok(_home.join("Library/Application Support/Claude/claude_desktop_config.json"))
     }
 
     #[cfg(target_os = "windows")]
@@ -406,7 +406,6 @@ fn claude_desktop_path(home: &Path) -> ScopeResult<PathBuf> {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = home;
         Err(ScopeError::InvalidInput(
             "claude-desktop auto-install is not supported on this OS".to_string(),
         ))
