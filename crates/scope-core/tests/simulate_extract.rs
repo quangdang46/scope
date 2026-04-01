@@ -65,16 +65,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
         let file_type = entry.file_type().unwrap();
 
         if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path);
-        } else {
-            if src_path
-                .strip_prefix(src)
-                .ok()
-                .and_then(|relative| relative.to_str())
-                == Some(".scope/index.db")
-            {
+            if entry.file_name() == ".scope" {
                 continue;
             }
+            copy_dir_recursive(&src_path, &dst_path);
+        } else {
             if is_text_file(&src_path) {
                 let content = fs::read_to_string(&src_path).unwrap();
                 fs::write(&dst_path, content.replace("\r\n", "\n")).unwrap();
