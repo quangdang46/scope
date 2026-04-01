@@ -32,11 +32,11 @@ jobs:
             method: cross
             suffix: linux-aarch64
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
             method: native
             suffix: macos-x86_64
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
             method: native
             suffix: macos-aarch64
           - target: x86_64-pc-windows-msvc
@@ -92,7 +92,11 @@ jobs:
             ARCHIVE="${{ matrix.bin }}-${VERSION}-${{ matrix.suffix }}.tar.gz"
             tar -czf "../../${ARCHIVE}" "${BIN_NAME}"
             cd ../../
-            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+            else
+              shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+            fi
           fi
 
       - name: Upload Artifact
