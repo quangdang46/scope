@@ -1,0 +1,5 @@
+crates/*/tests/*.rs
+crates/*/src/tests.rs
+crates/*/src/**/tests.rs
+crates/*/src/*_tests.rs
+crates/*/src/**/*_tests.rs
