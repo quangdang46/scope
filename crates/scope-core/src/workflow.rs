@@ -208,7 +208,8 @@ fn parse_workflow(repo_root: &Path, path: &Path) -> ScopeResult<WorkflowDefiniti
         .strip_prefix(repo_root)
         .unwrap_or(path)
         .display()
-        .to_string();
+        .to_string()
+        .replace('\\', "/");
 
     Ok(WorkflowDefinition {
         id: frontmatter.id,
