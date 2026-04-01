@@ -84,12 +84,37 @@ pub struct QueryEngine<'a> {
     store: &'a Store,
 }
 
+#[derive(Debug, Clone)]
+pub struct QueryOutput {
+    value: Value,
+    pretty: String,
+    compact: String,
+}
+
+impl QueryOutput {
+    pub fn as_value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn into_value(self) -> Value {
+        self.value
+    }
+
+    pub fn render(&self, compact: bool) -> &str {
+        if compact {
+            &self.compact
+        } else {
+            &self.pretty
+        }
+    }
+}
+
 impl<'a> QueryEngine<'a> {
     pub fn new(store: &'a Store) -> Self {
         Self { store }
     }
 
-    pub fn execute(&self, request: QueryRequest) -> ScopeResult<Value> {
+    pub fn execute(&self, request: QueryRequest) -> ScopeResult<QueryOutput> {
         match request {
             QueryRequest::Deps(query) => {
                 let target = RepoPath::from(query.file.clone());
@@ -166,10 +191,46 @@ impl<'a> QueryEngine<'a> {
     }
 }
 
-fn serialize_envelope<T: Serialize>(envelope: JsonEnvelope<T>) -> ScopeResult<Value> {
-    serde_json::to_value(envelope).map_err(|error| {
+fn serialize_envelope<T: Serialize>(envelope: JsonEnvelope<T>) -> ScopeResult<QueryOutput> {
+    let pretty = serde_json::to_string_pretty(&envelope).map_err(|error| {
         ScopeError::Internal(format!("failed to serialize query envelope: {error}"))
+    })?;
+    let value = serde_json::to_value(envelope).map_err(|error| {
+        ScopeError::Internal(format!("failed to serialize query envelope: {error}"))
+    })?;
+    let mut compact = value.clone();
+    compact_json_value(&mut compact);
+    let compact = serde_json::to_string(&compact).map_err(|error| {
+        ScopeError::Internal(format!("failed to serialize query envelope: {error}"))
+    })?;
+    Ok(QueryOutput {
+        value,
+        pretty,
+        compact,
     })
+}
+
+fn compact_json_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for value in map.values_mut() {
+                compact_json_value(value);
+            }
+            map.retain(|_, value| !should_prune_compact_value(value));
+        }
+        Value::Array(values) => {
+            for value in values {
+                compact_json_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn should_prune_compact_value(value: &Value) -> bool {
+    matches!(value, Value::Null)
+        || matches!(value, Value::Array(values) if values.is_empty())
+        || matches!(value, Value::Object(map) if map.is_empty())
 }
 
 #[cfg(test)]
@@ -258,10 +319,11 @@ mod tests {
             }))
             .expect("deps request should succeed");
 
-        assert_eq!(output["command"], "deps");
-        assert_eq!(output["status"], "ok");
-        assert_eq!(output["data"]["target"], "src/lib.rs");
-        assert_eq!(output["data"]["dependencies"][0]["path"], "src/parser.rs");
+        let value = output.as_value();
+        assert_eq!(value["command"], "deps");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["data"]["target"], "src/lib.rs");
+        assert_eq!(value["data"]["dependencies"][0]["path"], "src/parser.rs");
     }
 
     #[test]
@@ -279,10 +341,11 @@ mod tests {
             }))
             .expect("context request should succeed");
 
-        assert_eq!(output["command"], "context");
-        assert_eq!(output["status"], "ok");
-        assert!(output["data"]["result"]["must_read"].is_array());
-        assert!(output["data"]["result"]["should_read"].is_array());
-        assert!(output["data"]["result"]["summary"].is_object());
+        let value = output.as_value();
+        assert_eq!(value["command"], "context");
+        assert_eq!(value["status"], "ok");
+        assert!(value["data"]["result"]["must_read"].is_array());
+        assert!(value["data"]["result"]["should_read"].is_array());
+        assert!(value["data"]["result"]["summary"].is_object());
     }
 }

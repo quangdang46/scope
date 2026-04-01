@@ -2,14 +2,15 @@ use std::{
     env, fs,
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{Instant, UNIX_EPOCH},
 };
 
 use scope_core::{
-    arch_check, execute_query, index_repo, load_arch_config, scan_repo, BootstrapOptions,
-    CallsQuery, CochangeSort, ContextQuery, DatabaseInfo, DepsQuery, ExplainQuery, ImpactQuery,
-    QueryEngine, QueryRequest, QuerySession, RepoPath, RiskSort, ScanConfig, SymbolKind,
-    SymbolsQuery, Verbosity, WhyQuery,
+    arch_check, execute_query, index_repo, scan_repo, BootstrapOptions, CallsQuery, CochangeSort,
+    ContextQuery, DatabaseInfo, DepsQuery, ExplainQuery, ImpactQuery, QueryEngine, QueryRequest,
+    QuerySession, RepoPath, RiskSort, RuntimeMetadataCache, RuntimeOperation, RuntimePolicy,
+    ScanConfig, SymbolKind, SymbolsQuery, Verbosity, WhyQuery,
 };
 use serde_json::{json, Value};
 
@@ -24,6 +25,8 @@ const MCP_INSTRUCTIONS: &str = concat!(
 );
 
 pub fn run() -> io::Result<()> {
+    let runtime = build_runtime()?;
+    let _ = MCP_RUNTIME.set(runtime);
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
@@ -50,6 +53,32 @@ pub fn run() -> io::Result<()> {
 
 fn is_exit_notification(request: &Value) -> bool {
     request.get("method").and_then(Value::as_str) == Some("exit")
+}
+
+#[derive(Debug)]
+struct McpRuntime {
+    session_root: PathBuf,
+    runtime_metadata: RuntimeMetadataCache,
+    runtime_policy: RuntimePolicy,
+}
+
+static MCP_RUNTIME: OnceLock<McpRuntime> = OnceLock::new();
+
+fn build_runtime() -> io::Result<McpRuntime> {
+    let session_root = env::current_dir()?;
+    Ok(McpRuntime {
+        session_root,
+        runtime_metadata: RuntimeMetadataCache::new(),
+        runtime_policy: RuntimePolicy::from_env(),
+    })
+}
+
+fn mcp_runtime() -> &'static McpRuntime {
+    MCP_RUNTIME.get_or_init(|| McpRuntime {
+        session_root: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        runtime_metadata: RuntimeMetadataCache::new(),
+        runtime_policy: RuntimePolicy::from_env(),
+    })
 }
 
 fn handle_message(request: &Value) -> Option<Value> {
@@ -936,6 +965,16 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, DispatchError>
     Ok(output)
 }
 
+fn load_runtime_arch_config(
+    repo_root: &Path,
+    operation: RuntimeOperation,
+) -> Result<scope_core::ArchConfig, scope_core::ScopeError> {
+    let runtime = mcp_runtime();
+    runtime
+        .runtime_metadata
+        .load_arch_config(repo_root, &runtime.runtime_policy, operation)
+}
+
 fn dispatch_index(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
         let no_git = optional_bool(arguments, "no_git").unwrap_or(false);
@@ -972,7 +1011,7 @@ fn dispatch_deps(arguments: &Value) -> String {
                     transitive: optional_bool(arguments, "transitive").unwrap_or(false),
                     depth: optional_usize(arguments, "depth")?,
                 }))?;
-            serialize_json(&envelope)
+            Ok(envelope.render(false).to_string())
         })
     }) {
         Ok(output) => output,
@@ -990,7 +1029,7 @@ fn dispatch_symbols(arguments: &Value) -> String {
                     public_only: optional_bool(arguments, "public_only").unwrap_or(false),
                     kind: optional_symbol_kind(arguments, "kind")?,
                 }))?;
-            serialize_json(&envelope)
+            Ok(envelope.render(false).to_string())
         })
     }) {
         Ok(output) => output,
@@ -1007,7 +1046,7 @@ fn dispatch_calls(arguments: &Value) -> String {
                     symbol,
                     transitive: optional_bool(arguments, "transitive").unwrap_or(false),
                 }))?;
-            serialize_json(&envelope)
+            Ok(envelope.render(false).to_string())
         })
     }) {
         Ok(output) => output,
@@ -1024,7 +1063,7 @@ fn dispatch_callers(arguments: &Value) -> String {
                     symbol,
                     transitive: optional_bool(arguments, "transitive").unwrap_or(false),
                 }))?;
-            serialize_json(&envelope)
+            Ok(envelope.render(false).to_string())
         })
     }) {
         Ok(output) => output,
@@ -1045,7 +1084,7 @@ fn dispatch_impact(arguments: &Value) -> String {
                         depth: optional_usize(arguments, "depth")?,
                     },
                 ))?;
-                serialize_json(&envelope)
+                Ok(envelope.render(false).to_string())
             })
         })
     }) {
@@ -1064,7 +1103,7 @@ fn dispatch_explain(arguments: &Value) -> String {
                     to: optional_string(arguments, "to"),
                     depth: optional_usize(arguments, "depth")?,
                 }))?;
-            serialize_json(&envelope)
+            Ok(envelope.render(false).to_string())
         })
     }) {
         Ok(output) => output,
@@ -1084,7 +1123,7 @@ fn dispatch_why(arguments: &Value) -> String {
                         to,
                         depth: optional_usize(arguments, "depth")?,
                     }))?;
-                serialize_json(&envelope)
+                Ok(envelope.render(false).to_string())
             })
         })
     }) {
@@ -1104,7 +1143,7 @@ fn dispatch_context(arguments: &Value) -> String {
                         budget: optional_usize(arguments, "budget")?,
                     },
                 ))?;
-                serialize_json(&envelope)
+                Ok(envelope.render(false).to_string())
             })
         })
     }) {
@@ -1134,7 +1173,8 @@ fn dispatch_pack(arguments: &Value) -> String {
 
 fn dispatch_arch_check(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
-        let config = load_arch_config(&context.paths.repo_root)?;
+        let config =
+            load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::ArchCheck)?;
         let result = arch_check(&context.store, &config)?;
         serialize_json(&scope_core::stub::arch_check(result))
     }) {
@@ -1146,7 +1186,8 @@ fn dispatch_arch_check(arguments: &Value) -> String {
 fn dispatch_audit(arguments: &Value) -> String {
     match required_string(arguments, "capability").and_then(|capability| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config =
+                load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::Audit)?;
             let result = context.store.query_audit(&config, &capability)?;
             serialize_json(&scope_core::stub::audit(result))
         })
@@ -1213,7 +1254,7 @@ fn dispatch_cochange(arguments: &Value) -> String {
 fn dispatch_report(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
         let compare = optional_string_arg(arguments, "compare")?;
-        let config = load_arch_config(&context.paths.repo_root)?;
+        let config = load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::Report)?;
         let result = context.store.query_report(&config, compare.as_deref())?;
         serialize_json(&scope_core::stub::report(result))
     }) {
@@ -1226,7 +1267,7 @@ fn dispatch_gate(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
         let compare = optional_string_arg(arguments, "compare")?;
         let strict = optional_bool_arg(arguments, "strict")?.unwrap_or(false);
-        let config = load_arch_config(&context.paths.repo_root)?;
+        let config = load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::Gate)?;
         let result = context
             .store
             .query_gate(&config, compare.as_deref(), strict)?;
@@ -1262,7 +1303,8 @@ fn dispatch_simulate_extract(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
         let symbols = required_string_array(arguments, "symbols")?;
         let into_file = required_string(arguments, "into_file")?;
-        let config = load_arch_config(&context.paths.repo_root)?;
+        let config =
+            load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::SimulateExtract)?;
         let result =
             context
                 .store
@@ -1313,7 +1355,8 @@ fn dispatch_surface_diff(arguments: &Value) -> String {
 
 fn dispatch_test_map_build(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
-        let config = load_arch_config(&context.paths.repo_root)?;
+        let config =
+            load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::TestMapBuild)?;
         let result = context.store.build_test_map(&config.tests)?;
         serialize_json(&scope_core::stub::test_map_build(result))
     }) {
@@ -1325,7 +1368,10 @@ fn dispatch_test_map_build(arguments: &Value) -> String {
 fn dispatch_test_map_covers(arguments: &Value) -> String {
     match required_string(arguments, "target").and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config = load_runtime_arch_config(
+                &context.paths.repo_root,
+                RuntimeOperation::TestMapCovers,
+            )?;
             let result = context
                 .store
                 .query_tests_covering(&RepoPath::from(target), &config.tests)?;
@@ -1340,7 +1386,10 @@ fn dispatch_test_map_covers(arguments: &Value) -> String {
 fn dispatch_test_map_covered_by(arguments: &Value) -> String {
     match required_string(arguments, "target").and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config = load_runtime_arch_config(
+                &context.paths.repo_root,
+                RuntimeOperation::TestMapCoveredBy,
+            )?;
             let result = context
                 .store
                 .query_test_coverage(&RepoPath::from(target), &config.tests)?;
@@ -1354,7 +1403,8 @@ fn dispatch_test_map_covered_by(arguments: &Value) -> String {
 
 fn dispatch_test_map_uncovered(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
-        let config = load_arch_config(&context.paths.repo_root)?;
+        let config =
+            load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::TestMapUncovered)?;
         let result = context.store.query_uncovered_files(&config.tests)?;
         serialize_json(&scope_core::stub::test_map_uncovered(result))
     }) {
@@ -1475,7 +1525,8 @@ fn dispatch_mirror(arguments: &Value) -> String {
 
 fn dispatch_entry_list(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
-        let config = load_arch_config(&context.paths.repo_root)?;
+        let config =
+            load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::EntryList)?;
         let result = context.store.query_entry_list(&config)?;
         serialize_json(&scope_core::stub::entry_list(result))
     }) {
@@ -1487,7 +1538,8 @@ fn dispatch_entry_list(arguments: &Value) -> String {
 fn dispatch_entry_cone(arguments: &Value) -> String {
     match required_string(arguments, "target").and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config =
+                load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::EntryCone)?;
             let result = context
                 .store
                 .query_entry_cone(&config, &RepoPath::from(target))?;
@@ -1502,7 +1554,8 @@ fn dispatch_entry_cone(arguments: &Value) -> String {
 fn dispatch_entry_reaches(arguments: &Value) -> String {
     match required_string(arguments, "target").and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config =
+                load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::EntryReaches)?;
             let result = context
                 .store
                 .query_entry_reaches(&config, &RepoPath::from(target))?;
@@ -1516,7 +1569,8 @@ fn dispatch_entry_reaches(arguments: &Value) -> String {
 
 fn dispatch_entry_unreachable(arguments: &Value) -> String {
     match bootstrap_from_arguments(arguments).and_then(|context| {
-        let config = load_arch_config(&context.paths.repo_root)?;
+        let config =
+            load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::EntryUnreachable)?;
         let min_age_days = optional_u64(arguments, "min_age_days")?;
         let result = context
             .store
@@ -1596,7 +1650,10 @@ fn dispatch_diff_snapshot(arguments: &Value) -> String {
     match before.and_then(|before| {
         after.and_then(|after| {
             bootstrap_from_arguments(arguments).and_then(|context| {
-                let config = load_arch_config(&context.paths.repo_root)?;
+                let config = load_runtime_arch_config(
+                    &context.paths.repo_root,
+                    RuntimeOperation::DiffSnapshot,
+                )?;
                 let result = context.store.diff_snapshot(&before, &after, &config)?;
                 serialize_json(&scope_core::stub::diff_snapshot(result))
             })
@@ -1612,9 +1669,12 @@ fn bootstrap_from_arguments(
 ) -> Result<scope_core::AppContext, scope_core::ScopeError> {
     let repo_root_override = optional_string(arguments, "repo_root").map(PathBuf::from);
     let cwd = if let Some(repo_root) = repo_root_override.as_ref() {
+        mcp_runtime()
+            .runtime_policy
+            .evaluate_repo_root(&mcp_runtime().session_root, repo_root)?;
         repo_root.clone()
     } else {
-        env::current_dir().map_err(|error| scope_core::ScopeError::io(".", error))?
+        mcp_runtime().session_root.clone()
     };
     let options = BootstrapOptions {
         repo_root_override,

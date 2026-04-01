@@ -12,14 +12,14 @@ use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
 use crate::{
-    execute_query, load_arch_config,
+    execute_query,
     model::{CochangeSort, CycleSeverity, ImpactChangeType, RiskSort, StabilitySort, SymbolKind},
     query_runtime::{
         CallsQuery, ContextQuery, DepsQuery, ExplainQuery, ImpactQuery, QueryEngine, QueryRequest,
         SymbolsQuery, WhyQuery,
     },
-    stub, DatabaseInfo, IndexHealthStats, QuerySession, RepoPath, RuntimePaths, ScopeError,
-    ScopeResult, Store,
+    stub, DatabaseInfo, IndexHealthStats, QuerySession, RepoPath, RuntimeMetadataCache,
+    RuntimeOperation, RuntimePaths, RuntimePolicy, ScopeError, ScopeResult, Store,
 };
 
 #[derive(Debug, Clone)]
@@ -29,9 +29,21 @@ pub struct ServeOptions {
     pub no_ui: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ServeState {
     pub paths: RuntimePaths,
+    pub runtime_metadata: RuntimeMetadataCache,
+    pub runtime_policy: RuntimePolicy,
+}
+
+impl Clone for ServeState {
+    fn clone(&self) -> Self {
+        Self {
+            paths: self.paths.clone(),
+            runtime_metadata: RuntimeMetadataCache::new(),
+            runtime_policy: self.runtime_policy.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -84,7 +96,11 @@ pub fn build_router(state: Arc<ServeState>, no_ui: bool) -> Router {
 }
 
 pub async fn run_server(paths: RuntimePaths, options: ServeOptions) -> ScopeResult<()> {
-    let state = Arc::new(ServeState { paths });
+    let state = Arc::new(ServeState {
+        paths,
+        runtime_metadata: RuntimeMetadataCache::new(),
+        runtime_policy: RuntimePolicy::from_env(),
+    });
     let app = build_router(state, options.no_ui);
     let requested_address = SocketAddr::from(([127, 0, 0, 1], options.port));
     let listener = tokio::net::TcpListener::bind(requested_address)
@@ -121,6 +137,17 @@ async fn not_found_json() -> Response {
 
 fn open_store(state: &ServeState) -> ScopeResult<Store> {
     Store::open(&state.paths.db_path)
+}
+
+fn load_runtime_arch_config(
+    state: &ServeState,
+    operation: RuntimeOperation,
+) -> ScopeResult<crate::ArchConfig> {
+    state.runtime_metadata.load_arch_config(
+        &state.paths.repo_root,
+        &state.runtime_policy,
+        operation,
+    )
 }
 
 fn status_payload(state: &ServeState) -> ScopeResult<crate::JsonEnvelope<ServeStatusData>> {
@@ -383,7 +410,7 @@ async fn api_deps(
         let store = open_store(&state)?;
         QueryEngine::new(&store).execute(request)
     })() {
-        Ok(envelope) => json_success(envelope),
+        Ok(envelope) => json_success(envelope.into_value()),
         Err(error) => query_error(command, error),
     }
 }
@@ -402,7 +429,7 @@ async fn api_symbols(
         let store = open_store(&state)?;
         QueryEngine::new(&store).execute(request)
     })() {
-        Ok(envelope) => json_success(envelope),
+        Ok(envelope) => json_success(envelope.into_value()),
         Err(error) => query_error(command, error),
     }
 }
@@ -420,7 +447,7 @@ async fn api_calls(
         let store = open_store(&state)?;
         QueryEngine::new(&store).execute(request)
     })() {
-        Ok(envelope) => json_success(envelope),
+        Ok(envelope) => json_success(envelope.into_value()),
         Err(error) => query_error(command, error),
     }
 }
@@ -438,7 +465,7 @@ async fn api_callers(
         let store = open_store(&state)?;
         QueryEngine::new(&store).execute(request)
     })() {
-        Ok(envelope) => json_success(envelope),
+        Ok(envelope) => json_success(envelope.into_value()),
         Err(error) => query_error(command, error),
     }
 }
@@ -457,7 +484,7 @@ async fn api_impact(
         let store = open_store(&state)?;
         QueryEngine::new(&store).execute(request)
     })() {
-        Ok(envelope) => json_success(envelope),
+        Ok(envelope) => json_success(envelope.into_value()),
         Err(error) => query_error(command, error),
     }
 }
@@ -476,7 +503,7 @@ async fn api_explain(
         let store = open_store(&state)?;
         QueryEngine::new(&store).execute(request)
     })() {
-        Ok(envelope) => json_success(envelope),
+        Ok(envelope) => json_success(envelope.into_value()),
         Err(error) => query_error(command, error),
     }
 }
@@ -495,7 +522,7 @@ async fn api_why(
         let store = open_store(&state)?;
         QueryEngine::new(&store).execute(request)
     })() {
-        Ok(envelope) => json_success(envelope),
+        Ok(envelope) => json_success(envelope.into_value()),
         Err(error) => query_error(command, error),
     }
 }
@@ -514,7 +541,7 @@ async fn api_context(
         let store = open_store(&state)?;
         QueryEngine::new(&store).execute(request)
     })() {
-        Ok(envelope) => json_success(envelope),
+        Ok(envelope) => json_success(envelope.into_value()),
         Err(error) => query_error(command, error),
     }
 }
@@ -530,7 +557,7 @@ async fn api_report(
 
     match (|| {
         let store = open_store(&state)?;
-        let config = load_arch_config(&state.paths.repo_root)?;
+        let config = load_runtime_arch_config(&state, RuntimeOperation::Report)?;
         let result = store.query_report(&config, params.compare.as_deref())?;
         Ok(stub::report(result))
     })() {
@@ -550,7 +577,7 @@ async fn api_gate(
 
     match (|| {
         let store = open_store(&state)?;
-        let config = load_arch_config(&state.paths.repo_root)?;
+        let config = load_runtime_arch_config(&state, RuntimeOperation::Gate)?;
         let result = store.query_gate(&config, params.compare.as_deref(), params.strict)?;
         Ok(stub::gate(result))
     })() {
@@ -673,7 +700,7 @@ async fn api_audit(
 ) -> Response {
     match (|| {
         let store = open_store(&state)?;
-        let config = load_arch_config(&state.paths.repo_root)?;
+        let config = load_runtime_arch_config(&state, RuntimeOperation::Audit)?;
         let result = store.query_audit(&config, &params.capability)?;
         Ok(stub::audit(result))
     })() {
@@ -748,7 +775,7 @@ async fn api_simulate_extract(
 ) -> Response {
     match (|| {
         let store = open_store(&state)?;
-        let config = load_arch_config(&state.paths.repo_root)?;
+        let config = load_runtime_arch_config(&state, RuntimeOperation::SimulateExtract)?;
         let symbols = params
             .symbols
             .split(',')
@@ -773,7 +800,7 @@ async fn api_simulate_extract(
 async fn api_entry_list(State(state): State<Arc<ServeState>>) -> Response {
     match (|| {
         let store = open_store(&state)?;
-        let config = load_arch_config(&state.paths.repo_root)?;
+        let config = load_runtime_arch_config(&state, RuntimeOperation::EntryList)?;
         let result = store.query_entry_list(&config)?;
         Ok(stub::entry_list(result))
     })() {
@@ -788,7 +815,7 @@ async fn api_entry_cone(
 ) -> Response {
     match (|| {
         let store = open_store(&state)?;
-        let config = load_arch_config(&state.paths.repo_root)?;
+        let config = load_runtime_arch_config(&state, RuntimeOperation::EntryCone)?;
         let result = store.query_entry_cone(&config, &RepoPath::from(params.target))?;
         Ok(stub::entry_cone(result))
     })() {
@@ -803,7 +830,7 @@ async fn api_entry_reaches(
 ) -> Response {
     match (|| {
         let store = open_store(&state)?;
-        let config = load_arch_config(&state.paths.repo_root)?;
+        let config = load_runtime_arch_config(&state, RuntimeOperation::EntryReaches)?;
         let result = store.query_entry_reaches(&config, &RepoPath::from(params.target))?;
         Ok(stub::entry_reaches(result))
     })() {
@@ -818,7 +845,7 @@ async fn api_entry_unreachable(
 ) -> Response {
     match (|| {
         let store = open_store(&state)?;
-        let config = load_arch_config(&state.paths.repo_root)?;
+        let config = load_runtime_arch_config(&state, RuntimeOperation::EntryUnreachable)?;
         let result = store.query_entry_unreachable(&config, params.min_age_days)?;
         Ok(stub::entry_unreachable(result))
     })() {
@@ -1003,12 +1030,25 @@ mod tests {
     fn build_test_state(name: &str) -> (Arc<ServeState>, std::path::PathBuf) {
         let repo = prepare_fixture_copy(name);
         index_fixture(&repo);
+        build_test_state_from_repo(repo)
+    }
+
+    fn build_test_state_from_repo(
+        repo: std::path::PathBuf,
+    ) -> (Arc<ServeState>, std::path::PathBuf) {
         let paths = RuntimePaths {
             repo_root: repo.clone(),
             scope_dir: repo.join(".scope"),
             db_path: repo.join(".scope/index.db"),
         };
-        (Arc::new(ServeState { paths }), repo)
+        (
+            Arc::new(ServeState {
+                paths,
+                runtime_metadata: RuntimeMetadataCache::new(),
+                runtime_policy: RuntimePolicy::default(),
+            }),
+            repo,
+        )
     }
 
     async fn call(app: Router, uri: &str) -> Response {
@@ -1169,6 +1209,89 @@ mod tests {
         assert!(value["data"]["result"]["summary"]["total"]
             .as_u64()
             .is_some());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn report_endpoint_reloads_arch_config_after_file_change_without_restart() {
+        let repo = prepare_fixture_copy("rust_small");
+        index_fixture(&repo);
+        let arch_path = repo.join(".scope/arch.toml");
+        fs::create_dir_all(arch_path.parent().unwrap()).unwrap();
+        fs::write(
+            &arch_path,
+            r#"[[gate]]
+metric = "cycles"
+severity = "warning"
+message = "first"
+skip = true
+"#,
+        )
+        .unwrap();
+
+        let (state, repo) = build_test_state_from_repo(repo);
+        let app = build_router(state, false);
+
+        let first = call(app.clone(), "/api/gate").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_value: Value = serde_json::from_slice(&first_body).unwrap();
+        assert_eq!(
+            first_value["data"]["result"]["evaluations"][0]["message"],
+            "first"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(
+            &arch_path,
+            r#"[[gate]]
+metric = "cycles"
+severity = "warning"
+message = "second"
+skip = true
+"#,
+        )
+        .unwrap();
+
+        let second = call(app, "/api/gate").await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let second_value: Value = serde_json::from_slice(&second_body).unwrap();
+        assert_eq!(
+            second_value["data"]["result"]["evaluations"][0]["message"],
+            "second"
+        );
+
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[tokio::test]
+    async fn report_endpoint_returns_policy_reason_when_expensive_ops_are_disabled() {
+        let (state, repo) = build_test_state("rust_small");
+        let app = build_router(
+            Arc::new(ServeState {
+                runtime_policy: RuntimePolicy::deny_expensive(),
+                ..(*state).clone()
+            }),
+            false,
+        );
+        let response = call(app, "/api/report").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["command"], "report");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["data"]["kind"], "invalid_input");
+        assert!(value["data"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("runtime policy denied `report`"));
         fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1591,7 +1714,14 @@ mod tests {
             scope_dir: repo.join(".scope"),
             db_path: repo.join(".scope/index.db"),
         };
-        let app = build_router(Arc::new(ServeState { paths }), false);
+        let app = build_router(
+            Arc::new(ServeState {
+                paths,
+                runtime_metadata: RuntimeMetadataCache::new(),
+                runtime_policy: RuntimePolicy::default(),
+            }),
+            false,
+        );
         let response = call(app, "/api/cochange?target=src/parser.rs&days=10000").await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)

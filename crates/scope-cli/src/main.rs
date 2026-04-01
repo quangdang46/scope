@@ -31,11 +31,11 @@ use rustyline::{
 use scope_core::config::ensure_scope_dir;
 use scope_core::{
     adapter_for_language, arch_check, arch_explain, arch_init, auto_install_user_mcp,
-    execute_query, index_repo, install_mcp_for_hosts, load_arch_config, scan_repo,
-    supported_install_hosts, validate_cochange_args, BootstrapOptions, CallsQuery, CochangeSort,
-    ContextQuery, CycleSeverity, DatabaseInfo, DepsQuery, ExplainQuery, ImpactQuery,
-    McpInstallReport, McpInstallStatus, QueryEngine, QueryRequest, QuerySession, RiskSort,
-    ScanConfig, SymbolKind, SymbolsQuery, Verbosity, WhyQuery,
+    execute_query, index_repo, install_mcp_for_hosts, scan_repo, supported_install_hosts,
+    validate_cochange_args, BootstrapOptions, CallsQuery, CochangeSort, ContextQuery,
+    CycleSeverity, DatabaseInfo, DepsQuery, ExplainQuery, ImpactQuery, McpInstallReport,
+    McpInstallStatus, QueryEngine, QueryRequest, QuerySession, RiskSort, RuntimeMetadataCache,
+    RuntimeOperation, RuntimePolicy, ScanConfig, SymbolKind, SymbolsQuery, Verbosity, WhyQuery,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -64,6 +64,13 @@ fn cycle_severity_name(value: CycleSeverityArg) -> CycleSeverity {
     }
 }
 
+fn load_runtime_arch_config(
+    repo_root: &Path,
+    operation: RuntimeOperation,
+) -> Result<scope_core::ArchConfig, scope_core::ScopeError> {
+    RuntimeMetadataCache::new().load_arch_config(repo_root, &RuntimePolicy::from_env(), operation)
+}
+
 fn serialize_output<T: serde::Serialize>(
     value: &T,
     compact: bool,
@@ -75,6 +82,10 @@ fn serialize_output<T: serde::Serialize>(
     } else {
         serde_json::to_string_pretty(value)
     }
+}
+
+fn render_query_output(output: &scope_core::QueryOutput, compact: bool) -> String {
+    output.render(compact).to_string()
 }
 
 fn compact_json_value(value: &mut serde_json::Value) {
@@ -218,15 +229,13 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(
-                &QueryEngine::new(&context.store).execute(QueryRequest::Deps(DepsQuery {
+            let output = QueryEngine::new(&context.store).execute(QueryRequest::Deps(DepsQuery {
                     file: args.file,
                     reverse: args.reverse,
                     transitive: args.transitive,
                     depth: args.depth,
-                }))?,
-                compact,
-            )
+                }))?;
+            Ok(render_query_output(&output, compact))
         }
         Commands::Symbols(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -234,16 +243,14 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(
-                &QueryEngine::new(&context.store).execute(QueryRequest::Symbols(
-                    SymbolsQuery {
-                        file: args.file,
-                        public_only: args.public_only,
-                        kind: args.kind.map(symbol_kind_name),
-                    },
-                ))?,
-                compact,
-            )
+            let output = QueryEngine::new(&context.store).execute(QueryRequest::Symbols(
+                SymbolsQuery {
+                    file: args.file,
+                    public_only: args.public_only,
+                    kind: args.kind.map(symbol_kind_name),
+                },
+            ))?;
+            Ok(render_query_output(&output, compact))
         }
         Commands::Calls(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -251,13 +258,11 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(
-                &QueryEngine::new(&context.store).execute(QueryRequest::Calls(CallsQuery {
+            let output = QueryEngine::new(&context.store).execute(QueryRequest::Calls(CallsQuery {
                     symbol: args.symbol,
                     transitive: args.transitive,
-                }))?,
-                compact,
-            )
+                }))?;
+            Ok(render_query_output(&output, compact))
         }
         Commands::Callers(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -265,13 +270,11 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(
-                &QueryEngine::new(&context.store).execute(QueryRequest::Callers(CallsQuery {
+            let output = QueryEngine::new(&context.store).execute(QueryRequest::Callers(CallsQuery {
                     symbol: args.symbol,
                     transitive: args.transitive,
-                }))?,
-                compact,
-            )
+                }))?;
+            Ok(render_query_output(&output, compact))
         }
         Commands::Impact(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -279,14 +282,12 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(
-                &QueryEngine::new(&context.store).execute(QueryRequest::Impact(ImpactQuery {
+            let output = QueryEngine::new(&context.store).execute(QueryRequest::Impact(ImpactQuery {
                     target: args.target,
                     change_type: change_type_name(args.change_type),
                     depth: args.depth,
-                }))?,
-                compact,
-            )
+                }))?;
+            Ok(render_query_output(&output, compact))
         }
         Commands::Explain(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -294,16 +295,14 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(
-                &QueryEngine::new(&context.store).execute(QueryRequest::Explain(
-                    ExplainQuery {
-                        target: args.target,
-                        to: args.to,
-                        depth: args.depth,
-                    },
-                ))?,
-                compact,
-            )
+            let output = QueryEngine::new(&context.store).execute(QueryRequest::Explain(
+                ExplainQuery {
+                    target: args.target,
+                    to: args.to,
+                    depth: args.depth,
+                },
+            ))?;
+            Ok(render_query_output(&output, compact))
         }
         Commands::Why(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -311,14 +310,12 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(
-                &QueryEngine::new(&context.store).execute(QueryRequest::Why(WhyQuery {
+            let output = QueryEngine::new(&context.store).execute(QueryRequest::Why(WhyQuery {
                     from: args.from,
                     to: args.to,
                     depth: args.depth,
-                }))?,
-                compact,
-            )
+                }))?;
+            Ok(render_query_output(&output, compact))
         }
         Commands::Context(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -326,16 +323,14 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            serialize_output(
-                &QueryEngine::new(&context.store).execute(QueryRequest::Context(
-                    ContextQuery {
-                        targets: args.targets,
-                        change_type: change_type_name(args.change_type),
-                        budget: args.budget,
-                    },
-                ))?,
-                compact,
-            )
+            let output = QueryEngine::new(&context.store).execute(QueryRequest::Context(
+                ContextQuery {
+                    targets: args.targets,
+                    change_type: change_type_name(args.change_type),
+                    budget: args.budget,
+                },
+            ))?;
+            Ok(render_query_output(&output, compact))
         }
         Commands::Pack(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -360,7 +355,8 @@ fn run() -> Result<i32, scope_core::ScopeError> {
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
             match args.command {
                 ArchCommand::Check(_) => {
-                    let config = load_arch_config(&context.paths.repo_root)?;
+                    let config =
+                        load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::ArchCheck)?;
                     let result = arch_check(&context.store, &config)?;
                     if !result.violations.is_empty() {
                         exit_code = 1;
@@ -387,7 +383,7 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config = load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::Audit)?;
             let result = context.store.query_audit(&config, &args.capability)?;
             if result.summary.unexpected_entry_points > 0 {
                 exit_code = 1;
@@ -495,7 +491,8 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config =
+                load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::TestMapBuild)?;
             match args.command {
                 TestMapCommand::Build => {
                     let result = context.store.build_test_map(&config.tests)?;
@@ -562,7 +559,8 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config =
+                load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::DiffSnapshot)?;
             let result = context
                 .store
                 .diff_snapshot(&args.before, &args.after, &config)?;
@@ -574,7 +572,10 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config = load_runtime_arch_config(
+                &context.paths.repo_root,
+                RuntimeOperation::SimulateExtract,
+            )?;
             match args.command {
                 SimulateCommand::Extract(args) => {
                     let symbols = parse_symbol_csv(&args.symbols)?;
@@ -593,7 +594,8 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config =
+                load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::Report)?;
             let result = context
                 .store
                 .query_report(&config, args.compare.as_deref())?;
@@ -624,7 +626,8 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config =
+                load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::Gate)?;
             let result = context
                 .store
                 .query_gate(&config, args.compare.as_deref(), args.strict)?;
@@ -707,7 +710,8 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let config = load_arch_config(&context.paths.repo_root)?;
+            let config =
+                load_runtime_arch_config(&context.paths.repo_root, RuntimeOperation::EntryList)?;
             match args.command {
                 cli::EntryCommand::List => {
                     let result = context.store.query_entry_list(&config)?;
@@ -1206,8 +1210,8 @@ fn quoted_completion_target<'a>(prefix: &'a str, marker: &str) -> Option<(usize,
 
 fn binding_completion_target(prefix: &str) -> Option<(usize, &str)> {
     let start = token_start(prefix);
-    let token = &prefix[start..];
-    let needle = token.strip_prefix('$')?;
+    let segment = &prefix[start..];
+    let needle = segment.strip_prefix('$')?;
     Some((start + 1, needle))
 }
 

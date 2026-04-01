@@ -9,6 +9,7 @@ pub mod json;
 pub mod model;
 pub mod query_lang;
 pub mod query_runtime;
+pub mod runtime;
 pub mod scanner;
 pub mod serve;
 pub mod snapshot;
@@ -64,9 +65,10 @@ pub use query_lang::{
     QueryStep, QueryValue,
 };
 pub use query_runtime::{
-    CallsQuery, ContextQuery, DepsQuery, ExplainQuery, ImpactQuery, QueryEngine, QueryRequest,
-    SymbolsQuery, WhyQuery,
+    CallsQuery, ContextQuery, DepsQuery, ExplainQuery, ImpactQuery, QueryEngine, QueryOutput,
+    QueryRequest, SymbolsQuery, WhyQuery,
 };
+pub use runtime::{RuntimeMetadataCache, RuntimeOperation, RuntimePolicy};
 pub use scanner::{scan_repo, ScanConfig, ScanEntry, SupportedLanguage};
 pub use serve::{run_server, ServeOptions};
 pub use store::{
