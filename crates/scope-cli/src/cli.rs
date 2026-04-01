@@ -42,6 +42,8 @@ pub enum Commands {
     Context(ContextArgs),
     /// Generate a budgeted plain-text context pack for an agent
     Pack(PackArgs),
+    /// Load curated markdown workflows for common agent analysis tasks
+    Workflow(WorkflowArgs),
     /// Check architecture rules against indexed file dependencies
     Arch(ArchArgs),
     /// Trace entry points that can reach a configured sensitive capability
@@ -207,6 +209,27 @@ pub struct PackArgs {
     pub budget: usize,
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkflowArgs {
+    #[command(subcommand)]
+    pub command: WorkflowCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// List discovered markdown workflows
+    List,
+    /// Show a workflow by stable id and optionally render arguments into it
+    Show(WorkflowShowArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkflowShowArgs {
+    pub id: String,
+    #[arg(long = "arg", value_name = "KEY=VALUE")]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]

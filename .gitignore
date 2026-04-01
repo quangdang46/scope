@@ -1,5 +1,9 @@
 # bv (beads viewer) local config and caches
 .bv/
-.scope/
+**/.scope/
+!/.scope/
+/.scope/*
+!/.scope/workflows/
+!/.scope/workflows/*.md
 target/
 poc/node_modules/

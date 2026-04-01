@@ -16,6 +16,7 @@ pub mod snapshot;
 pub mod store;
 pub mod stub;
 pub mod tracing;
+pub mod workflow;
 
 pub use adapters::{adapter_for_language, Adapter, RustAdapter, TsJsAdapter};
 pub use arch::{
@@ -83,3 +84,8 @@ pub use stub::{
     test_map_build, test_map_covered_by, test_map_covers, test_map_uncovered, tree, unused, why,
 };
 pub use tracing::Verbosity;
+pub use workflow::{
+    discover_workflows, list_workflows, render_workflow, workflow_dir, workflow_list_envelope,
+    workflow_show_envelope, WorkflowArgument, WorkflowDefinition, WorkflowListResult,
+    WorkflowRenderResult, WorkflowStep, WorkflowSummary,
+};

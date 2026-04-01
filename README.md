@@ -194,6 +194,23 @@ Use them like this:
 - `calls` / `callers` to understand direct symbol-level interactions
 - `impact` / `explain` / `why` / `context` when you need structured change-planning evidence
 - `pack` when you want a lean plain-text handoff for an agent prompt
+- `workflow list` / `workflow show <id> --arg key=value` when you want a curated multi-step analysis recipe instead of inventing a prompt from scratch
+
+### Built-in analysis workflows
+
+`scope` now loads repo-local markdown workflows from `.scope/workflows/*.md`.
+These are lightweight agent playbooks with TOML frontmatter plus markdown guidance.
+
+```bash
+scope workflow list
+scope workflow show dependency-trace --arg target=parser::parse
+scope --compact workflow show impact-review --arg target=src/lib.rs --arg change_type=rename
+```
+
+The repository currently ships starter workflows for dependency tracing, impact review,
+architecture snapshots, and diff investigation. They render stable named recipes that
+compose existing `scope` commands such as `deps`, `context`, `pack`, `surface`, `report`,
+and `gate`.
 
 ### Output expectations
 

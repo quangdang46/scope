@@ -1,6 +1,7 @@
 mod cli;
 
 use std::{
+    collections::BTreeMap,
     env,
     fmt::Write as _,
     fs,
@@ -16,7 +17,7 @@ use clap::Parser;
 use cli::{
     ArchCommand, BenchmarkWorkloadArg, ChangeType, Cli, CochangeSortArg, Commands,
     CycleSeverityArg, RiskSortArg, SimulateCommand, SnapshotCommand, StabilitySortArg,
-    SurfaceCommand, TestMapCommand,
+    SurfaceCommand, TestMapCommand, WorkflowCommand,
 };
 use rustyline::{
     completion::{Completer, Pair},
@@ -28,14 +29,15 @@ use rustyline::{
     validate::Validator,
     Context as ReadlineContext, Editor, Helper,
 };
-use scope_core::config::ensure_scope_dir;
+use scope_core::config::{discover_runtime_paths, ensure_scope_dir};
 use scope_core::{
     adapter_for_language, arch_check, arch_explain, arch_init, auto_install_user_mcp,
     execute_query, index_repo, install_mcp_for_hosts, scan_repo, supported_install_hosts,
-    validate_cochange_args, BootstrapOptions, CallsQuery, CochangeSort, ContextQuery,
-    CycleSeverity, DatabaseInfo, DepsQuery, ExplainQuery, ImpactQuery, McpInstallReport,
-    McpInstallStatus, QueryEngine, QueryRequest, QuerySession, RiskSort, RuntimeMetadataCache,
-    RuntimeOperation, RuntimePolicy, ScanConfig, SymbolKind, SymbolsQuery, Verbosity, WhyQuery,
+    validate_cochange_args, workflow_list_envelope, workflow_show_envelope, BootstrapOptions,
+    CallsQuery, CochangeSort, ContextQuery, CycleSeverity, DatabaseInfo, DepsQuery, ExplainQuery,
+    ImpactQuery, McpInstallReport, McpInstallStatus, QueryEngine, QueryRequest, QuerySession,
+    RiskSort, RuntimeMetadataCache, RuntimeOperation, RuntimePolicy, ScanConfig, SymbolKind,
+    SymbolsQuery, Verbosity, WhyQuery,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -346,6 +348,27 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 })?;
             }
             Ok(pack)
+        }
+        Commands::Workflow(args) => {
+            let bootstrap_options = BootstrapOptions {
+                repo_root_override: cli.repo_root.clone(),
+                db_override: cli.db.clone(),
+            };
+            let runtime_paths = discover_runtime_paths(&cwd, &bootstrap_options)?;
+            match args.command {
+                WorkflowCommand::List => serialize_output(
+                    &workflow_list_envelope(scope_core::list_workflows(&runtime_paths.repo_root)?),
+                    compact,
+                ),
+                WorkflowCommand::Show(args) => {
+                    let rendered = scope_core::render_workflow(
+                        &runtime_paths.repo_root,
+                        &args.id,
+                        &parse_workflow_args(&args.args)?,
+                    )?;
+                    serialize_output(&workflow_show_envelope(rendered), compact)
+                }
+            }
         }
         Commands::Arch(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -1213,6 +1236,27 @@ fn binding_completion_target(prefix: &str) -> Option<(usize, &str)> {
     let segment = &prefix[start..];
     let needle = segment.strip_prefix('$')?;
     Some((start + 1, needle))
+}
+
+fn parse_workflow_args(
+    values: &[String],
+) -> Result<BTreeMap<String, String>, scope_core::ScopeError> {
+    let mut parsed = BTreeMap::new();
+    for value in values {
+        let Some((key, raw_value)) = value.split_once('=') else {
+            return Err(scope_core::ScopeError::InvalidInput(format!(
+                "workflow args must use KEY=VALUE syntax, got '{value}'"
+            )));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(scope_core::ScopeError::InvalidInput(format!(
+                "workflow arg key cannot be empty in '{value}'"
+            )));
+        }
+        parsed.insert(key.to_string(), raw_value.to_string());
+    }
+    Ok(parsed)
 }
 
 fn complete_matches(candidates: &[String], needle: &str) -> Vec<Pair> {
