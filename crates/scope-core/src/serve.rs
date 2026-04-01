@@ -14,6 +14,10 @@ use tower::ServiceExt;
 use crate::{
     execute_query, load_arch_config,
     model::{CochangeSort, CycleSeverity, ImpactChangeType, RiskSort, StabilitySort, SymbolKind},
+    query_runtime::{
+        CallsQuery, ContextQuery, DepsQuery, ExplainQuery, ImpactQuery, QueryEngine, QueryRequest,
+        SymbolsQuery, WhyQuery,
+    },
     stub, DatabaseInfo, IndexHealthStats, QuerySession, RepoPath, RuntimePaths, ScopeError,
     ScopeResult, Store,
 };
@@ -368,26 +372,19 @@ async fn api_deps(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<DepsParams>,
 ) -> Response {
+    let request = QueryRequest::Deps(DepsQuery {
+        file: params.file,
+        reverse: params.reverse,
+        transitive: params.transitive,
+        depth: params.depth,
+    });
+    let command = request.command();
     match (|| {
         let store = open_store(&state)?;
-        let target = RepoPath::from(params.file.clone());
-        let dependencies = if params.transitive {
-            store.query_deps_transitive(&target, params.reverse, params.depth)?
-        } else if params.reverse {
-            store.query_reverse_deps(&target)?
-        } else {
-            store.query_deps(&target)?
-        };
-        Ok(stub::deps(
-            params.file,
-            params.reverse,
-            params.transitive,
-            params.depth,
-            dependencies,
-        ))
+        QueryEngine::new(&store).execute(request)
     })() {
         Ok(envelope) => json_success(envelope),
-        Err(error) => query_error("deps", error),
+        Err(error) => query_error(command, error),
     }
 }
 
@@ -395,22 +392,18 @@ async fn api_symbols(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<SymbolsParams>,
 ) -> Response {
+    let request = QueryRequest::Symbols(SymbolsQuery {
+        file: params.file,
+        public_only: params.public_only,
+        kind: params.kind,
+    });
+    let command = request.command();
     match (|| {
         let store = open_store(&state)?;
-        let symbols = store.query_symbols(
-            &RepoPath::from(params.file.clone()),
-            params.public_only,
-            params.kind.clone(),
-        )?;
-        Ok(stub::symbols(
-            params.file,
-            params.public_only,
-            params.kind,
-            symbols,
-        ))
+        QueryEngine::new(&store).execute(request)
     })() {
         Ok(envelope) => json_success(envelope),
-        Err(error) => query_error("symbols", error),
+        Err(error) => query_error(command, error),
     }
 }
 
@@ -418,13 +411,17 @@ async fn api_calls(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<CallsParams>,
 ) -> Response {
+    let request = QueryRequest::Calls(CallsQuery {
+        symbol: params.symbol,
+        transitive: params.transitive,
+    });
+    let command = request.command();
     match (|| {
         let store = open_store(&state)?;
-        let traversals = store.query_callees(&params.symbol, params.transitive)?;
-        Ok(stub::calls(params.symbol, params.transitive, traversals))
+        QueryEngine::new(&store).execute(request)
     })() {
         Ok(envelope) => json_success(envelope),
-        Err(error) => query_error("calls", error),
+        Err(error) => query_error(command, error),
     }
 }
 
@@ -432,13 +429,17 @@ async fn api_callers(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<CallsParams>,
 ) -> Response {
+    let request = QueryRequest::Callers(CallsQuery {
+        symbol: params.symbol,
+        transitive: params.transitive,
+    });
+    let command = request.command();
     match (|| {
         let store = open_store(&state)?;
-        let traversals = store.query_callers(&params.symbol, params.transitive)?;
-        Ok(stub::callers(params.symbol, params.transitive, traversals))
+        QueryEngine::new(&store).execute(request)
     })() {
         Ok(envelope) => json_success(envelope),
-        Err(error) => query_error("callers", error),
+        Err(error) => query_error(command, error),
     }
 }
 
@@ -446,19 +447,18 @@ async fn api_impact(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<ImpactParams>,
 ) -> Response {
+    let request = QueryRequest::Impact(ImpactQuery {
+        target: params.target,
+        change_type: impact_change_type_name(&params.change_type),
+        depth: params.depth,
+    });
+    let command = request.command();
     match (|| {
         let store = open_store(&state)?;
-        let change_type = impact_change_type_name(&params.change_type);
-        let impacted = store.query_impact(&params.target, &change_type, params.depth)?;
-        Ok(stub::impact(
-            params.target,
-            change_type,
-            params.depth,
-            impacted,
-        ))
+        QueryEngine::new(&store).execute(request)
     })() {
         Ok(envelope) => json_success(envelope),
-        Err(error) => query_error("impact", error),
+        Err(error) => query_error(command, error),
     }
 }
 
@@ -466,18 +466,18 @@ async fn api_explain(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<ExplainParams>,
 ) -> Response {
+    let request = QueryRequest::Explain(ExplainQuery {
+        target: params.target,
+        to: params.to,
+        depth: params.depth,
+    });
+    let command = request.command();
     match (|| {
         let store = open_store(&state)?;
-        let traversals = store.query_explain(&params.target, params.to.as_deref(), params.depth)?;
-        Ok(stub::explain(
-            params.target,
-            params.to,
-            params.depth,
-            traversals,
-        ))
+        QueryEngine::new(&store).execute(request)
     })() {
         Ok(envelope) => json_success(envelope),
-        Err(error) => query_error("explain", error),
+        Err(error) => query_error(command, error),
     }
 }
 
@@ -485,13 +485,18 @@ async fn api_why(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<WhyParams>,
 ) -> Response {
+    let request = QueryRequest::Why(WhyQuery {
+        from: params.from,
+        to: params.to,
+        depth: params.depth,
+    });
+    let command = request.command();
     match (|| {
         let store = open_store(&state)?;
-        let path = store.query_why(&params.from, &params.to, params.depth)?;
-        Ok(stub::why(params.from, params.to, params.depth, path))
+        QueryEngine::new(&store).execute(request)
     })() {
         Ok(envelope) => json_success(envelope),
-        Err(error) => query_error("why", error),
+        Err(error) => query_error(command, error),
     }
 }
 
@@ -499,14 +504,18 @@ async fn api_context(
     State(state): State<Arc<ServeState>>,
     Query(params): Query<ContextParams>,
 ) -> Response {
+    let request = QueryRequest::Context(ContextQuery {
+        targets: vec![params.target],
+        change_type: impact_change_type_name(&params.change_type),
+        budget: params.budget,
+    });
+    let command = request.command();
     match (|| {
         let store = open_store(&state)?;
-        let change_type = impact_change_type_name(&params.change_type);
-        let result = store.query_context(&[params.target], &change_type, params.budget)?;
-        Ok(stub::context(result))
+        QueryEngine::new(&store).execute(request)
     })() {
         Ok(envelope) => json_success(envelope),
-        Err(error) => query_error("context", error),
+        Err(error) => query_error(command, error),
     }
 }
 

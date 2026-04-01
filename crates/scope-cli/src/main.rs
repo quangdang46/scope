@@ -32,9 +32,10 @@ use scope_core::config::ensure_scope_dir;
 use scope_core::{
     adapter_for_language, arch_check, arch_explain, arch_init, auto_install_user_mcp,
     execute_query, index_repo, install_mcp_for_hosts, load_arch_config, scan_repo,
-    supported_install_hosts, validate_cochange_args, BootstrapOptions, CochangeSort, CycleSeverity,
-    DatabaseInfo, McpInstallReport, McpInstallStatus, QuerySession, RiskSort, ScanConfig,
-    SymbolKind, Verbosity,
+    supported_install_hosts, validate_cochange_args, BootstrapOptions, CallsQuery, CochangeSort,
+    ContextQuery, CycleSeverity, DatabaseInfo, DepsQuery, ExplainQuery, ImpactQuery,
+    McpInstallReport, McpInstallStatus, QueryEngine, QueryRequest, QuerySession, RiskSort,
+    ScanConfig, SymbolKind, SymbolsQuery, Verbosity, WhyQuery,
 };
 use scope_core::{Certainty, ContextFileRecord, ContextFileRole, RepoPath, StabilitySort};
 
@@ -217,30 +218,13 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let dependencies = if args.transitive {
-                context.store.query_deps_transitive(
-                    &scope_core::RepoPath::from(args.file.clone()),
-                    args.reverse,
-                    args.depth,
-                )?
-            } else if args.reverse {
-                context
-                    .store
-                    .query_reverse_deps(&scope_core::RepoPath::from(args.file.clone()))?
-            } else {
-                context
-                    .store
-                    .query_deps(&scope_core::RepoPath::from(args.file.clone()))?
-            };
-
             serialize_output(
-                &scope_core::stub::deps(
-                    args.file,
-                    args.reverse,
-                    args.transitive,
-                    args.depth,
-                    dependencies,
-                ),
+                &QueryEngine::new(&context.store).execute(QueryRequest::Deps(DepsQuery {
+                    file: args.file,
+                    reverse: args.reverse,
+                    transitive: args.transitive,
+                    depth: args.depth,
+                }))?,
                 compact,
             )
         }
@@ -250,15 +234,14 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let kind = args.kind.map(symbol_kind_name);
-            let symbols = context.store.query_symbols(
-                &scope_core::RepoPath::from(args.file.clone()),
-                args.public_only,
-                kind.clone(),
-            )?;
-
             serialize_output(
-                &scope_core::stub::symbols(args.file, args.public_only, kind, symbols),
+                &QueryEngine::new(&context.store).execute(QueryRequest::Symbols(
+                    SymbolsQuery {
+                        file: args.file,
+                        public_only: args.public_only,
+                        kind: args.kind.map(symbol_kind_name),
+                    },
+                ))?,
                 compact,
             )
         }
@@ -268,9 +251,11 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let traversals = context.store.query_callees(&args.symbol, args.transitive)?;
             serialize_output(
-                &scope_core::stub::calls(args.symbol, args.transitive, traversals),
+                &QueryEngine::new(&context.store).execute(QueryRequest::Calls(CallsQuery {
+                    symbol: args.symbol,
+                    transitive: args.transitive,
+                }))?,
                 compact,
             )
         }
@@ -280,9 +265,11 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let traversals = context.store.query_callers(&args.symbol, args.transitive)?;
             serialize_output(
-                &scope_core::stub::callers(args.symbol, args.transitive, traversals),
+                &QueryEngine::new(&context.store).execute(QueryRequest::Callers(CallsQuery {
+                    symbol: args.symbol,
+                    transitive: args.transitive,
+                }))?,
                 compact,
             )
         }
@@ -292,12 +279,12 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let change_type = change_type_name(args.change_type);
-            let impacted = context
-                .store
-                .query_impact(&args.target, &change_type, args.depth)?;
             serialize_output(
-                &scope_core::stub::impact(args.target, change_type, args.depth, impacted),
+                &QueryEngine::new(&context.store).execute(QueryRequest::Impact(ImpactQuery {
+                    target: args.target,
+                    change_type: change_type_name(args.change_type),
+                    depth: args.depth,
+                }))?,
                 compact,
             )
         }
@@ -307,12 +294,14 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let traversals =
-                context
-                    .store
-                    .query_explain(&args.target, args.to.as_deref(), args.depth)?;
             serialize_output(
-                &scope_core::stub::explain(args.target, args.to, args.depth, traversals),
+                &QueryEngine::new(&context.store).execute(QueryRequest::Explain(
+                    ExplainQuery {
+                        target: args.target,
+                        to: args.to,
+                        depth: args.depth,
+                    },
+                ))?,
                 compact,
             )
         }
@@ -322,9 +311,12 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let path = context.store.query_why(&args.from, &args.to, args.depth)?;
             serialize_output(
-                &scope_core::stub::why(args.from, args.to, args.depth, path),
+                &QueryEngine::new(&context.store).execute(QueryRequest::Why(WhyQuery {
+                    from: args.from,
+                    to: args.to,
+                    depth: args.depth,
+                }))?,
                 compact,
             )
         }
@@ -334,11 +326,16 @@ fn run() -> Result<i32, scope_core::ScopeError> {
                 db_override: cli.db.clone(),
             };
             let context = scope_core::bootstrap(&cwd, &bootstrap_options, verbosity)?;
-            let change_type = change_type_name(args.change_type);
-            let result = context
-                .store
-                .query_context(&args.targets, &change_type, args.budget)?;
-            serialize_output(&scope_core::stub::context(result), compact)
+            serialize_output(
+                &QueryEngine::new(&context.store).execute(QueryRequest::Context(
+                    ContextQuery {
+                        targets: args.targets,
+                        change_type: change_type_name(args.change_type),
+                        budget: args.budget,
+                    },
+                ))?,
+                compact,
+            )
         }
         Commands::Pack(args) => {
             let bootstrap_options = BootstrapOptions {
@@ -2661,7 +2658,7 @@ mod tests {
                 },
                 scope_core::McpInstallHostResult {
                     host: "claude-code".to_string(),
-                    path: "/home/test/.claude.json".to_string(),
+                    path: "/home/test/.claude/settings.json".to_string(),
                     status: McpInstallStatus::Installed,
                     reason: None,
                 },

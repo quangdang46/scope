@@ -8,6 +8,7 @@ pub mod install;
 pub mod json;
 pub mod model;
 pub mod query_lang;
+pub mod query_runtime;
 pub mod scanner;
 pub mod serve;
 pub mod snapshot;
@@ -61,6 +62,10 @@ pub use model::{
 pub use query_lang::{
     execute_query, parse_query_statement, QueryExpr, QuerySession, QuerySource, QueryStatement,
     QueryStep, QueryValue,
+};
+pub use query_runtime::{
+    CallsQuery, ContextQuery, DepsQuery, ExplainQuery, ImpactQuery, QueryEngine, QueryRequest,
+    SymbolsQuery, WhyQuery,
 };
 pub use scanner::{scan_repo, ScanConfig, ScanEntry, SupportedLanguage};
 pub use serve::{run_server, ServeOptions};

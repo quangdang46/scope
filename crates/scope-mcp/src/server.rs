@@ -7,8 +7,9 @@ use std::{
 
 use scope_core::{
     arch_check, execute_query, index_repo, load_arch_config, scan_repo, BootstrapOptions,
-    CochangeSort, DatabaseInfo, QuerySession, RepoPath, RiskSort, ScanConfig, SymbolKind,
-    Verbosity,
+    CallsQuery, CochangeSort, ContextQuery, DatabaseInfo, DepsQuery, ExplainQuery, ImpactQuery,
+    QueryEngine, QueryRequest, QuerySession, RepoPath, RiskSort, ScanConfig, SymbolKind,
+    SymbolsQuery, Verbosity, WhyQuery,
 };
 use serde_json::{json, Value};
 
@@ -27,12 +28,16 @@ pub fn run() -> io::Result<()> {
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = stdout.lock();
+    let mut framing = MessageFraming::Unknown;
 
-    while let Some(request) = read_message(&mut reader)? {
+    while let Some((request, detected_framing)) = read_message(&mut reader, framing)? {
+        if matches!(framing, MessageFraming::Unknown) {
+            framing = detected_framing;
+        }
         let should_exit = is_exit_notification(&request);
         let response = handle_message(&request);
         if let Some(response) = response {
-            write_message(&mut writer, &response)?;
+            write_message(&mut writer, &response, framing)?;
             writer.flush()?;
         }
         if should_exit {
@@ -139,7 +144,40 @@ fn parse_structured_content(output: &str) -> Value {
     serde_json::from_str(output).unwrap_or_else(|_| json!({ "text": output }))
 }
 
-fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageFraming {
+    Unknown,
+    ContentLength,
+    LineDelimited,
+}
+
+fn read_message(
+    reader: &mut impl BufRead,
+    framing: MessageFraming,
+) -> io::Result<Option<(Value, MessageFraming)>> {
+    match framing {
+        MessageFraming::Unknown => read_message_auto(reader),
+        MessageFraming::ContentLength => read_content_length_message(reader),
+        MessageFraming::LineDelimited => read_line_delimited_message(reader),
+    }
+}
+
+fn read_message_auto(reader: &mut impl BufRead) -> io::Result<Option<(Value, MessageFraming)>> {
+    let buffer = reader.fill_buf()?;
+    if buffer.is_empty() {
+        return Ok(None);
+    }
+
+    if buffer.starts_with(b"Content-Length:") || buffer.starts_with(b"content-length:") {
+        return read_content_length_message(reader);
+    }
+
+    read_line_delimited_message(reader)
+}
+
+fn read_content_length_message(
+    reader: &mut impl BufRead,
+) -> io::Result<Option<(Value, MessageFraming)>> {
     let mut content_length = None;
     loop {
         let mut line = String::new();
@@ -168,14 +206,45 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
     reader.read_exact(&mut buffer)?;
     let value = serde_json::from_slice(&buffer)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(Some(value))
+    Ok(Some((value, MessageFraming::ContentLength)))
 }
 
-fn write_message(writer: &mut impl Write, value: &Value) -> io::Result<()> {
+fn read_line_delimited_message(
+    reader: &mut impl BufRead,
+) -> io::Result<Option<(Value, MessageFraming)>> {
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Ok(None);
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str(trimmed)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        return Ok(Some((value, MessageFraming::LineDelimited)));
+    }
+}
+
+fn write_message(
+    writer: &mut impl Write,
+    value: &Value,
+    framing: MessageFraming,
+) -> io::Result<()> {
     let body = serde_json::to_vec(value)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
-    writer.write_all(&body)
+    match framing {
+        MessageFraming::Unknown | MessageFraming::ContentLength => {
+            write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+            writer.write_all(&body)
+        }
+        MessageFraming::LineDelimited => {
+            writer.write_all(&body)?;
+            writer.write_all(b"\n")
+        }
+    }
 }
 
 fn tool_registry() -> Vec<Value> {
@@ -458,10 +527,6 @@ fn tool_registry() -> Vec<Value> {
                         "minItems": 1
                     }
                 },
-                "anyOf": [
-                    { "required": ["expr"] },
-                    { "required": ["exprs"] }
-                ],
                 "additionalProperties": false
             }),
         ),
@@ -900,29 +965,14 @@ fn dispatch_deps(arguments: &Value) -> String {
     let file = required_string(arguments, "file");
     match file.and_then(|file| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let reverse = optional_bool(arguments, "reverse").unwrap_or(false);
-            let transitive = optional_bool(arguments, "transitive").unwrap_or(false);
-            let depth = optional_usize(arguments, "depth")?;
-            let dependencies = if transitive {
-                context.store.query_deps_transitive(
-                    &RepoPath::from(file.clone()),
-                    reverse,
-                    depth,
-                )?
-            } else if reverse {
-                context
-                    .store
-                    .query_reverse_deps(&RepoPath::from(file.clone()))?
-            } else {
-                context.store.query_deps(&RepoPath::from(file.clone()))?
-            };
-            serialize_json(&scope_core::stub::deps(
-                file,
-                reverse,
-                transitive,
-                depth,
-                dependencies,
-            ))
+            let envelope =
+                QueryEngine::new(&context.store).execute(QueryRequest::Deps(DepsQuery {
+                    file,
+                    reverse: optional_bool(arguments, "reverse").unwrap_or(false),
+                    transitive: optional_bool(arguments, "transitive").unwrap_or(false),
+                    depth: optional_usize(arguments, "depth")?,
+                }))?;
+            serialize_json(&envelope)
         })
     }) {
         Ok(output) => output,
@@ -934,14 +984,13 @@ fn dispatch_symbols(arguments: &Value) -> String {
     let file = required_string(arguments, "file");
     match file.and_then(|file| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let public_only = optional_bool(arguments, "public_only").unwrap_or(false);
-            let kind = optional_symbol_kind(arguments, "kind")?;
-            let symbols = context.store.query_symbols(
-                &RepoPath::from(file.clone()),
-                public_only,
-                kind.clone(),
-            )?;
-            serialize_json(&scope_core::stub::symbols(file, public_only, kind, symbols))
+            let envelope =
+                QueryEngine::new(&context.store).execute(QueryRequest::Symbols(SymbolsQuery {
+                    file,
+                    public_only: optional_bool(arguments, "public_only").unwrap_or(false),
+                    kind: optional_symbol_kind(arguments, "kind")?,
+                }))?;
+            serialize_json(&envelope)
         })
     }) {
         Ok(output) => output,
@@ -953,9 +1002,12 @@ fn dispatch_calls(arguments: &Value) -> String {
     let symbol = required_string(arguments, "symbol");
     match symbol.and_then(|symbol| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let transitive = optional_bool(arguments, "transitive").unwrap_or(false);
-            let traversals = context.store.query_callees(&symbol, transitive)?;
-            serialize_json(&scope_core::stub::calls(symbol, transitive, traversals))
+            let envelope =
+                QueryEngine::new(&context.store).execute(QueryRequest::Calls(CallsQuery {
+                    symbol,
+                    transitive: optional_bool(arguments, "transitive").unwrap_or(false),
+                }))?;
+            serialize_json(&envelope)
         })
     }) {
         Ok(output) => output,
@@ -967,9 +1019,12 @@ fn dispatch_callers(arguments: &Value) -> String {
     let symbol = required_string(arguments, "symbol");
     match symbol.and_then(|symbol| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let transitive = optional_bool(arguments, "transitive").unwrap_or(false);
-            let traversals = context.store.query_callers(&symbol, transitive)?;
-            serialize_json(&scope_core::stub::callers(symbol, transitive, traversals))
+            let envelope =
+                QueryEngine::new(&context.store).execute(QueryRequest::Callers(CallsQuery {
+                    symbol,
+                    transitive: optional_bool(arguments, "transitive").unwrap_or(false),
+                }))?;
+            serialize_json(&envelope)
         })
     }) {
         Ok(output) => output,
@@ -983,14 +1038,14 @@ fn dispatch_impact(arguments: &Value) -> String {
     match target.and_then(|target| {
         change_type.and_then(|change_type| {
             bootstrap_from_arguments(arguments).and_then(|context| {
-                let depth = optional_usize(arguments, "depth")?;
-                let impacted = context.store.query_impact(&target, &change_type, depth)?;
-                serialize_json(&scope_core::stub::impact(
-                    target,
-                    change_type,
-                    depth,
-                    impacted,
-                ))
+                let envelope = QueryEngine::new(&context.store).execute(QueryRequest::Impact(
+                    ImpactQuery {
+                        target,
+                        change_type,
+                        depth: optional_usize(arguments, "depth")?,
+                    },
+                ))?;
+                serialize_json(&envelope)
             })
         })
     }) {
@@ -1003,10 +1058,13 @@ fn dispatch_explain(arguments: &Value) -> String {
     let target = required_string(arguments, "target");
     match target.and_then(|target| {
         bootstrap_from_arguments(arguments).and_then(|context| {
-            let to = optional_string(arguments, "to");
-            let depth = optional_usize(arguments, "depth")?;
-            let traversals = context.store.query_explain(&target, to.as_deref(), depth)?;
-            serialize_json(&scope_core::stub::explain(target, to, depth, traversals))
+            let envelope =
+                QueryEngine::new(&context.store).execute(QueryRequest::Explain(ExplainQuery {
+                    target,
+                    to: optional_string(arguments, "to"),
+                    depth: optional_usize(arguments, "depth")?,
+                }))?;
+            serialize_json(&envelope)
         })
     }) {
         Ok(output) => output,
@@ -1020,9 +1078,13 @@ fn dispatch_why(arguments: &Value) -> String {
     match from.and_then(|from| {
         to.and_then(|to| {
             bootstrap_from_arguments(arguments).and_then(|context| {
-                let depth = optional_usize(arguments, "depth")?;
-                let path = context.store.query_why(&from, &to, depth)?;
-                serialize_json(&scope_core::stub::why(from, to, depth, path))
+                let envelope =
+                    QueryEngine::new(&context.store).execute(QueryRequest::Why(WhyQuery {
+                        from,
+                        to,
+                        depth: optional_usize(arguments, "depth")?,
+                    }))?;
+                serialize_json(&envelope)
             })
         })
     }) {
@@ -1035,11 +1097,14 @@ fn dispatch_context(arguments: &Value) -> String {
     match required_string_array(arguments, "targets").and_then(|targets| {
         required_string(arguments, "change_type").and_then(|change_type| {
             bootstrap_from_arguments(arguments).and_then(|context| {
-                let budget = optional_usize(arguments, "budget")?;
-                let result = context
-                    .store
-                    .query_context(&targets, &change_type, budget)?;
-                serialize_json(&scope_core::stub::context(result))
+                let envelope = QueryEngine::new(&context.store).execute(QueryRequest::Context(
+                    ContextQuery {
+                        targets,
+                        change_type,
+                        budget: optional_usize(arguments, "budget")?,
+                    },
+                ))?;
+                serialize_json(&envelope)
             })
         })
     }) {
@@ -2552,13 +2617,7 @@ mod tests {
             "string"
         );
         assert_eq!(query["inputSchema"]["properties"]["exprs"]["minItems"], 1);
-        assert_eq!(
-            query["inputSchema"]["anyOf"],
-            json!([
-                { "required": ["expr"] },
-                { "required": ["exprs"] }
-            ])
-        );
+        assert!(query["inputSchema"].get("anyOf").is_none());
         assert_eq!(query["inputSchema"]["additionalProperties"], false);
     }
 
@@ -2586,7 +2645,22 @@ mod tests {
         raw.extend_from_slice(&body);
 
         let mut cursor = io::Cursor::new(raw);
-        let message = read_message(&mut cursor).unwrap().unwrap();
+        let (message, framing) = read_message(&mut cursor, MessageFraming::Unknown)
+            .unwrap()
+            .unwrap();
+        assert_eq!(framing, MessageFraming::ContentLength);
+        assert_eq!(message["method"], "initialize");
+        assert_eq!(message["id"], 1);
+    }
+
+    #[test]
+    fn read_message_accepts_line_delimited_json() {
+        let raw = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n";
+        let mut cursor = io::Cursor::new(&raw[..]);
+        let (message, framing) = read_message(&mut cursor, MessageFraming::Unknown)
+            .unwrap()
+            .unwrap();
+        assert_eq!(framing, MessageFraming::LineDelimited);
         assert_eq!(message["method"], "initialize");
         assert_eq!(message["id"], 1);
     }
@@ -2614,6 +2688,21 @@ mod tests {
 
         assert!(is_exit_notification(&request));
         assert!(handle_message(&request).is_none());
+    }
+
+    #[test]
+    fn write_message_uses_line_delimited_json_when_requested() {
+        let mut output = Vec::new();
+        write_message(
+            &mut output,
+            &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            MessageFraming::LineDelimited,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.starts_with('{'));
+        assert!(rendered.ends_with("\n"));
+        assert!(!rendered.contains("Content-Length:"));
     }
 
     #[test]
