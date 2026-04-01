@@ -240,7 +240,7 @@ fn resolve_arguments(
         .map(|argument| argument.name.as_str())
         .collect::<Vec<_>>();
     for key in provided_args.keys() {
-        if !declared.iter().any(|name| *name == key.as_str()) {
+        if !declared.contains(&key.as_str()) {
             return Err(ScopeError::InvalidInput(format!(
                 "workflow '{}' does not declare argument '{}'",
                 workflow.id, key
